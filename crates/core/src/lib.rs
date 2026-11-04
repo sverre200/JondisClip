@@ -5,6 +5,7 @@
 pub mod audio_dsp;
 pub mod devices;
 pub mod hotkey;
+pub mod library;
 pub mod mic_check;
 pub mod paths;
 pub mod settings;

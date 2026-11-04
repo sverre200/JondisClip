@@ -55,3 +55,72 @@ export function heldModifiers(e: KeyboardEvent): string[] {
     (m): m is string => Boolean(m),
   );
 }
+
+/** 65.4 → "1:05", 3725 → "1:02:05". */
+export function clock(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+  const s = Math.floor(seconds);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
+/** Like `clock` with tenths ("0:12.4"), for precise positions. */
+export function clockPrecise(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
+  const tenths = Math.floor((seconds % 1) * 10);
+  return `${clock(seconds)}.${tenths}`;
+}
+
+/** "YYYY-MM-DD HH:MM:SS" (local) → Date. */
+export function parseLocal(stamp: string): Date {
+  const [d = "", t = "00:00:00"] = stamp.split(" ");
+  const [y = 1970, mo, da] = d.split("-").map(Number);
+  const [h, mi, s] = t.split(":").map(Number);
+  return new Date(y, (mo || 1) - 1, da || 1, h || 0, mi || 0, s || 0);
+}
+
+const DAY = 86_400_000;
+const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+
+/** Group heading for a clip's day: "Today", "Yesterday", "Monday 2 November", "2 November 2025". */
+export function dayLabel(stamp: string, now = new Date()): string {
+  const d = parseLocal(stamp);
+  const diff = Math.round((startOfDay(now) - startOfDay(d)) / DAY);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  const opts: Intl.DateTimeFormatOptions =
+    diff > 0 && diff < 7
+      ? { weekday: "long", day: "numeric", month: "long" }
+      : d.getFullYear() === now.getFullYear()
+        ? { day: "numeric", month: "long" }
+        : { day: "numeric", month: "long", year: "numeric" };
+  return d.toLocaleDateString(undefined, opts);
+}
+
+/** "17:47" (local clock time of a stamp). */
+export function timeOfDay(stamp: string): string {
+  return stamp.slice(11, 16);
+}
+
+/** "Today 17:47", "Yesterday 09:02", "3 Nov 17:47". */
+export function whenShort(stamp: string, now = new Date()): string {
+  const day = dayLabel(stamp, now);
+  if (day === "Today" || day === "Yesterday") return `${day} ${timeOfDay(stamp)}`;
+  const d = parseLocal(stamp);
+  return `${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })} ${timeOfDay(stamp)}`;
+}
+
+/** Codec fourcc → name. */
+export function codecName(fourcc: string): string {
+  if (fourcc === "avc1" || fourcc === "avc3") return "H.264";
+  if (fourcc === "hvc1" || fourcc === "hev1") return "HEVC";
+  if (fourcc === "av01") return "AV1";
+  return fourcc;
+}
+
+/** True if a key event comes from inside an element matching `selector`. */
+export function fromWithin(e: Event, selector: string): boolean {
+  return e.target instanceof Element && e.target.closest(selector) !== null;
+}

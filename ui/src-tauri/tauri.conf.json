@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "JondisClip",
-        "width": 820,
-        "height": 720,
-        "minWidth": 640,
-        "minHeight": 520,
+        "width": 1180,
+        "height": 780,
+        "minWidth": 720,
+        "minHeight": 540,
         "theme": "Dark",
         "backgroundColor": "#121316",
         "visible": false,
@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset:; media-src 'self' data:; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://clip.localhost; media-src 'self' data: http://clip.localhost; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {

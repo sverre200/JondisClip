@@ -1,10 +1,11 @@
-//! JondisClip settings window (ADR-0008). It's a separate process the tray
+//! JondisClip window: clip library and settings (ADR-0008, ADR-0010). It's a separate process the tray
 //! starts on demand and that exits on close, so it costs nothing while gaming.
 //!
 //! Talks to the tray through files only: it writes `settings.toml` (the tray
 //! applies it within 2 s) and reads `status.json` (published by the tray).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod library;
 mod meter;
 
 use std::path::PathBuf;
@@ -212,6 +213,78 @@ fn open_folder(path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Page to open first: `--settings` from the tray's "Settings…", else the library.
+#[tauri::command]
+fn initial_page() -> &'static str {
+    if std::env::args().any(|a| a == "--settings") {
+        "settings"
+    } else {
+        "library"
+    }
+}
+
+/// Lists the clips in the save folder (reads headers only for new or changed files).
+#[tauri::command]
+async fn library_scan() -> Result<library::LibraryView, String> {
+    let (settings, _) = read_settings();
+    let root = settings.save_dir_or(&paths::default_save_dir());
+    tauri::async_runtime::spawn_blocking(move || library::in_background(|| library::scan(root)))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Stores a thumbnail the page drew. Body: JPEG bytes; header `x-clip-id`.
+#[tauri::command]
+fn thumb_save(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let id = request
+        .headers()
+        .get("x-clip-id")
+        .and_then(|v| v.to_str().ok())
+        .ok_or("missing clip id")?;
+    match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => {
+            library::in_background(|| library::save_thumb(id, bytes))
+        }
+        _ => Err("expected raw JPEG bytes".into()),
+    }
+}
+
+/// Opens Explorer with the clip selected.
+#[tauri::command]
+fn show_in_folder(id: String) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let path = library::path_of(&id)?;
+    std::process::Command::new("explorer")
+        .raw_arg(format!("/select,\"{}\"", path.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Opens the clip in the default video player.
+#[tauri::command]
+fn open_external(id: String) -> Result<(), String> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let path = library::path_of(&id)?;
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &HSTRING::from(path.as_os_str()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecute returns a value > 32 on success.
+    if r.0 as usize > 32 {
+        Ok(())
+    } else {
+        Err("Windows couldn't open the clip (no video player set?)".into())
+    }
+}
+
 /// Starts the tray app (jondisclip.exe next to this exe) if it isn't running.
 #[tauri::command]
 fn start_tray() -> Result<(), String> {
@@ -246,6 +319,10 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .register_asynchronous_uri_scheme_protocol("clip", |_ctx, request, responder| {
+            // File reads happen off the webview thread, on a small fixed pool.
+            library::enqueue(request, responder);
+        })
         .setup(|app| {
             // Safety net: the page reveals the window when it has rendered. If
             // that never happens (script error, stalled load), show it anyway
@@ -271,7 +348,12 @@ fn main() {
             update,
             check_hotkey,
             open_folder,
-            start_tray
+            start_tray,
+            initial_page,
+            library_scan,
+            thumb_save,
+            show_in_folder,
+            open_external
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the JondisClip window");

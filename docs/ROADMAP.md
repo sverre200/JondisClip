@@ -54,7 +54,20 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
   - Opened by left-clicking the tray icon or choosing Settings….
   - Verified: browser preview (interactions, validation, 640×520 minimum size) and the real window (live data, single instance). After closing, 0 processes remain.
   - Not yet clicked by hand in the real window: the folder picker and changing a setting there (the merge logic is unit-tested and the tray's file reload was verified earlier).
-- [ ] Library window: grid, thumbnails, player, rename, delete to the Recycle Bin, open folder, copy path.
+- [x] **Clip library, stage 1** (2026-11-04, ADR-0010): Library and Settings pages in `jondisclip-ui.exe`. The tray's left-click opens the library, "Settings…" opens settings, and there's a new "Clip library" menu item.
+  - Grid with lazy thumbnails (only on-screen cards, one decode at a time, cached as JPEG, dark frames skipped). It's grouped by day and filtered by game, with search, four sorts, keyboard navigation and a selection bar (Open, Show in folder, Open in player).
+  - The player has play/pause, a seek bar (coalesced seeks while dragging), J/K/L, arrow and frame keys, and previous/next clip. It pauses when the window loses focus.
+  - Unreadable clips are listed with a reason. HEVC without the codec extension falls back to "Open in default player".
+  - Verified:
+    - 20 Rust tests: discovery and sorting, odd names and paths, broken files, the thumbnail cache, range serving, read-only originals.
+    - Browser preview of all states.
+    - The real window on 6 real clips: thumbnails, playback, seeks of 5–128 ms in a 661 MB clip, Esc back.
+    - After closing, 0 UI processes remain and the tray keeps recording.
+  - **Not verified:** a long library (1000+ clips) and the FPS impact of playing a clip while a game records. The player pauses on blur, so this needs a `/perf-benchmark` run.
+- [ ] **Stage 2: editor.** Trim handles on the player's timeline, trimmed duration and size estimate, and non-destructive export. Stream copy when the cut falls on keyframes, and a smart re-encode of the edges otherwise (to be decided in a new ADR). Runs as an FFmpeg child process at below-normal priority, one job at a time.
+- [ ] **Stage 3: Discord.** A size-targeted H.264 export (default about 19 MB, configurable) with Mix audio only. It checks the final size and copies the file to the clipboard (`CF_HDROP`, ADR-0004).
+- [ ] **Stage 4: Google Drive.** An optional synced-folder destination and "Save to Drive" (copy or export, with checks for free space and an unavailable destination). It never claims the upload finished.
+- [ ] Later: rename, delete to the Recycle Bin, copy path. If the window is already open, "Settings…" should switch its page (today it only focuses the window).
 Tauri window with Library (grid, thumbnails, player, rename, delete to the Recycle Bin, open folder, copy path), Recording status and Settings. Trim with stream copy, and a share export.
 
 ## Phase 5: Sharing and cloud

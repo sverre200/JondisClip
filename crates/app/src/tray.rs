@@ -61,6 +61,7 @@ const ID_MIC: u32 = 102;
 const ID_OPEN_FOLDER: u32 = 103;
 const ID_EDIT_SETTINGS: u32 = 104;
 const ID_QUIT: u32 = 105;
+const ID_LIBRARY: u32 = 106;
 const ID_REPLAY_BASE: u32 = 200;
 
 /// Free space below which buffering pauses, and above which it resumes.
@@ -277,8 +278,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if event == WM_CONTEXTMENU {
                 show_menu(hwnd);
             } else if event == NIN_SELECT || event == (NIN_SELECT | NINF_KEY) {
-                // Left click / Enter opens the app window.
-                with_app(App::open_settings);
+                // Left click / Enter opens the clip library.
+                with_app(|a| a.open_ui(false));
             }
             LRESULT(0)
         }
@@ -914,6 +915,12 @@ impl App {
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
+                ID_LIBRARY as usize,
+                &menu_text("Clip library"),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
                 ID_OPEN_FOLDER as usize,
                 &menu_text("Open clips folder"),
             );
@@ -970,7 +977,8 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 shell_open(&dir.to_string_lossy(), None);
             }
-            ID_EDIT_SETTINGS => self.open_settings(),
+            ID_EDIT_SETTINGS => self.open_ui(true),
+            ID_LIBRARY => self.open_ui(false),
             ID_QUIT => unsafe {
                 let _ = DestroyWindow(self.hwnd);
             },
@@ -1022,10 +1030,11 @@ impl App {
         self.published = Some(status);
     }
 
-    /// Starts the settings window (`jondisclip-ui.exe` next to this exe). The
-    /// window is its own process: it costs nothing until opened and exits on
-    /// close. A second launch just focuses the open window.
-    fn open_settings(&mut self) {
+    /// Starts the library/settings window (`jondisclip-ui.exe` next to this
+    /// exe), on the settings page if `settings`. The window is its own process:
+    /// it costs nothing until opened and exits on close. A second launch just
+    /// focuses the open window.
+    fn open_ui(&mut self, settings: bool) {
         let ui = std::env::current_exe()
             .ok()
             .and_then(|e| e.parent().map(|d| d.join("jondisclip-ui.exe")));
@@ -1038,15 +1047,19 @@ impl App {
                         windows::Win32::UI::WindowsAndMessaging::ASFW_ANY,
                     );
                 }
-                if let Err(e) = std::process::Command::new(&ui).spawn() {
+                let mut cmd = std::process::Command::new(&ui);
+                if settings {
+                    cmd.arg("--settings");
+                }
+                if let Err(e) = cmd.spawn() {
                     error!("could not start {}: {e}", ui.display());
-                    self.balloon("Couldn't open settings", &e.to_string(), true);
+                    self.balloon("Couldn't open JondisClip", &e.to_string(), true);
                 }
             }
             _ => {
                 warning!("jondisclip-ui.exe not found next to the tray app");
                 self.balloon(
-                    "Settings window missing",
+                    "JondisClip window missing",
                     "jondisclip-ui.exe wasn't found next to jondisclip.exe.",
                     true,
                 );

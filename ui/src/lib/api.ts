@@ -26,6 +26,34 @@ export interface Settings {
   start_with_windows: boolean;
 }
 
+export interface Probe {
+  duration: number;
+  width: number;
+  height: number;
+  /** "avc1" (H.264), "hvc1"/"hev1" (HEVC), "av01" (AV1) */
+  codec: string;
+  audio_tracks: number;
+}
+
+export interface Clip {
+  /** Stable while the file is unchanged; also the thumbnail key */
+  id: string;
+  path: string;
+  file_name: string;
+  game: string;
+  /** Local "YYYY-MM-DD HH:MM:SS" */
+  recorded: string;
+  size: number;
+  probe: Probe | null;
+  error: string | null;
+  thumb: boolean;
+}
+
+export interface LibraryView {
+  root: string;
+  clips: Clip[];
+}
+
 export interface TrayStatus {
   state: "recording" | "paused" | "sleeping" | "low_disk" | "restarting" | string;
   summary: string;
@@ -101,7 +129,25 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   return mock(cmd, args) as Promise<T>;
 }
 
+/** Base of the `clip:` protocol (Windows WebView2 form). */
+const CLIP_BASE = "http://clip.localhost";
+
+export const clipUrl = (id: string) => (isDesktop ? `${CLIP_BASE}/v/${id}` : "/dev-media/sample.mp4");
+export const thumbUrl = (id: string) => (isDesktop ? `${CLIP_BASE}/t/${id}.jpg` : (mockThumbs.get(id) ?? ""));
+
 export const api = {
+  initialPage: () => call<"library" | "settings">("initial_page"),
+  libraryScan: () => call<LibraryView>("library_scan"),
+  showInFolder: (id: string) => call<void>("show_in_folder", { id }),
+  openExternal: (id: string) => call<void>("open_external", { id }),
+  async thumbSave(id: string, jpeg: Uint8Array): Promise<void> {
+    if (!isDesktop) {
+      mockThumbs.set(id, URL.createObjectURL(new Blob([jpeg as BlobPart], { type: "image/jpeg" })));
+      return;
+    }
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("thumb_save", jpeg, { headers: { "x-clip-id": id } });
+  },
   load: () => call<Snapshot>("load"),
   trayStatus: () => call<TrayView>("tray_status"),
   update: (patch: Partial<Settings>) => call<Settings>("update", { patch }),
@@ -132,6 +178,34 @@ export const api = {
 };
 
 // ---------- browser-preview mock (never used in the desktop app) ----------
+
+const mockThumbs = new Map<string, string>();
+
+function mockClips(): Clip[] {
+  const games = ["DayZ", "DayZ", "DayZ", "Escape From Tarkov", "DayZ", "Counter-Strike 2", "Escape From Tarkov", "DayZ"];
+  const now = new Date();
+  const out: Clip[] = [];
+  for (let i = 0; i < 23; i++) {
+    const d = new Date(now.getTime() - i * 5.3 * 3600_000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const game = games[i % games.length] ?? "DayZ";
+    const broken = i === 6;
+    const duration = i % 4 === 1 ? 42.7 : i % 5 === 2 ? 18.2 : 300.4;
+    out.push({
+      id: (0x1000 + i).toString(16).padStart(16, "0"),
+      path: `C:\Users\you\Videos\JondisClip\${game}\${game} ${stamp.replaceAll(":", "-")}.mp4`,
+      file_name: `${game} ${stamp.replaceAll(":", "-")}.mp4`,
+      game,
+      recorded: stamp,
+      size: Math.round(duration * 2.2e6),
+      probe: broken ? null : { duration, width: 1920, height: 1080, codec: "avc1", audio_tracks: 3 },
+      error: broken ? "the file is cut off (incomplete recording?)" : null,
+      thumb: false,
+    });
+  }
+  return out;
+}
 
 const mockState: Snapshot = {
   settings: {
@@ -178,6 +252,12 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
   switch (cmd) {
     case "load":
       return structuredClone(mockState);
+    case "initial_page":
+      return new URLSearchParams(location.search).get("page") === "settings" ? "settings" : "library";
+    case "library_scan":
+      await new Promise((r) => setTimeout(r, 300));
+      if (new URLSearchParams(location.search).has("empty")) return { root: mockState.default_save_dir, clips: [] };
+      return { root: mockState.default_save_dir, clips: mockClips() };
     case "tray_status":
       return structuredClone(mockState.tray);
     case "update":

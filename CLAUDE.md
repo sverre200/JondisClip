@@ -6,7 +6,8 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
 - `crates/engine`: video and audio replay pipeline.
 - `crates/app`: `jondisclip.exe`, the tray app with hotkey and supervisor.
 - `crates/core`: shared settings, hotkey, paths and status.
-- `ui/` + `ui/src-tauri`: `jondisclip-ui.exe`, the settings window (Tauri 2 + Svelte 5, separate process, ADR-0008). See ROADMAP Phase 2 for status. Next up: a real-game test (DayZ), crash recovery, then Phase 3 perf benchmarks.
+- `ui/` + `ui/src-tauri`: `jondisclip-ui.exe`, the clip library and settings window (Tauri 2 + Svelte 5, separate process, ADR-0008/0010). Library stage 1 (browse, thumbnails, player) is done. Next: stage 2 editor (trim/export), stage 3 Discord export, stage 4 Drive folder (ROADMAP Phase 4).
+- To drive the real window in tests, launch it with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333` and use the DevTools protocol. Synthetic mouse input doesn't reach it from the agent shell.
 
 ## Read first
 - `docs/ARCHITECTURE.md`: components, processes, threads and data flow
