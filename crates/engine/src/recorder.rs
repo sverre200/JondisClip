@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ffmpeg_next::Packet;
+use ffmpeg_next::{Packet, Rational};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Com::CoIncrementMTAUsage;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -26,6 +26,7 @@ use windows::Win32::System::Threading::{
     WaitForSingleObject,
 };
 
+use crate::audio::{self, AudioConfig, AudioError, AudioPipeline, Clock, SAMPLE_RATE};
 use crate::capture::{Capture, CaptureShared};
 use crate::clip::{self, ClipError};
 use crate::convert::{Converter, output_size};
@@ -33,7 +34,7 @@ use crate::encoder::{self, Codec, EncoderId};
 use crate::gpu::Gpu;
 use crate::hwenc::{EncodeSettings, HwEncError, HwEncoder};
 use crate::ring::{Ring, RingError};
-use crate::segment::{self, SegmentWriter, WriterError, WriterMsg};
+use crate::segment::{self, SegmentWriter, StreamSpec, WriterError, WriterMsg};
 
 #[derive(Debug, Clone)]
 pub struct RecorderConfig {
@@ -48,6 +49,7 @@ pub struct RecorderConfig {
     pub segment_seconds: u32,
     /// Parent of the per-session buffer directory.
     pub buffer_dir: PathBuf,
+    pub audio: AudioConfig,
 }
 
 /// `%LOCALAPPDATA%\JondisClip\buffer` (ARCHITECTURE.md), falling back to %TEMP%.
@@ -84,6 +86,7 @@ impl Default for RecorderConfig {
             replay: Duration::from_secs(300),
             segment_seconds: 2,
             buffer_dir: default_buffer_dir(),
+            audio: AudioConfig::default(),
         }
     }
 }
@@ -118,6 +121,8 @@ pub enum RecorderError {
     NotRunning,
     #[error("a recorder thread panicked")]
     Panicked,
+    #[error("audio: {0}")]
+    Audio(#[from] AudioError),
 }
 
 /// What's actually being recorded (shown on the Recording page).
@@ -130,6 +135,10 @@ pub struct RecorderInfo {
     pub fps: u32,
     pub bitrate: u64,
     pub session_dir: PathBuf,
+    /// Audio track titles, in stream order (empty = no audio).
+    pub audio_tracks: Vec<&'static str>,
+    /// Why audio is off, if it failed to start.
+    pub audio_error: Option<String>,
 }
 
 #[derive(Default)]
@@ -151,6 +160,14 @@ pub struct Stats {
     pub packets_dropped: u64,
     pub buffered_us: i64,
     pub buffer_bytes: u64,
+    /// 1024-sample audio blocks encoded (per track).
+    pub audio_blocks: u64,
+    /// Audio packets dropped (writer queue full).
+    pub audio_dropped: u64,
+    /// Times an audio device was reopened (unplugged, default changed).
+    pub audio_reopens: u64,
+    /// Audio frames skipped because the mixer fell behind (sleep/resume).
+    pub audio_skipped_frames: u64,
 }
 
 struct Control {
@@ -167,6 +184,7 @@ pub struct Recorder {
     ring: Arc<Mutex<Ring>>,
     encode_thread: Option<JoinHandle<Result<(), RecorderError>>>,
     writer_thread: Option<JoinHandle<Result<(), WriterError>>>,
+    audio: Option<AudioPipeline>,
 }
 
 impl Recorder {
@@ -222,13 +240,44 @@ impl Recorder {
             force_keyframe: AtomicBool::new(false),
         });
         let counters = Arc::new(Counters::default());
-        // About 8 s of packets at 60 fps: absorbs disk hiccups without blocking the encoder.
-        let (tx, rx) = mpsc::sync_channel::<WriterMsg>(512);
+        // Video (60/s) plus up to 3 audio tracks (~141/s): about 7 s of headroom
+        // for disk hiccups without ever blocking an encoder.
+        let (tx, rx) = mpsc::sync_channel::<WriterMsg>(1536);
 
+        // One clock for video and audio: frame n and sample s both count from here.
+        let mut freq = 0;
+        unsafe { QueryPerformanceFrequency(&mut freq)? };
+        let clock = Clock {
+            epoch: Clock::now_qpc(),
+            freq,
+        };
+        // Audio problems never stop video recording: fall back to video-only.
+        let (audio_setup, audio_error) = match audio::start(cfg.audio, clock, tx.clone()) {
+            Ok(a) => (a, None),
+            Err(e) => (
+                audio::AudioSetup {
+                    pipeline: None,
+                    streams: Vec::new(),
+                },
+                Some(e.to_string()),
+            ),
+        };
+        let audio_tracks = if audio_setup.pipeline.is_some() {
+            cfg.audio.track_names()
+        } else {
+            Vec::new()
+        };
+        let mut streams = vec![StreamSpec {
+            params: enc.parameters(),
+            time_base: enc.time_base,
+        }];
+        streams.extend(audio_setup.streams.iter().map(|p| StreamSpec {
+            params: p.clone(),
+            time_base: Rational::new(1, SAMPLE_RATE as i32),
+        }));
         let writer = SegmentWriter::new(
             session_dir.clone(),
-            enc.parameters(),
-            enc.time_base,
+            streams,
             i64::from(cfg.fps * cfg.segment_seconds),
             ring.clone(),
         );
@@ -248,6 +297,7 @@ impl Recorder {
             ctl: ctl.clone(),
             counters: counters.clone(),
             fps: cfg.fps,
+            epoch: clock.epoch,
         };
         let enc_tx = tx.clone();
         let encode_thread = thread::Builder::new()
@@ -255,7 +305,10 @@ impl Recorder {
             .spawn(move || {
                 set_priority(THREAD_PRIORITY_ABOVE_NORMAL);
                 let result = job.run(&enc_tx);
-                let _ = enc_tx.send(WriterMsg::Stop);
+                // Close the open segment so pending saves are answered now,
+                // not after a timeout. Stop is sent by shutdown() once audio
+                // has flushed too.
+                let _ = enc_tx.send(WriterMsg::NewRun);
                 result
             })?;
 
@@ -267,6 +320,8 @@ impl Recorder {
             fps: cfg.fps,
             bitrate,
             session_dir,
+            audio_tracks,
+            audio_error,
         };
         Ok(Self {
             info,
@@ -277,6 +332,7 @@ impl Recorder {
             ring,
             encode_thread: Some(encode_thread),
             writer_thread: Some(writer_thread),
+            audio: audio_setup.pipeline,
         })
     }
 
@@ -300,6 +356,22 @@ impl Recorder {
             packets_dropped: self.counters.packets_dropped.load(Ordering::Relaxed),
             buffered_us,
             buffer_bytes,
+            audio_blocks: self
+                .audio
+                .as_ref()
+                .map_or(0, |a| a.counters.blocks_encoded.load(Ordering::Relaxed)),
+            audio_dropped: self
+                .audio
+                .as_ref()
+                .map_or(0, |a| a.counters.packets_dropped.load(Ordering::Relaxed)),
+            audio_skipped_frames: self
+                .audio
+                .as_ref()
+                .map_or(0, |a| a.counters.frames_skipped.load(Ordering::Relaxed)),
+            audio_reopens: self
+                .audio
+                .as_ref()
+                .map_or(0, |a| a.counters.device_reopens.load(Ordering::Relaxed)),
         }
     }
 
@@ -328,12 +400,13 @@ impl Recorder {
         let ring = self.ring.clone();
         let ctl = self.ctl.clone();
         let dir = self.info.session_dir.clone();
+        let names = self.info.audio_tracks.clone();
         let len_us = len.as_micros() as i64;
         let spawn = thread::Builder::new()
             .name("jc-save".into())
             .spawn(move || {
                 set_priority(THREAD_MODE_BACKGROUND_BEGIN);
-                save_job(tx, ring, &ctl, &dir, len_us, &out)
+                save_job(tx, ring, &ctl, &dir, len_us, &out, &names)
             });
         match spawn {
             Ok(h) => h,
@@ -356,6 +429,10 @@ impl Recorder {
             Some(t) => t.join().unwrap_or(Err(RecorderError::Panicked)),
             None => Ok(()),
         };
+        // Flush audio while the writer is still running, so the tail is kept.
+        if let Some(mut a) = self.audio.take() {
+            a.stop();
+        }
         let stats = self.stats();
         self.capture = None; // stops WGC
         // The encode thread normally sends Stop. Send it again in case it
@@ -397,6 +474,7 @@ fn save_job(
     dir: &Path,
     len_us: i64,
     out: &Path,
+    audio_names: &[&str],
 ) -> Result<Vec<PathBuf>, RecorderError> {
     let (reply_tx, reply_rx) = mpsc::channel();
     tx.send(WriterMsg::Save {
@@ -420,7 +498,7 @@ fn save_job(
                 .map(|s| segment::segment_path(dir, s.seq))
                 .collect();
             let path = clip::run_output_path(out, i);
-            clip::concat_to_mp4(&inputs, &path)?;
+            clip::concat_to_mp4(&inputs, &path, audio_names)?;
             written.push(path);
         }
         Ok(written)
@@ -454,6 +532,8 @@ struct EncodeJob {
     ctl: Arc<Control>,
     counters: Arc<Counters>,
     fps: u32,
+    /// Shared QPC epoch. Frame n is due at epoch + n/fps, matching audio.
+    epoch: i64,
 }
 
 /// Hands packets to the writer without ever blocking. If the queue is full,
@@ -502,8 +582,10 @@ impl EncodeJob {
             skip_to_key: false,
             writer_gone: false,
         };
-        let mut start = pacer.now();
-        let mut n: i64 = 0;
+        // Frame indices are tied to the shared clock (not to when the first
+        // frame arrived), so video pts and audio sample indices line up.
+        let start = self.epoch;
+        let mut n: i64 = pacer.frames_behind(start, 0);
         let mut result = Ok(());
         let stall_frames = i64::from(self.fps); // 1 s
         while !self.ctl.stop.load(Ordering::Acquire) {
@@ -531,7 +613,8 @@ impl EncodeJob {
                     result = Err(RecorderError::WriterGone);
                     break;
                 }
-                start = pacer.rebase(n);
+                // Stay on the shared clock: jump ahead, don't rebase.
+                n += late;
                 self.ctl.force_keyframe.store(true, Ordering::Release);
             } else if late >= 2 {
                 self.counters
@@ -619,11 +702,6 @@ impl Pacer {
 
     fn deadline(&self, start: i64, n: i64) -> i64 {
         start + ((i128::from(n) * i128::from(self.freq)) / i128::from(self.fps)) as i64
-    }
-
-    /// A new `start` that makes frame `n` due now (after a stall).
-    fn rebase(&self, n: i64) -> i64 {
-        self.now() - ((i128::from(n) * i128::from(self.freq)) / i128::from(self.fps)) as i64
     }
 
     fn wait_until(&self, start: i64, n: i64) {

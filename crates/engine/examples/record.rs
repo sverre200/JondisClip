@@ -1,11 +1,12 @@
 //! Headless replay-buffer test: records the primary monitor, saves the last
 //! N seconds as an MP4, and prints pipeline and process stats.
 //!
-//! `cargo run --release -p jondisclip-engine --example record -- [record_s] [save_s] [out_dir] [height]`
+//! `cargo run --release -p jondisclip-engine --example record -- [record_s] [save_s] [out_dir] [height|-] [mic]`
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use jondisclip_engine::audio::AudioConfig;
 use jondisclip_engine::recorder::{Recorder, RecorderConfig};
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -46,11 +47,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("JondisClip"));
     let height: Option<u32> = args.get(4).and_then(|s| s.parse().ok());
+    let mic = args.get(5).is_some_and(|s| s == "mic");
     std::fs::create_dir_all(&out_dir)?;
 
     let cfg = RecorderConfig {
         replay: Duration::from_secs(save_s.max(1) + 4),
         output_height: height,
+        audio: AudioConfig {
+            mic,
+            ..Default::default()
+        },
         ..Default::default()
     };
     let t0 = Instant::now();
@@ -66,7 +72,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i.bitrate as f64 / 1e6,
         t0.elapsed()
     );
-    println!("buffer: {}", i.session_dir.display());
+    println!(
+        "buffer: {} | audio tracks: {:?}",
+        i.session_dir.display(),
+        i.audio_tracks
+    );
 
     let cpu0 = cpu_time();
     let wall0 = Instant::now();
@@ -80,14 +90,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cpu_pct = (cpu_time() - cpu0).as_secs_f64() / wall0.elapsed().as_secs_f64() / cores * 100.0;
     let s = rec.stats();
     println!(
-        "steady state: CPU {cpu_pct:.2}% of machine, working set {:.0} MB | arrived {} encoded {} late {} dropped {} | buffered {:.1}s / {:.1} MB",
+        "steady state: CPU {cpu_pct:.2}% of machine, working set {:.0} MB | arrived {} encoded {} late {} dropped {} | buffered {:.1}s / {:.1} MB | audio blocks {} dropped {} reopens {}",
         working_set_mb(),
         s.frames_arrived,
         s.frames_encoded,
         s.frames_late,
         s.packets_dropped,
         s.buffered_us as f64 / 1e6,
-        s.buffer_bytes as f64 / 1_048_576.0
+        s.buffer_bytes as f64 / 1_048_576.0,
+        s.audio_blocks,
+        s.audio_dropped,
+        s.audio_reopens
     );
 
     // Save half a GOP off the 1 s keyframe grid so the forced-IDR cut is observable.

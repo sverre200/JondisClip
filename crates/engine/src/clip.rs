@@ -1,11 +1,15 @@
 //! Clip finalisation: concatenates pinned TS segments into one MP4 with stream
 //! copy, so there's no re-encode (reference: `/clip-ops`, "Finalise a clip").
+//! Every stream is kept: video, plus audio tracks with titles. Track 1 is the
+//! default track, which players and Discord use.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ffmpeg::{Dictionary, Rational, codec, format, media};
+use ffmpeg::{Dictionary, Rational, Rescale, codec, format, media};
 use ffmpeg_next as ffmpeg;
+
+const MICROS: Rational = Rational(1, 1_000_000);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClipError {
@@ -25,12 +29,15 @@ const fn mktag(a: u8, b: u8, c: u8, d: u8) -> u32 {
 
 /// Writes `inputs` (same capture run, in order) into `out` as an MP4 with
 /// faststart. It's written to a temporary name and renamed when complete, so the
-/// library never sees a half-written clip.
-pub fn concat_to_mp4(inputs: &[PathBuf], out: &Path) -> Result<(), ClipError> {
+/// library never sees a half-written clip. `audio_names[i]` titles audio stream `i + 1`.
+pub fn concat_to_mp4(
+    inputs: &[PathBuf],
+    out: &Path,
+    audio_names: &[&str],
+) -> Result<(), ClipError> {
     let first_path = inputs.first().ok_or(ClipError::Empty)?;
     let tmp = out.with_extension("mp4.partial");
-    let result = write(inputs, first_path, &tmp);
-    match result {
+    match write(inputs, first_path, &tmp, audio_names) {
         Ok(()) => {
             fs::rename(&tmp, out)?;
             Ok(())
@@ -42,17 +49,39 @@ pub fn concat_to_mp4(inputs: &[PathBuf], out: &Path) -> Result<(), ClipError> {
     }
 }
 
-fn write(inputs: &[PathBuf], first_path: &Path, tmp: &Path) -> Result<(), ClipError> {
-    let first = format::input(first_path)?;
-    let ist = first
+/// Timestamp (µs) of the first video packet, which becomes the clip's time 0.
+fn first_video_us(path: &Path) -> Result<i64, ClipError> {
+    let mut ictx = format::input(path)?;
+    let vidx = ictx
         .streams()
         .best(media::Type::Video)
-        .ok_or_else(|| ClipError::NoVideo(first_path.into()))?;
-    let params = ist.parameters();
-    let is_hevc = params.id() == codec::Id::HEVC;
+        .map(|s| s.index())
+        .ok_or_else(|| ClipError::NoVideo(path.into()))?;
+    for (stream, pkt) in ictx.packets() {
+        if stream.index() == vidx
+            && let Some(t) = pkt.dts().or(pkt.pts())
+        {
+            return Ok(t.rescale(stream.time_base(), MICROS));
+        }
+    }
+    Err(ClipError::NoVideo(path.into()))
+}
 
+fn write(
+    inputs: &[PathBuf],
+    first_path: &Path,
+    tmp: &Path,
+    audio_names: &[&str],
+) -> Result<(), ClipError> {
+    let base_us = first_video_us(first_path)?;
+    let first = format::input(first_path)?;
     let mut octx = format::output_as(tmp, "mp4")?;
-    {
+    let mut audio_seen = 0usize;
+    let mut kinds = Vec::new();
+    for ist in first.streams() {
+        let params = ist.parameters();
+        let kind = params.medium();
+        let is_hevc = params.id() == codec::Id::HEVC;
         let mut ost = octx.add_stream(ffmpeg::encoder::find(codec::Id::None))?;
         ost.set_parameters(params);
         // hvc1 is the tag browsers/WebView2 and Apple players expect for HEVC.
@@ -61,33 +90,51 @@ fn write(inputs: &[PathBuf], first_path: &Path, tmp: &Path) -> Result<(), ClipEr
         } else {
             0
         };
-        unsafe { (*ost.parameters().as_mut_ptr()).codec_tag = tag };
+        unsafe {
+            (*ost.parameters().as_mut_ptr()).codec_tag = tag;
+            (*ost.as_mut_ptr()).disposition = 0;
+        }
+        if kind == media::Type::Audio {
+            let mut md = Dictionary::new();
+            if let Some(name) = audio_names.get(audio_seen) {
+                md.set("title", name);
+                md.set("handler_name", name);
+            }
+            ost.set_metadata(md);
+            if audio_seen == 0 {
+                unsafe { (*ost.as_mut_ptr()).disposition = ffmpeg::ffi::AV_DISPOSITION_DEFAULT };
+            }
+            audio_seen += 1;
+        } else if kind == media::Type::Video {
+            unsafe { (*ost.as_mut_ptr()).disposition = ffmpeg::ffi::AV_DISPOSITION_DEFAULT };
+        }
+        kinds.push(kind);
     }
     drop(first);
     let mut opts = Dictionary::new();
     opts.set("movflags", "+faststart");
     octx.write_header_with(opts)?;
-    let out_tb = octx
-        .stream(0)
-        .map(|s| s.time_base())
-        .unwrap_or(Rational::new(1, 90_000));
+    let out_tbs: Vec<Rational> = octx.streams().map(|s| s.time_base()).collect();
 
-    let mut offset: Option<i64> = None;
     for path in inputs {
         let mut ictx = format::input(path)?;
-        let Some(vidx) = ictx.streams().best(media::Type::Video).map(|s| s.index()) else {
-            return Err(ClipError::NoVideo(path.clone()));
-        };
         for (stream, mut pkt) in ictx.packets() {
-            if stream.index() != vidx {
+            let i = stream.index();
+            let Some(&out_tb) = out_tbs.get(i) else {
+                continue;
+            };
+            let in_tb = stream.time_base();
+            let base = base_us.rescale(MICROS, in_tb);
+            let pts = pkt.pts().map(|p| p - base);
+            let dts = pkt.dts().map(|d| d - base);
+            // Audio from before the first video frame isn't part of the clip.
+            if kinds[i] == media::Type::Audio && pts.is_some_and(|p| p < 0) {
                 continue;
             }
-            let in_tb = stream.time_base();
-            let base = *offset.get_or_insert_with(|| pkt.dts().or(pkt.pts()).unwrap_or(0));
-            pkt.set_pts(pkt.pts().map(|p| p - base));
-            pkt.set_dts(pkt.dts().map(|d| d - base));
+            pkt.set_pts(pts);
+            pkt.set_dts(dts);
             pkt.rescale_ts(in_tb, out_tb);
-            pkt.set_stream(0);
+            pkt.set_stream(i);
             pkt.set_position(-1);
             pkt.write_interleaved(&mut octx)?;
         }

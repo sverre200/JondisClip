@@ -58,7 +58,10 @@ Audio thread: WASAPI process-loopback (game) + mic ──► resample/mix ──
 ## Audio
 
 - **Game/system audio:** WASAPI loopback. When a game is detected, we use **process loopback** (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`, Windows 10 2004+). This captures only the game and its child processes, so Discord voice is excluded if the user wants that.
-- **Microphone:** a separate WASAPI capture.
+- **Microphone:** a separate WASAPI capture of the default input. It's **off by default**.
+- **Clock:** video frame `n` and audio sample `s` both count from one QPC epoch taken at recorder start (`audio::Clock`). WASAPI packets are placed by their QPC position (20 ms resync tolerance). Gaps read as silence and late samples are dropped (`audio_buf::SourceBuf`).
+- **Mixer:** encodes 1024-sample blocks 100 ms behind real time, so every source has delivered. Loopback delivers nothing while the PC is silent, and the mixer fills silence.
+- **Muxing:** audio lags video by about 100 ms, so after a keyframe cut the old segment stays open until every audio stream passes the cut timestamp (or 500 ms passes). Only then does it enter the ring and serve saves. A save therefore takes about 0.4–0.5 s.
 - **Tracks:** track 1 is the mix (the only track players and Discord use), track 2 is game audio and track 3 is the mic. Keeping them separate lets the user remove the mic later without re-recording. Each extra track costs about 160 kb/s of AAC.
 
 ## Library
