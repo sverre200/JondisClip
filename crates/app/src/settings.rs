@@ -62,7 +62,7 @@ impl Quality {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CodecPref {
-    /// HEVC where available, else H.264 (ADR-0005).
+    /// H.264: plays everywhere with no extra codecs (ADR-0007).
     Auto,
     Hevc,
     H264,
@@ -153,7 +153,8 @@ impl Settings {
              # hotkey: e.g. \"Alt+F10\", \"Ctrl+Shift+S\", \"F8\"\n\
              # save_dir: empty = Videos\\JondisClip\n\
              # fps: 30, 60, 120, 144 | resolution: source, 720p, 1080p, 1440p\n\
-             # quality: performance, balanced, high | codec: auto, hevc, h264, av1\n\n{body}"
+             # quality: performance, balanced, high | codec: auto (= h264), h264, hevc, av1\n\
+             # (hevc/av1 need the paid HEVC extension or VLC to play on Windows)\n\n{body}"
         )
     }
 
@@ -179,8 +180,8 @@ impl Settings {
             fps: self.fps,
             output_height: self.resolution.height(),
             codec: match self.codec {
-                CodecPref::Auto | CodecPref::Hevc => Codec::Hevc,
-                CodecPref::H264 => Codec::H264,
+                CodecPref::Auto | CodecPref::H264 => Codec::H264,
+                CodecPref::Hevc => Codec::Hevc,
                 CodecPref::Av1 => Codec::Av1,
             },
             quality_scale: self.quality.scale(),
@@ -250,6 +251,16 @@ mod tests {
         let (s, w) = Settings::from_toml("this is = = not toml");
         assert_eq!(s, Settings::default());
         assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn auto_codec_is_h264() {
+        assert_eq!(Settings::default().recorder_config().codec, Codec::H264);
+        let (s, _) = Settings::from_toml(
+            "codec = \"hevc\"
+",
+        );
+        assert_eq!(s.recorder_config().codec, Codec::Hevc);
     }
 
     #[test]

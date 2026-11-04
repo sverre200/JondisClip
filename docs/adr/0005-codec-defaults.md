@@ -1,6 +1,6 @@
 # ADR-0005: Record in HEVC, share as H.264
 
-Status: **Accepted** (2026-11-04, approved by owner)
+Status: **Superseded by [ADR-0007](0007-h264-default.md)** (2026-11-04). HEVC playback needed a paid Windows extension.
 
 ## Context
 The dev GPU (RX 6800 XT, RDNA2) has AMF H.264 and HEVC but no AV1. AMD's H.264 encoder on this generation is noticeably worse than HEVC at the same bitrate, especially in high-motion, high-detail scenes. Discord and browsers don't reliably play HEVC inline.

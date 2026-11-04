@@ -2,7 +2,7 @@
 
 Lightweight, always-on game clipping for Windows. It keeps a rolling replay buffer and saves the last N minutes when you press a hotkey. **Gaming performance comes first.** Every design decision answers to that, then to recording quality, then to simplicity.
 
-Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0005 (HEVC record, H.264 share) accepted. ADR-0002 to 0004 are still *Proposed*. Code so far: `crates/engine` (video and audio replay pipeline) and `crates/app` (`jondisclip.exe` tray app with hotkey and supervisor). See ROADMAP Phase 2 for status. Next up: a real-game test (DayZ), crash recovery, then Phase 3 perf benchmarks.
+Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.264 by default, which supersedes ADR-0005's HEVC default) accepted. ADR-0002 to 0004 are still *Proposed*. Code so far: `crates/engine` (video and audio replay pipeline) and `crates/app` (`jondisclip.exe` tray app with hotkey and supervisor). See ROADMAP Phase 2 for status. Next up: a real-game test (DayZ), crash recovery, then Phase 3 perf benchmarks.
 
 ## Read first
 - `docs/ARCHITECTURE.md`: components, processes, threads and data flow

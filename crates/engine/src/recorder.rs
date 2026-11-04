@@ -125,7 +125,7 @@ impl Default for RecorderConfig {
         Self {
             fps: 60,
             output_height: None,
-            codec: Codec::Hevc,
+            codec: Codec::H264, // ADR-0007: plays everywhere without extra codecs
             bitrate: None,
             quality_scale: 1.0,
             replay: Duration::from_secs(300),
