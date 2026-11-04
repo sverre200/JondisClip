@@ -106,6 +106,8 @@ pub struct Settings {
     pub start_with_windows: bool,
     /// "Share to Discord" keeps files under this many MB (1 MB = 1,000,000 bytes).
     pub discord_limit_mb: u32,
+    /// Google Drive for desktop folder for "Save to Drive". Empty = off.
+    pub drive_dir: PathBuf,
 }
 
 impl Default for Settings {
@@ -126,6 +128,7 @@ impl Default for Settings {
             save_sound: true,
             start_with_windows: false,
             discord_limit_mb: DISCORD_LIMIT_DEFAULT,
+            drive_dir: PathBuf::new(),
         }
     }
 }

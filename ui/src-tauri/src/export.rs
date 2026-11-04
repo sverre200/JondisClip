@@ -25,19 +25,89 @@ const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
 
 struct Running {
     job: u32,
-    child: Child,
+    /// The exporter process; None for a plain file copy (done in-process).
+    child: Option<Child>,
     output: PathBuf,
     cancelled: bool,
+    /// Checked by an in-process copy between chunks.
+    cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     share: bool,
 }
 
 /// What to make.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Kind {
     /// `<name> edit.mp4` next to the original (ADR-0011).
     Trim { exact: bool },
+    /// A trim written to a given path (the Drive folder, ADR-0013).
+    TrimTo { exact: bool, output: PathBuf },
     /// A file under `limit` bytes in the share folder, put on the clipboard (ADR-0012).
     Share { limit: u64 },
+}
+
+/// The volume a path lives on, as Windows' volume GUID path (so mount
+/// points, SUBST letters and `\\?\` forms of the same disk compare equal).
+pub fn volume_id(p: &Path) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::{
+        GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+    };
+    use windows::core::HSTRING;
+    let mut root = [0u16; 512];
+    let mut guid = [0u16; 128];
+    unsafe {
+        GetVolumePathNameW(&HSTRING::from(p.as_os_str()), &mut root).ok()?;
+        let len = root.iter().position(|c| *c == 0).unwrap_or(root.len());
+        let root_s = String::from_utf16_lossy(&root[..len]);
+        GetVolumeNameForVolumeMountPointW(&HSTRING::from(root_s.as_str()), &mut guid).ok()?;
+    }
+    let len = guid.iter().position(|c| *c == 0).unwrap_or(guid.len());
+    Some(String::from_utf16_lossy(&guid[..len]).to_lowercase())
+}
+
+/// File system name of the volume holding `p` ("NTFS", "ReFS", "FAT32"…).
+fn fs_name(p: &Path) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+    use windows::core::HSTRING;
+    let mut root = [0u16; 512];
+    let mut name = [0u16; 64];
+    unsafe {
+        GetVolumePathNameW(&HSTRING::from(p.as_os_str()), &mut root).ok()?;
+        let len = root.iter().position(|c| *c == 0).unwrap_or(root.len());
+        let root_s = String::from_utf16_lossy(&root[..len]);
+        GetVolumeInformationW(
+            &HSTRING::from(root_s.as_str()),
+            None,
+            None,
+            None,
+            None,
+            Some(&mut name),
+        )
+        .ok()?;
+    }
+    let len = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+    Some(String::from_utf16_lossy(&name[..len]))
+}
+
+/// Folders on the recorder's volume(s): its save folder and its buffer.
+fn recorder_dirs() -> Vec<PathBuf> {
+    let (settings, _) = jondisclip_core::settings::Settings::from_toml(
+        &std::fs::read_to_string(jondisclip_core::paths::settings_file()).unwrap_or_default(),
+    );
+    vec![
+        settings.save_dir_or(&jondisclip_core::paths::default_save_dir()),
+        jondisclip_core::paths::local_dir(),
+    ]
+}
+
+/// Free space to leave on a volume: 2 GB on the recorder's volume (its next
+/// save or its buffer may need it), 256 MB elsewhere. Unknown → 2 GB.
+fn reserve_for(dir: &Path) -> u64 {
+    const BIG: u64 = 2 * 1024 * 1024 * 1024;
+    let Some(v) = volume_id(dir) else { return BIG };
+    let recorder = recorder_dirs()
+        .iter()
+        .any(|d| volume_id(d).is_none_or(|r| r == v));
+    if recorder { BIG } else { 256 * 1024 * 1024 }
 }
 
 /// Where share files go: our own folder, out of the library, pruned.
@@ -249,12 +319,19 @@ pub fn start(
     if slot.is_some() {
         return Err("An export is already running. Wait for it or cancel it first.".into());
     }
-    let (output, estimate) = match kind {
+    let (output, estimate) = match &kind {
+        Kind::TrimTo { exact, output } => (
+            output.clone(),
+            (size as f64 / duration.max(0.1)
+                * (end - start + 1.0)
+                * if *exact { 1.35 } else { 1.0 }) as u64,
+        ),
         Kind::Trim { exact } => (
             jondisclip_core::library::edit_path(&input),
             // Same bitrate for a copy; an exact cut targets 1.3× the video bitrate.
-            (size as f64 / duration.max(0.1) * (end - start + 1.0) * if exact { 1.35 } else { 1.0 })
-                as u64,
+            (size as f64 / duration.max(0.1)
+                * (end - start + 1.0)
+                * if *exact { 1.35 } else { 1.0 }) as u64,
         ),
         Kind::Share { limit } => {
             let dir = share_dir();
@@ -273,30 +350,19 @@ pub fn start(
             }
             prune_share_dir(&dir, SHARE_KEEP);
             cap_share_dir(&dir, SHARE_CAP);
-            (share_path(&dir, &input), limit)
+            (share_path(&dir, &input), *limit)
         }
     };
     let dir = output.parent().map(Path::to_path_buf).unwrap_or_default();
-    // Leave room for the recorder: its next hotkey save (and possibly its
-    // buffer) may need this drive too.
-    const RESERVE: u64 = 2 * 1024 * 1024 * 1024;
-    if let Some(free) = free_space(&dir)
-        && free < estimate + estimate / 2 + RESERVE
-    {
-        return Err(format!(
-            "Not enough free space on {} (about {} MB for the clip plus 2 GB kept free for recording).",
-            dir.display(),
-            estimate / 1_000_000 + 1
-        ));
-    }
+    check_space(&dir, estimate + estimate / 2)?;
     // Without the job object the exporter could outlive this window; refuse.
     let Some(job_object) = kill_on_close_job() else {
         return Err("couldn't set up the export safely (job object); try again".into());
     };
-    let (cmd, last) = match kind {
-        Kind::Trim { exact } => (
+    let (cmd, last) = match &kind {
+        Kind::Trim { exact } | Kind::TrimTo { exact, .. } => (
             "trim",
-            if exact {
+            if *exact {
                 "exact".to_string()
             } else {
                 "copy".to_string()
@@ -330,9 +396,10 @@ pub fn start(
     let stdout = child.stdout.take().ok_or("no exporter output")?;
     *slot = Some(Running {
         job,
-        child,
+        child: Some(child),
         output: output.clone(),
         cancelled: false,
+        cancel_flag: Default::default(),
         share: matches!(kind, Kind::Share { .. }),
     });
     drop(slot);
@@ -342,6 +409,213 @@ pub fn start(
         job,
         output: output.display().to_string(),
     })
+}
+
+fn next_job() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1_000_000);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Refuses when `dir`'s volume can't take `bytes` plus its reserve.
+fn check_space(dir: &Path, bytes: u64) -> Result<(), String> {
+    // Google Drive's streaming drive (not NTFS/ReFS) keeps files in a local
+    // cache under %LOCALAPPDATA% until uploaded: that's the recorder's
+    // volume, so it needs room there too.
+    let virtual_drive = fs_name(dir)
+        .is_some_and(|n| !n.eq_ignore_ascii_case("NTFS") && !n.eq_ignore_ascii_case("ReFS"));
+    if virtual_drive {
+        let local = jondisclip_core::paths::local_dir();
+        if let Some(free) = free_space(&local)
+            && free < bytes + 2 * 1024 * 1024 * 1024
+        {
+            return Err(format!(
+                "Not enough free space on {} for Google Drive's local cache (about {} MB needed, plus 2 GB kept free for recording).",
+                local.display(),
+                bytes / 1_000_000 + 1
+            ));
+        }
+    }
+    let reserve = reserve_for(dir);
+    if let Some(free) = free_space(dir)
+        && free < bytes + reserve
+    {
+        return Err(format!(
+            "Not enough free space on {} (about {} MB needed, plus {} kept free).",
+            dir.display(),
+            bytes / 1_000_000 + 1,
+            if reserve >= 1 << 30 { "2 GB" } else { "256 MB" }
+        ));
+    }
+    Ok(())
+}
+
+/// Copies `src` to `dst` (which must not exist) on a background-IO thread,
+/// with progress and cancel, as a `.partial` renamed at the end (never
+/// overwriting). The source is only read (ADR-0013).
+pub fn start_copy(app: AppHandle, src: PathBuf, dst: PathBuf) -> Result<Started, String> {
+    let size = std::fs::metadata(&src).map_err(|e| e.to_string())?.len();
+    let dir = dst.parent().map(Path::to_path_buf).unwrap_or_default();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
+    check_space(&dir, size)?;
+    let mut slot = running().lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_some() {
+        return Err("An export is already running. Wait for it or cancel it first.".into());
+    }
+    let job = next_job();
+    let flag: std::sync::Arc<std::sync::atomic::AtomicBool> = Default::default();
+    *slot = Some(Running {
+        job,
+        child: None,
+        output: dst.clone(),
+        cancelled: false,
+        cancel_flag: flag.clone(),
+        share: false,
+    });
+    drop(slot);
+    let out = dst.display().to_string();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let result = crate::library::in_background(|| {
+            copy_file(&src, &dst, &flag, &mut |p| {
+                let _ = app.emit("export", Event::Progress { job, progress: p });
+            })
+        });
+        let mut slot = running().lock().unwrap_or_else(|e| e.into_inner());
+        slot.take();
+        drop(slot);
+        let ev = match result {
+            Ok(size) => Event::Done {
+                job,
+                path: dst.display().to_string(),
+                size,
+                start: 0.0,
+                duration: 0.0,
+                video: "copy".into(),
+                seconds: started.elapsed().as_secs_f64(),
+                share: None,
+                clipboard: None,
+            },
+            Err(CopyError::Cancelled) => Event::Cancelled { job },
+            Err(CopyError::Failed(message)) => Event::Error { job, message },
+        };
+        let _ = app.emit("export", ev);
+    });
+    Ok(Started { job, output: out })
+}
+
+/// Renames `from` to `to`, failing (atomically) if `to` exists.
+pub fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
+    use windows::core::HSTRING;
+    unsafe {
+        MoveFileExW(
+            &HSTRING::from(from.as_os_str()),
+            &HSTRING::from(to.as_os_str()),
+            MOVE_FILE_FLAGS(0),
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
+}
+
+#[derive(Debug)]
+pub enum CopyError {
+    Cancelled,
+    Failed(String),
+}
+
+/// The copy itself (testable without a window).
+pub fn copy_file(
+    src: &Path,
+    dst: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    progress: &mut dyn FnMut(f64),
+) -> Result<u64, CopyError> {
+    use std::io::{Read, Write};
+    let fail = |what: &str, e: std::io::Error| CopyError::Failed(format!("{what}: {e}"));
+    if dst.exists() {
+        return Err(CopyError::Failed(format!(
+            "{} already exists",
+            dst.display()
+        )));
+    }
+    let tmp = dst.with_extension("mp4.partial");
+    let result = (|| {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
+        const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
+        // Sequential read + write-through: the copy doesn't crowd the game's
+        // assets out of the file cache.
+        let mut input = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+            .open(src)
+            .map_err(|e| fail("couldn't read the clip", e))?;
+        let src_mtime = input.metadata().ok().and_then(|m| m.modified().ok());
+        let total = input
+            .metadata()
+            .map_err(|e| fail("couldn't read the clip", e))?
+            .len()
+            .max(1);
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(FILE_FLAG_WRITE_THROUGH)
+            .open(&tmp)
+            .map_err(|e| fail("couldn't write to the Drive folder", e))?;
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        let (mut done, mut last) = (0u64, std::time::Instant::now());
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(CopyError::Cancelled);
+            }
+            let n = input
+                .read(&mut buf)
+                .map_err(|e| fail("couldn't read the clip", e))?;
+            if n == 0 {
+                break;
+            }
+            output
+                .write_all(&buf[..n])
+                .map_err(|e| fail("couldn't write to the Drive folder", e))?;
+            done += n as u64;
+            if last.elapsed().as_millis() >= 100 {
+                last = std::time::Instant::now();
+                progress((done as f64 / total as f64).min(0.99));
+            }
+        }
+        // Same modified time as the source, so "already there" can tell
+        // this file from a different one of the same size.
+        if let Some(t) = src_mtime {
+            let _ = output.set_modified(t);
+        }
+        output
+            .sync_all()
+            .map_err(|e| fail("couldn't finish the file", e))?;
+        drop(output);
+        // Never overwrite: a hard link fails if the name exists.
+        match std::fs::hard_link(&tmp, dst) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&tmp);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(CopyError::Failed(format!(
+                    "{} already exists",
+                    dst.display()
+                )));
+            }
+            // No hard links (FAT/exFAT, Drive's virtual drive): an atomic
+            // move that fails rather than replace an existing file.
+            Err(_) => {
+                move_no_replace(&tmp, dst).map_err(|e| fail("couldn't finish the file", e))?
+            }
+        }
+        progress(1.0);
+        Ok(done)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Turns the exporter's output lines into events until it exits.
@@ -362,7 +636,9 @@ fn watch(app: AppHandle, job: u32, stdout: std::process::ChildStdout) {
         return;
     };
     drop(slot);
-    let _ = r.child.wait();
+    if let Some(c) = r.child.as_mut() {
+        let _ = c.wait();
+    }
     // A finished file wins over a cancel that arrived just after it.
     let ev = match last {
         Some(Event::Done {
@@ -460,7 +736,11 @@ pub fn cancel() {
     let mut slot = running().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(r) = slot.as_mut() {
         r.cancelled = true;
-        let _ = r.child.kill();
+        r.cancel_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(c) = r.child.as_mut() {
+            let _ = c.kill();
+        }
     }
 }
 
@@ -539,6 +819,52 @@ mod tests {
         assert!(overlaps(&d, &d.join("sub")));
         assert!(overlaps(&d.join("sub"), &d));
         assert!(!overlaps(&d.join("a"), &d.join("b")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn copies_without_touching_the_source_and_cleans_up_on_cancel() {
+        let d = std::env::temp_dir().join(format!("jc-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let src = d.join("clip.mp4");
+        let data: Vec<u8> = (0..9_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        let before = std::fs::metadata(&src).unwrap().modified().unwrap();
+        let dst = d.join("Drive").join("clip.mp4");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let mut seen = Vec::new();
+        let n = copy_file(&src, &dst, &flag, &mut |p| seen.push(p)).unwrap();
+        assert_eq!(n, data.len() as u64);
+        assert_eq!(std::fs::read(&dst).unwrap(), data, "byte-identical copy");
+        assert_eq!(
+            std::fs::metadata(&src).unwrap().modified().unwrap(),
+            before,
+            "source untouched"
+        );
+        assert_eq!(seen.last(), Some(&1.0));
+        assert!(!dst.with_extension("mp4.partial").exists());
+        // Never overwrites.
+        assert!(matches!(
+            copy_file(&src, &dst, &flag, &mut |_| {}),
+            Err(CopyError::Failed(_))
+        ));
+        // Cancelled: no file, no partial.
+        let dst2 = d.join("Drive").join("other.mp4");
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(
+            copy_file(&src, &dst2, &flag, &mut |_| {}),
+            Err(CopyError::Cancelled)
+        ));
+        assert!(!dst2.exists() && !dst2.with_extension("mp4.partial").exists());
+        // Destination folder gone (Drive not running): an error, no panic.
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let gone = Path::new(r"Q:\My Drive\JondisClip\x.mp4");
+        assert!(matches!(
+            copy_file(&src, gone, &flag, &mut |_| {}),
+            Err(CopyError::Failed(_))
+        ));
         let _ = std::fs::remove_dir_all(&d);
     }
 

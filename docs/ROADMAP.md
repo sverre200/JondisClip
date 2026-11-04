@@ -76,7 +76,14 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
   - It's a lossless copy when that fits. Otherwise it follows the quality ladder (1080p60 → 720p60 → 720p30 → … 360p30), encoded CBR and measured, with one smaller retry. A file over the limit is never handed over.
   - Settings → Sharing → Discord upload limit: 10 / 19 (default) / 50 / 500 MB.
   - **Not verified:** pasting into the Discord app itself (the clipboard was read back by Windows' own API), NVENC/QSV CBR behaviour, and a game running during the export.
-- [ ] **Stage 4: Google Drive.** An optional synced-folder destination and "Save to Drive" (copy or export, with checks for free space and an unavailable destination). It never claims the upload finished.
+- [x] **Stage 4: Google Drive** (2026-11-04, ADR-0013):
+  - Settings → Sharing → **Google Drive folder**. It's optional, and it suggests `X:\My Drive` or `%USERPROFILE%\My Drive` when Google Drive for desktop is installed.
+  - The editor's **Save to Drive** copies the whole clip byte for byte, or writes the selection as a trim, into `<Drive>\JondisClip\<Game>\`. Drive for desktop does the upload, and JondisClip never claims it happened.
+  - Nothing is copied twice: the same name and size is reported as "Already in your Google Drive folder".
+  - It refuses a missing folder (Drive not running), a folder that overlaps the clips folder or our own folders, and a destination without room for the file plus a reserve (2 GB on the recorder's drive, otherwise 256 MB).
+  - The copy runs on a background-IO thread with progress and cancel, written as `.partial` and renamed without overwriting.
+  - Verified in the real window against a stand-in folder: byte-identical copy (hash), "already there", trim into Drive, and the "isn't available" error. Plus 4 new Rust tests.
+  - **Not verified:** a real Google Drive for desktop install (not on this PC), so there's no check yet that Drive picks up and uploads the file.
 - [ ] Later: rename, delete to the Recycle Bin, copy path. If the window is already open, "Settings…" should switch its page (today it only focuses the window).
 Tauri window with Library (grid, thumbnails, player, rename, delete to the Recycle Bin, open folder, copy path), Recording status and Settings. Trim with stream copy, and a share export.
 

@@ -153,6 +153,19 @@
     !!tray?.running && !!tray.status && !tray.status.hotkey_ok && tray.status.hotkey === settings?.hotkey,
   );
 
+  let driveSuggestion = $state<string | null>(null);
+  onMount(() => {
+    void api
+      .driveStatus()
+      .then((d) => (driveSuggestion = d.suggestions[0] ?? null))
+      .catch(() => {});
+  });
+  async function pickDrive() {
+    if (!settings) return;
+    const picked = await api.pickDriveFolder(settings.drive_dir || driveSuggestion || "");
+    if (picked) await change({ drive_dir: picked });
+  }
+
   function discordLimits(current: number) {
     const presets = [
       { value: "10", label: "10 MB", title: "Very strict servers or older limits" },
@@ -327,6 +340,27 @@
           onchange={(v) => change({ discord_limit_mb: Number(v) })}
         />
       </Row>
+      <Row
+        label="Google Drive folder"
+        hint={settings.drive_dir
+          ? "Save to Drive copies clips into JondisClip\\<Game> here. Google Drive for desktop uploads them; nothing is uploaded by JondisClip."
+          : driveSuggestion
+            ? `Found Google Drive for desktop at ${driveSuggestion}. Use it to turn on Save to Drive.`
+            : "Optional. Choose the folder Google Drive for desktop syncs (usually G:\\My Drive) to turn on Save to Drive."}
+      >
+        <div class="drive">
+          {#if settings.drive_dir}
+            <span class="path" title={settings.drive_dir}>{settings.drive_dir}</span>
+            <Button variant="ghost" onclick={pickDrive}>Change…</Button>
+            <Button variant="ghost" onclick={() => change({ drive_dir: "" })}>Turn off</Button>
+          {:else}
+            {#if driveSuggestion}
+              <Button onclick={() => change({ drive_dir: driveSuggestion ?? "" })}>Use {driveSuggestion}</Button>
+            {/if}
+            <Button variant="ghost" onclick={pickDrive}>Choose…</Button>
+          {/if}
+        </div>
+      </Row>
     </section>
 
     <section aria-labelledby="h-general">
@@ -391,6 +425,11 @@
     text-align: left;
     color: var(--text-muted);
     font-size: var(--fs-sm);
+  }
+  .drive {
+    display: flex;
+    align-items: center;
+    gap: var(--s1);
   }
   .below-right {
     display: flex;

@@ -26,6 +26,14 @@ export interface Settings {
   start_with_windows: boolean;
   /** "Share to Discord" size limit, MB (1 MB = 1,000,000 bytes) */
   discord_limit_mb: number;
+  /** Google Drive for desktop folder for Save to Drive ("" = off) */
+  drive_dir: string;
+}
+
+export interface DriveStatus {
+  dir: string;
+  available: boolean;
+  suggestions: string[];
 }
 
 export interface SharePlan {
@@ -186,6 +194,16 @@ export const api = {
   shareStart: (id: string, start: number, end: number) => call<{ job: number; output: string }>("share_start", { id, start, end }),
   shareCopyAgain: (path: string) => call<void>("share_copy_again", { path }),
   shareReveal: (path: string) => call<void>("share_reveal", { path }),
+  driveStatus: () => call<DriveStatus>("drive_status"),
+  driveSave: (id: string, start: number, end: number, whole: boolean, exact: boolean) =>
+    call<{ job: number | null; output: string; already: boolean }>("drive_save", { id, start, end, whole, exact }),
+  driveReveal: (path: string) => call<void>("drive_reveal", { path }),
+  async pickDriveFolder(current: string): Promise<string | null> {
+    if (!isDesktop) return "G:\\My Drive";
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ directory: true, defaultPath: current || undefined, title: "Choose your Google Drive folder" });
+    return typeof picked === "string" ? picked : null;
+  },
   /** Subscribes to export progress; returns the unsubscribe function. */
   async onExport(fn: (e: ExportEvent) => void): Promise<() => void> {
     if (!isDesktop) {
@@ -283,6 +301,7 @@ const mockState: Snapshot = {
     save_sound: true,
     start_with_windows: false,
     discord_limit_mb: 19,
+    drive_dir: "",
   },
   default_save_dir: "C:\\Users\\you\\Videos\\JondisClip",
   replay_presets: [30, 60, 120, 180, 300, 600, 900],
@@ -364,6 +383,25 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       }, 200);
       return { job, output: "share.mp4" };
     }
+    case "drive_status":
+      return { dir: mockState.settings.drive_dir, available: !!mockState.settings.drive_dir, suggestions: ["G:\\My Drive"] };
+    case "drive_save": {
+      const job = Date.now();
+      let p = 0;
+      clearInterval(mockExport);
+      mockExport = setInterval(() => {
+        p = Math.min(1, p + 0.2);
+        mockExportListeners.forEach((f) => f({ kind: "progress", job, progress: p }));
+        if (p >= 1) {
+          clearInterval(mockExport);
+          mockExportListeners.forEach((f) =>
+            f({ kind: "done", job, path: "G:\\My Drive\\JondisClip\\DayZ\\DayZ edit.mp4", size: 58e6, start: 0, duration: 20, video: "copy", seconds: 2, share: null, clipboard: null }),
+          );
+        }
+      }, 200);
+      return { job, output: "G:\\My Drive\\JondisClip\\DayZ\\DayZ edit.mp4", already: false };
+    }
+    case "drive_reveal":
     case "share_copy_again":
     case "share_reveal":
       return undefined;

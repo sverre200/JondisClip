@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { api, clipUrl, type Clip, type ExportEvent, type SharePlan } from "./lib/api";
+  import { api, clipUrl, type Clip, type DriveStatus, type ExportEvent, type SharePlan } from "./lib/api";
   import { bytes, clock, clockPrecise, codecName, fromWithin, whenShort } from "./lib/format";
   import { cutPlan, estimateSize } from "./lib/trim";
   import Button from "./lib/Button.svelte";
@@ -38,7 +38,8 @@
   let preferLossless = $state(false);
   type Job =
     | { state: "idle" }
-    | { state: "running"; job: number | null; progress: number; share: boolean }
+    | { state: "running"; job: number | null; progress: number; share: boolean; drive?: boolean }
+    | { state: "drive"; path: string; size: number; already: boolean }
     | { state: "done"; path: string; size: number; duration: number; lossless: boolean; seconds: number }
     | {
         state: "shared";
@@ -50,6 +51,27 @@
         clipboardError: string | null;
       }
     | { state: "error"; message: string };
+
+  // Save to Drive appears once a Drive folder is set (Settings → Sharing).
+  let drive = $state<DriveStatus | null>(null);
+  onMount(() => {
+    void api
+      .driveStatus()
+      .then((d) => (drive = d))
+      .catch(() => {});
+  });
+
+  async function saveToDrive() {
+    if (job.state === "running" || !drive?.dir) return;
+    job = { state: "running", job: null, progress: 0, share: false, drive: true };
+    try {
+      const r = await api.driveSave(clip.id, trimStart, trimEnd, !trimmed, !plan.lossless);
+      if (r.already || r.job === null) job = { state: "drive", path: r.output, size: clip.size, already: true };
+      else if (job.state === "running") job = { ...job, job: r.job };
+    } catch (e) {
+      job = { state: "error", message: String(e) };
+    }
+  }
 
   // What "Share to Discord" would make of the current selection.
   let sharePlan = $state<SharePlan | null>(null);
@@ -117,7 +139,7 @@
   function setTrim(start: number, end: number, edge: "start" | "end") {
     trimStart = Math.max(0, start);
     trimEnd = Math.min(duration, end);
-    if (job.state === "done" || job.state === "shared" || job.state === "error") job = { state: "idle" };
+    if (job.state === "done" || job.state === "shared" || job.state === "drive" || job.state === "error") job = { state: "idle" };
     // Show the frame at the handle being dragged.
     video?.pause();
     seek(edge === "start" ? trimStart : Math.max(trimStart, trimEnd - 1 / 60), true);
@@ -170,7 +192,8 @@
 
   function onExport(e: ExportEvent) {
     if (job.state !== "running") return;
-    if (job.job !== null && e.job !== job.job && e.kind !== "cancelled") return;
+    // Only events for this job (a stray "cancelled" from an earlier one is ignored).
+    if (job.job !== null && e.job !== job.job) return;
     if (e.kind === "progress") job = { ...job, progress: e.progress };
     else if (e.kind === "done" && e.share) {
       job = {
@@ -182,6 +205,8 @@
         copied: e.share.copied,
         clipboardError: e.clipboard && "Err" in e.clipboard ? e.clipboard.Err : null,
       };
+    } else if (e.kind === "done" && job.drive) {
+      job = { state: "drive", path: e.path, size: e.size, already: false };
     } else if (e.kind === "done") {
       job = { state: "done", path: e.path, size: e.size, duration: e.duration, lossless: e.video === "copy", seconds: e.seconds };
       onsaved(e.path);
@@ -287,7 +312,7 @@
           return true;
         case "Escape":
           if (job.state === "running") return true; // cancel explicitly instead
-          if (job.state === "shared") {
+          if (job.state === "shared" || job.state === "drive") {
             job = { state: "idle" };
             return true;
           }
@@ -485,7 +510,7 @@
 
     <div class="save">
       {#if job.state === "running"}
-        <span class="what">{job.share ? "Preparing for Discord…" : "Saving…"}</span>
+        <span class="what">{job.share ? "Preparing for Discord…" : job.drive ? "Copying to Drive folder…" : "Saving…"}</span>
         <div class="progress" role="progressbar" aria-label={job.share ? "Preparing for Discord" : "Saving clip"} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress * 100)}>
           <div style:width="{Math.round(job.progress * 100)}%"></div>
         </div>
@@ -499,6 +524,14 @@
         </span>
         <Button variant="ghost" onclick={() => onopensaved(saved.path)}>Play it</Button>
         <Button variant="ghost" onclick={resetTrim}>New trim</Button>
+      {:else if job.state === "drive"}
+        {@const dv = job}
+        <span class="done" role="status" title={dv.path}>
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          {dv.already ? "Already in your Google Drive folder" : "Copied to your Google Drive folder. Google Drive uploads it."}
+        </span>
+        <Button variant="ghost" onclick={() => api.driveReveal(dv.path).catch((e) => onerror(String(e)))}>Show file</Button>
+        <Button variant="ghost" onclick={() => (job = { state: "idle" })}>Done</Button>
       {:else if job.state === "shared"}
         {@const sh = job}
         {#if sh.clipboardError}
@@ -518,6 +551,17 @@
         <Button onclick={save} disabled={!trimmed || !!failed} title="Save the selection as a new clip next to the original (Ctrl+S). The original is kept.">
           Save clip
         </Button>
+        {#if drive?.dir}
+          <Button
+            onclick={saveToDrive}
+            disabled={!!failed}
+            title={trimmed
+              ? "Save the selection into your Google Drive folder. Google Drive for desktop uploads it."
+              : "Copy this clip into your Google Drive folder. Google Drive for desktop uploads it."}
+          >
+            Save to Drive
+          </Button>
+        {/if}
         <Button
           variant="primary"
           onclick={shareToDiscord}

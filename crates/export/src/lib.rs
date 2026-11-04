@@ -172,12 +172,25 @@ fn finalize(tmp: &Path, out: &Path) -> Result<(), ExportError> {
             let _ = std::fs::remove_file(tmp);
             Err(ExportError::Exists(out.to_path_buf()))
         }
+        // No hard links here: an atomic move that never replaces a file.
         Err(_) => {
-            if out.exists() {
+            use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
+            use windows::core::HSTRING;
+            let moved = unsafe {
+                MoveFileExW(
+                    &HSTRING::from(tmp.as_os_str()),
+                    &HSTRING::from(out.as_os_str()),
+                    MOVE_FILE_FLAGS(0),
+                )
+            };
+            if moved.is_err() {
                 let _ = std::fs::remove_file(tmp);
-                return Err(ExportError::Exists(out.to_path_buf()));
+                return Err(if out.exists() {
+                    ExportError::Exists(out.to_path_buf())
+                } else {
+                    ExportError::Io(std::io::Error::other("couldn't rename the finished file"))
+                });
             }
-            std::fs::rename(tmp, out)?;
             Ok(())
         }
     }

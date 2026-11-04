@@ -105,6 +105,16 @@ fn tray_status() -> TrayView {
 fn update(patch: serde_json::Map<String, serde_json::Value>) -> Result<Settings, String> {
     let (current, _) = read_settings();
     let validated = apply_patch(&current, patch)?;
+    let save = validated.save_dir_or(&paths::default_save_dir());
+    if jondisclip_core::drive::overlaps(&save, &validated.drive_dir) {
+        return Err(
+            "The clips folder and the Google Drive folder can't overlap. Choose separate folders."
+                .into(),
+        );
+    }
+    if jondisclip_core::drive::overlaps(&validated.drive_dir, &paths::local_dir()) {
+        return Err("The Google Drive folder can't be inside JondisClip's own folders.".into());
+    }
     let path = paths::settings_file();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -416,6 +426,191 @@ fn share_reveal(path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+#[derive(Serialize)]
+struct DriveStatus {
+    /// The configured folder ("" = off).
+    dir: String,
+    /// It exists right now (Drive for desktop running and signed in).
+    available: bool,
+    /// Drive for desktop folders found on this PC.
+    suggestions: Vec<String>,
+}
+
+#[tauri::command]
+async fn drive_status() -> DriveStatus {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (settings, _) = read_settings();
+        let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
+        // Leftovers from a copy cut short by closing the window (Drive would
+        // upload them). Only one window runs, so none is in use now.
+        if !export::busy() && !settings.drive_dir.as_os_str().is_empty() {
+            for p in jondisclip_core::drive::stale_partials(&settings.drive_dir) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        // Skip network drive letters: an offline one can stall for seconds.
+        let local_dir_only = |p: &std::path::Path| !is_remote_drive(p) && p.is_dir();
+        let suggestions = jondisclip_core::drive::suggestions(&local_dir_only, home.as_deref())
+            .into_iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        DriveStatus {
+            dir: settings.drive_dir.display().to_string(),
+            available: !settings.drive_dir.as_os_str().is_empty() && settings.drive_dir.is_dir(),
+            suggestions,
+        }
+    })
+    .await
+    .unwrap_or(DriveStatus {
+        dir: String::new(),
+        available: false,
+        suggestions: Vec::new(),
+    })
+}
+
+fn is_remote_drive(p: &std::path::Path) -> bool {
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    let s = p.to_string_lossy();
+    if s.len() < 2 || s.as_bytes()[1] != b':' {
+        return false;
+    }
+    const DRIVE_REMOTE: u32 = 4;
+    unsafe { GetDriveTypeW(&HSTRING::from(format!("{}\\", &s[..2]))) == DRIVE_REMOTE }
+}
+
+/// Size and modified time, for "already there".
+fn stamp(p: &std::path::Path) -> Option<jondisclip_core::drive::Stamp> {
+    std::fs::metadata(p)
+        .ok()
+        .map(|m| (m.len(), m.modified().ok()))
+}
+
+#[derive(Serialize)]
+struct DriveStarted {
+    /// The running copy/export, or None when nothing had to be copied.
+    job: Option<u32>,
+    output: String,
+    /// The same file was already in the Drive folder.
+    already: bool,
+}
+
+/// Save to Drive (ADR-0013): copies the whole clip, or writes the selection
+/// as a trim, into `<drive>\JondisClip\<Game>\`. Drive does the upload.
+#[tauri::command]
+async fn drive_save(
+    app: tauri::AppHandle,
+    id: String,
+    start: f64,
+    end: f64,
+    whole: bool,
+    exact: bool,
+) -> Result<DriveStarted, String> {
+    use jondisclip_core::drive::{Target, check_folder, target};
+    let path = library::path_of(&id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (settings, _) = read_settings();
+        let save = settings.save_dir_or(&paths::default_save_dir());
+        check_folder(&settings.drive_dir, &save, &paths::local_dir(), &|p| {
+            p.is_dir()
+        })?;
+        if !export::busy() {
+            for p in jondisclip_core::drive::stale_partials(&settings.drive_dir) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let game = jondisclip_core::library::parse_name(&file_name)
+            .map(|p| p.0)
+            .or_else(|| {
+                path.parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "Clips".into());
+        if whole {
+            return match target(&settings.drive_dir, &game, &file_name, stamp(&path), &stamp) {
+                Target::AlreadyThere(p) => Ok(DriveStarted {
+                    job: None,
+                    output: p.display().to_string(),
+                    already: true,
+                }),
+                Target::Write(p) => export::start_copy(app, path, p).map(|s| DriveStarted {
+                    job: Some(s.job),
+                    output: s.output,
+                    already: false,
+                }),
+            };
+        }
+        let stem = std::path::Path::new(&file_name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let name = format!("{} edit.mp4", jondisclip_core::library::split_edit(&stem).0);
+        let Target::Write(out) = target(&settings.drive_dir, &game, &name, None, &stamp) else {
+            return Err("couldn't choose a file name in the Drive folder".into());
+        };
+        std::fs::create_dir_all(out.parent().unwrap_or(&out)).map_err(|e| e.to_string())?;
+        let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        let duration = jondisclip_core::library::probe_file(&path)
+            .map_err(|e| e.to_string())?
+            .duration;
+        export::start(
+            app,
+            path,
+            duration,
+            size,
+            start,
+            end,
+            export::Kind::TrimTo { exact, output: out },
+        )
+        .map(|s| DriveStarted {
+            job: Some(s.job),
+            output: s.output,
+            already: false,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Shows a file in Explorer, only inside the configured Drive folder.
+#[tauri::command]
+async fn drive_reveal(path: String) -> Result<(), String> {
+    // canonicalize on a hung network/virtual drive can block: off the main thread.
+    tauri::async_runtime::spawn_blocking(move || drive_reveal_blocking(path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// `\\?\C:\x` → `C:\x`, `\\?\UNC\srv\share\x` → `\\srv\share\x`.
+fn plain_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        s.trim_start_matches(r"\\?\").to_string()
+    }
+}
+
+fn drive_reveal_blocking(path: String) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let (settings, _) = read_settings();
+    let p = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let dir = std::fs::canonicalize(&settings.drive_dir).map_err(|e| e.to_string())?;
+    if !p.starts_with(&dir) {
+        return Err("not in the Drive folder".into());
+    }
+    let plain = plain_path(&p);
+    std::process::Command::new("explorer")
+        .raw_arg(format!("/select,\"{plain}\""))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn export_cancel() {
     export::cancel();
@@ -532,7 +727,10 @@ fn main() {
             share_plan,
             share_start,
             share_copy_again,
-            share_reveal
+            share_reveal,
+            drive_status,
+            drive_save,
+            drive_reveal
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the JondisClip window");
@@ -541,6 +739,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_paths_for_explorer() {
+        assert_eq!(
+            plain_path(std::path::Path::new(r"\\?\C:\a\b.mp4")),
+            r"C:\a\b.mp4"
+        );
+        assert_eq!(
+            plain_path(std::path::Path::new(r"\\?\UNC\srv\share\b.mp4")),
+            r"\\srv\share\b.mp4"
+        );
+        assert_eq!(
+            plain_path(std::path::Path::new(r"G:\My Drive\x.mp4")),
+            r"G:\My Drive\x.mp4"
+        );
+    }
     use serde_json::json;
 
     fn patch(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
