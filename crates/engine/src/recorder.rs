@@ -1,0 +1,660 @@
+//! The replay recorder. It wires capture → encoder thread → writer thread →
+//! ring, and runs clip saves as background jobs (`docs/ARCHITECTURE.md`).
+//!
+//! Threads:
+//! - WGC callback (OS thread pool): one GPU copy per changed screen frame.
+//! - `jc-encode` (above normal): fixed-rate pacing, GPU conversion, encode.
+//! - `jc-segments` (below normal): muxing, ring updates, file deletion.
+//! - `jc-save` (background mode, one per save): concatenates into an MP4.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use ffmpeg_next::Packet;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Com::CoIncrementMTAUsage;
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::System::Threading::{
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, GetCurrentThread, INFINITE,
+    SetThreadPriority, SetWaitableTimer, THREAD_MODE_BACKGROUND_BEGIN, THREAD_PRIORITY,
+    THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_BELOW_NORMAL, TIMER_ALL_ACCESS,
+    WaitForSingleObject,
+};
+
+use crate::capture::{Capture, CaptureShared};
+use crate::clip::{self, ClipError};
+use crate::convert::{Converter, output_size};
+use crate::encoder::{self, Codec, EncoderId};
+use crate::gpu::Gpu;
+use crate::hwenc::{EncodeSettings, HwEncError, HwEncoder};
+use crate::ring::{Ring, RingError};
+use crate::segment::{self, SegmentWriter, WriterError, WriterMsg};
+
+#[derive(Debug, Clone)]
+pub struct RecorderConfig {
+    pub fps: u32,
+    /// Output height, or `None` for the source resolution. It never upscales.
+    pub output_height: Option<u32>,
+    pub codec: Codec,
+    /// Bits per second, or `None` for the Balanced default.
+    pub bitrate: Option<u64>,
+    /// How much history the buffer keeps.
+    pub replay: Duration,
+    pub segment_seconds: u32,
+    /// Parent of the per-session buffer directory.
+    pub buffer_dir: PathBuf,
+}
+
+/// `%LOCALAPPDATA%\JondisClip\buffer` (ARCHITECTURE.md), falling back to %TEMP%.
+pub fn default_buffer_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("JondisClip")
+        .join("buffer")
+}
+
+/// Deletes `session-*` directories left by a crash or kill. Assumes a single
+/// running instance (single-instance check comes with the tray app).
+// TODO(phase 2 robustness): offer "Recover last buffer" before deleting.
+fn sweep_stale_sessions(buffer_dir: &Path) {
+    let Ok(entries) = fs::read_dir(buffer_dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let is_session = e.file_name().to_string_lossy().starts_with("session-");
+        if is_session && e.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+impl Default for RecorderConfig {
+    fn default() -> Self {
+        Self {
+            fps: 60,
+            output_height: None,
+            codec: Codec::Hevc,
+            bitrate: None,
+            replay: Duration::from_secs(300),
+            segment_seconds: 2,
+            buffer_dir: default_buffer_dir(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RecorderError {
+    #[error("invalid setting: {0}")]
+    Config(&'static str),
+    #[error("Windows: {0}")]
+    Windows(#[from] windows::core::Error),
+    #[error("no usable hardware encoder: {0}")]
+    NoEncoder(String),
+    #[error("encoder: {0}")]
+    Encoder(#[from] HwEncError),
+    #[error("segment writer: {0}")]
+    Writer(#[from] WriterError),
+    #[error("buffer: {0}")]
+    Ring(#[from] RingError),
+    #[error("saving clip: {0}")]
+    Clip(#[from] ClipError),
+    #[error("file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("no frames from capture within {0:?}")]
+    NoFrames(Duration),
+    #[error("display mode changed; the capture must restart")]
+    DisplayChanged,
+    #[error("the captured monitor went away")]
+    SourceClosed,
+    #[error("the segment writer stopped (see its error)")]
+    WriterGone,
+    #[error("the recorder is not running")]
+    NotRunning,
+    #[error("a recorder thread panicked")]
+    Panicked,
+}
+
+/// What's actually being recorded (shown on the Recording page).
+#[derive(Debug, Clone)]
+pub struct RecorderInfo {
+    pub adapter: String,
+    pub encoder: EncoderId,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate: u64,
+    pub session_dir: PathBuf,
+}
+
+#[derive(Default)]
+struct Counters {
+    frames_encoded: AtomicU64,
+    frames_late: AtomicU64,
+    packets_dropped: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stats {
+    /// Screen updates delivered by WGC (only changed frames).
+    pub frames_arrived: u64,
+    /// Frames sent to the encoder (constant rate).
+    pub frames_encoded: u64,
+    /// Ticks skipped because the encoder thread ran late.
+    pub frames_late: u64,
+    /// Encoded packets dropped because the writer queue was full.
+    pub packets_dropped: u64,
+    pub buffered_us: i64,
+    pub buffer_bytes: u64,
+}
+
+struct Control {
+    stop: AtomicBool,
+    force_keyframe: AtomicBool,
+}
+
+pub struct Recorder {
+    info: RecorderInfo,
+    capture: Option<Capture>,
+    ctl: Arc<Control>,
+    counters: Arc<Counters>,
+    tx: SyncSender<WriterMsg>,
+    ring: Arc<Mutex<Ring>>,
+    encode_thread: Option<JoinHandle<Result<(), RecorderError>>>,
+    writer_thread: Option<JoinHandle<Result<(), WriterError>>>,
+}
+
+impl Recorder {
+    pub fn start(cfg: &RecorderConfig) -> Result<Self, RecorderError> {
+        if !(1..=240).contains(&cfg.fps) {
+            return Err(RecorderError::Config("fps must be 1-240"));
+        }
+        if cfg.replay.is_zero() || cfg.segment_seconds == 0 {
+            return Err(RecorderError::Config(
+                "replay and segment length must be positive",
+            ));
+        }
+        // Keep the multithreaded apartment alive for WGC's free-threaded pool
+        // without changing the caller thread's apartment.
+        let _cookie = unsafe { CoIncrementMTAUsage()? };
+
+        let gpu = Gpu::create()?;
+        let capture = Capture::primary_monitor(&gpu, cfg.fps)?;
+        let (width, height) = output_size(capture.width, capture.height, cfg.output_height);
+        let id = encoder::select_for_adapter(cfg.codec, gpu.vendor_id).map_err(|errs| {
+            RecorderError::NoEncoder(
+                errs.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
+        })?;
+        let bitrate = cfg
+            .bitrate
+            .unwrap_or_else(|| EncodeSettings::default_bitrate(id.codec, width, height, cfg.fps));
+        let settings = EncodeSettings {
+            id,
+            width,
+            height,
+            fps: cfg.fps,
+            bitrate,
+            gop_seconds: 1,
+        };
+        let enc = HwEncoder::open(&gpu, settings)?;
+        let conv = Converter::new(&gpu, &capture.latest, width, height, cfg.fps)?;
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        sweep_stale_sessions(&cfg.buffer_dir);
+        let session_dir = cfg.buffer_dir.join(format!("session-{stamp}"));
+        fs::create_dir_all(&session_dir)?;
+
+        let ring = Arc::new(Mutex::new(Ring::new(cfg.replay.as_micros() as i64)?));
+        let ctl = Arc::new(Control {
+            stop: AtomicBool::new(false),
+            force_keyframe: AtomicBool::new(false),
+        });
+        let counters = Arc::new(Counters::default());
+        // About 8 s of packets at 60 fps: absorbs disk hiccups without blocking the encoder.
+        let (tx, rx) = mpsc::sync_channel::<WriterMsg>(512);
+
+        let writer = SegmentWriter::new(
+            session_dir.clone(),
+            enc.parameters(),
+            enc.time_base,
+            i64::from(cfg.fps * cfg.segment_seconds),
+            ring.clone(),
+        );
+        let writer_thread = thread::Builder::new()
+            .name("jc-segments".into())
+            .spawn(move || {
+                set_priority(THREAD_PRIORITY_BELOW_NORMAL);
+                writer.run(rx)
+            })?;
+
+        let adapter = gpu.adapter_name.clone();
+        let job = EncodeJob {
+            enc,
+            conv,
+            gpu,
+            shared: capture.shared.clone(),
+            ctl: ctl.clone(),
+            counters: counters.clone(),
+            fps: cfg.fps,
+        };
+        let enc_tx = tx.clone();
+        let encode_thread = thread::Builder::new()
+            .name("jc-encode".into())
+            .spawn(move || {
+                set_priority(THREAD_PRIORITY_ABOVE_NORMAL);
+                let result = job.run(&enc_tx);
+                let _ = enc_tx.send(WriterMsg::Stop);
+                result
+            })?;
+
+        let info = RecorderInfo {
+            adapter,
+            encoder: id,
+            width,
+            height,
+            fps: cfg.fps,
+            bitrate,
+            session_dir,
+        };
+        Ok(Self {
+            info,
+            capture: Some(capture),
+            ctl,
+            counters,
+            tx,
+            ring,
+            encode_thread: Some(encode_thread),
+            writer_thread: Some(writer_thread),
+        })
+    }
+
+    pub fn info(&self) -> &RecorderInfo {
+        &self.info
+    }
+
+    pub fn stats(&self) -> Stats {
+        let (buffered_us, buffer_bytes) = self
+            .ring
+            .lock()
+            .map(|r| (r.available_us(), r.disk_bytes()))
+            .unwrap_or_default();
+        Stats {
+            frames_arrived: self
+                .capture
+                .as_ref()
+                .map_or(0, |c| c.shared.frames_arrived.load(Ordering::Relaxed)),
+            frames_encoded: self.counters.frames_encoded.load(Ordering::Relaxed),
+            frames_late: self.counters.frames_late.load(Ordering::Relaxed),
+            packets_dropped: self.counters.packets_dropped.load(Ordering::Relaxed),
+            buffered_us,
+            buffer_bytes,
+        }
+    }
+
+    /// True while both pipeline threads are alive (false after a fatal error).
+    pub fn is_running(&self) -> bool {
+        let enc = self
+            .encode_thread
+            .as_ref()
+            .is_some_and(|t| !t.is_finished());
+        let wr = self
+            .writer_thread
+            .as_ref()
+            .is_some_and(|t| !t.is_finished());
+        enc && wr
+    }
+
+    /// Saves the last `len` of footage to `out` (`.mp4`) in the background.
+    /// Recording continues. The handle yields the written file(s): more than
+    /// one if the range spans a display change.
+    pub fn save_clip(
+        &self,
+        len: Duration,
+        out: PathBuf,
+    ) -> JoinHandle<Result<Vec<PathBuf>, RecorderError>> {
+        let tx = self.tx.clone();
+        let ring = self.ring.clone();
+        let ctl = self.ctl.clone();
+        let dir = self.info.session_dir.clone();
+        let len_us = len.as_micros() as i64;
+        let spawn = thread::Builder::new()
+            .name("jc-save".into())
+            .spawn(move || {
+                set_priority(THREAD_MODE_BACKGROUND_BEGIN);
+                save_job(tx, ring, &ctl, &dir, len_us, &out)
+            });
+        match spawn {
+            Ok(h) => h,
+            Err(e) => thread::spawn(move || Err(RecorderError::Io(e))),
+        }
+    }
+
+    /// Stops recording and deletes the buffer (segments still being saved are
+    /// deleted when their save finishes). Returns final stats, or the error
+    /// that ended recording early.
+    pub fn stop(mut self) -> Result<Stats, RecorderError> {
+        self.shutdown()
+    }
+
+    fn shutdown(&mut self) -> Result<Stats, RecorderError> {
+        self.ctl.stop.store(true, Ordering::Release);
+        // Never return early: every step below must run, or the writer can
+        // block forever in recv() and the buffer is left on disk.
+        let enc_result = match self.encode_thread.take() {
+            Some(t) => t.join().unwrap_or(Err(RecorderError::Panicked)),
+            None => Ok(()),
+        };
+        let stats = self.stats();
+        self.capture = None; // stops WGC
+        // The encode thread normally sends Stop. Send it again in case it
+        // panicked first. Harmless if the writer has already exited.
+        let _ = self.tx.send(WriterMsg::Stop);
+        let writer_result = match self.writer_thread.take() {
+            Some(t) => t.join().unwrap_or(Err(WriterError::Panicked)),
+            None => Ok(()),
+        };
+        let (expired, drained) = match self.ring.lock() {
+            Ok(mut ring) => (ring.close(), ring.is_drained()),
+            Err(_) => (Vec::new(), false),
+        };
+        segment::delete_segments(&self.info.session_dir, &expired);
+        if drained {
+            let _ = fs::remove_dir(&self.info.session_dir);
+        }
+        // The writer's own error is the root cause when the encoder only saw it go away.
+        match (enc_result, writer_result) {
+            (_, Err(w)) => Err(w.into()),
+            (Err(e), Ok(())) => Err(e),
+            (Ok(()), Ok(())) => Ok(stats),
+        }
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        if self.encode_thread.is_some() || self.writer_thread.is_some() {
+            let _ = self.shutdown();
+        }
+    }
+}
+
+fn save_job(
+    tx: SyncSender<WriterMsg>,
+    ring: Arc<Mutex<Ring>>,
+    ctl: &Control,
+    dir: &Path,
+    len_us: i64,
+    out: &Path,
+) -> Result<Vec<PathBuf>, RecorderError> {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    tx.send(WriterMsg::Save {
+        len_us,
+        reply: reply_tx,
+    })
+    .map_err(|_| RecorderError::NotRunning)?;
+    // Force the cut only after the request is queued. The writer handles
+    // messages in order, so the forced IDR always arrives after the Save
+    // and the clip ends at this moment rather than at the next natural GOP.
+    ctl.force_keyframe.store(true, Ordering::Release);
+    let pin = reply_rx
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| RecorderError::NotRunning)??;
+
+    let result = (|| {
+        let mut written = Vec::new();
+        for (i, run) in pin.runs().into_iter().enumerate() {
+            let inputs: Vec<PathBuf> = run
+                .iter()
+                .map(|s| segment::segment_path(dir, s.seq))
+                .collect();
+            let path = clip::run_output_path(out, i);
+            clip::concat_to_mp4(&inputs, &path)?;
+            written.push(path);
+        }
+        Ok(written)
+    })();
+
+    let (expired, drained) = match ring.lock() {
+        Ok(mut r) => (r.unpin(pin.id).unwrap_or_default(), r.is_drained()),
+        Err(_) => (Vec::new(), false),
+    };
+    // File IO outside the lock, so stats() and the writer never wait on deletes.
+    segment::delete_segments(dir, &expired);
+    if drained {
+        let _ = fs::remove_dir(dir);
+    }
+    result
+}
+
+fn set_priority(p: THREAD_PRIORITY) {
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), p);
+    }
+}
+
+struct EncodeJob {
+    enc: HwEncoder,
+    conv: Converter,
+    /// Keeps the device alive for as long as the encoder uses it.
+    #[allow(dead_code)]
+    gpu: Gpu,
+    shared: Arc<CaptureShared>,
+    ctl: Arc<Control>,
+    counters: Arc<Counters>,
+    fps: u32,
+}
+
+/// Hands packets to the writer without ever blocking. If the queue is full,
+/// it drops packets until the next keyframe so the stream stays decodable.
+struct PacketSink<'a> {
+    tx: &'a SyncSender<WriterMsg>,
+    counters: &'a Counters,
+    ctl: &'a Control,
+    skip_to_key: bool,
+    writer_gone: bool,
+}
+
+impl PacketSink<'_> {
+    fn push(&mut self, p: Packet) {
+        if self.skip_to_key && !p.is_key() {
+            self.counters
+                .packets_dropped
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        self.skip_to_key = false;
+        match self.tx.try_send(WriterMsg::Packet(p)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.counters
+                    .packets_dropped
+                    .fetch_add(1, Ordering::Relaxed);
+                // Ask for one IDR per backlog episode. Repeated requests would
+                // add large packets to the backlog.
+                self.skip_to_key = true;
+                self.ctl.force_keyframe.store(true, Ordering::Release);
+            }
+            Err(TrySendError::Disconnected(_)) => self.writer_gone = true,
+        }
+    }
+}
+
+impl EncodeJob {
+    fn run(mut self, tx: &SyncSender<WriterMsg>) -> Result<(), RecorderError> {
+        let pacer = Pacer::new(self.fps)?;
+        self.wait_first_frame(Duration::from_secs(3))?;
+        let mut sink = PacketSink {
+            tx,
+            counters: &self.counters,
+            ctl: &self.ctl,
+            skip_to_key: false,
+            writer_gone: false,
+        };
+        let mut start = pacer.now();
+        let mut n: i64 = 0;
+        let mut result = Ok(());
+        let stall_frames = i64::from(self.fps); // 1 s
+        while !self.ctl.stop.load(Ordering::Acquire) {
+            if self.shared.size_changed.load(Ordering::Acquire) {
+                result = Err(RecorderError::DisplayChanged);
+                break;
+            }
+            if self.shared.source_closed.load(Ordering::Acquire) {
+                result = Err(RecorderError::SourceClosed);
+                break;
+            }
+            if sink.writer_gone {
+                result = Err(RecorderError::WriterGone);
+                break;
+            }
+            pacer.wait_until(start, n);
+            let late = pacer.frames_behind(start, n);
+            if late > stall_frames {
+                // Sleep/resume, debugger or GPU hang. Don't paper over the gap:
+                // end the run so no segment claims minutes it doesn't contain.
+                self.counters
+                    .frames_late
+                    .fetch_add(late as u64, Ordering::Relaxed);
+                if sink.tx.send(WriterMsg::NewRun).is_err() {
+                    result = Err(RecorderError::WriterGone);
+                    break;
+                }
+                start = pacer.rebase(n);
+                self.ctl.force_keyframe.store(true, Ordering::Release);
+            } else if late >= 2 {
+                self.counters
+                    .frames_late
+                    .fetch_add(late as u64, Ordering::Relaxed);
+                n += late;
+            }
+            let force = self.ctl.force_keyframe.swap(false, Ordering::AcqRel);
+            let conv = &mut self.conv;
+            match self
+                .enc
+                .encode(n, force, |tex, idx| conv.blit(tex, idx), |p| sink.push(p))
+            {
+                Ok(true) => {
+                    self.counters.frames_encoded.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(false) => {
+                    // Encoder saturated: this tick's frame is skipped.
+                    self.counters.frames_late.fetch_add(1, Ordering::Relaxed);
+                    if force {
+                        self.ctl.force_keyframe.store(true, Ordering::Release);
+                    }
+                }
+                Err(e) => {
+                    result = Err(e.into());
+                    break;
+                }
+            }
+            n += 1;
+        }
+        let flushed = self.enc.finish(|p| sink.push(p));
+        result?;
+        flushed?;
+        Ok(())
+    }
+
+    fn wait_first_frame(&self, timeout: Duration) -> Result<(), RecorderError> {
+        let t0 = Instant::now();
+        while !self.shared.has_frame.load(Ordering::Acquire) {
+            if self.ctl.stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if t0.elapsed() > timeout {
+                return Err(RecorderError::NoFrames(timeout));
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+}
+
+/// Fixed-rate frame clock on QPC with a high-resolution waitable timer.
+struct Pacer {
+    timer: HANDLE,
+    freq: i64,
+    fps: i64,
+}
+
+impl Pacer {
+    fn new(fps: u32) -> Result<Self, RecorderError> {
+        let timer = unsafe {
+            CreateWaitableTimerExW(
+                None,
+                windows::core::PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )?
+        };
+        let mut freq = 0;
+        unsafe { QueryPerformanceFrequency(&mut freq)? };
+        Ok(Self {
+            timer,
+            freq,
+            fps: i64::from(fps),
+        })
+    }
+
+    fn now(&self) -> i64 {
+        let mut t = 0;
+        unsafe {
+            let _ = QueryPerformanceCounter(&mut t);
+        }
+        t
+    }
+
+    fn deadline(&self, start: i64, n: i64) -> i64 {
+        start + ((i128::from(n) * i128::from(self.freq)) / i128::from(self.fps)) as i64
+    }
+
+    /// A new `start` that makes frame `n` due now (after a stall).
+    fn rebase(&self, n: i64) -> i64 {
+        self.now() - ((i128::from(n) * i128::from(self.freq)) / i128::from(self.fps)) as i64
+    }
+
+    fn wait_until(&self, start: i64, n: i64) {
+        let remaining = self.deadline(start, n) - self.now();
+        if remaining <= 0 {
+            return;
+        }
+        // Relative due time in 100 ns units (negative = relative).
+        let due = -((i128::from(remaining) * 10_000_000 / i128::from(self.freq)) as i64).max(1);
+        unsafe {
+            if SetWaitableTimer(self.timer, &due, 0, None, None, false).is_ok() {
+                WaitForSingleObject(self.timer, INFINITE);
+            }
+        }
+    }
+
+    /// Whole frame periods elapsed since frame `n`'s deadline.
+    fn frames_behind(&self, start: i64, n: i64) -> i64 {
+        let over = self.now() - self.deadline(start, n);
+        if over <= 0 {
+            0
+        } else {
+            (i128::from(over) * i128::from(self.fps) / i128::from(self.freq)) as i64
+        }
+    }
+}
+
+impl Drop for Pacer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.timer);
+        }
+    }
+}

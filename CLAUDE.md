@@ -2,7 +2,7 @@
 
 Lightweight, always-on game clipping for Windows. It keeps a rolling replay buffer and saves the last N minutes when you press a hotkey. **Gaming performance comes first.** Every design decision answers to that, then to recording quality, then to simplicity.
 
-Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0005 (HEVC record, H.264 share) accepted. ADR-0002 to 0004 are still *Proposed*. Code so far: `crates/engine` (replay ring index + encoder probe).
+Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0005 (HEVC record, H.264 share) accepted. ADR-0002 to 0004 are still *Proposed*. Code so far: `crates/engine`, a working headless video replay pipeline. See ROADMAP Phase 2 for what's done and what's next (audio, tray/hotkey, supervisor).
 
 ## Read first
 - `docs/ARCHITECTURE.md`: components, processes, threads and data flow

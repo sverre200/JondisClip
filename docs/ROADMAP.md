@@ -9,12 +9,20 @@
 - [ ] LGPL FFmpeg 9.0 dev build in third_party/ffmpeg/9.0 (owner to download)
 
 ## Phase 2: Minimal working recorder (headless + tray)
-1. Cargo workspace: `engine` (lib), `app` (bin). Tray icon, single-instance check, settings TOML.
-2. WGC monitor capture → D3D11 NV12 conversion → FFmpeg `hevc_amf`/`h264_amf` (hardware frames) → TS segments.
-3. Ring retention and pinning. Save-clip job (concat → MP4). Global hotkey.
-4. WASAPI loopback and mic → AAC, A/V sync.
-5. Robustness: device loss, display change, sleep and resume, low disk space, crash recovery.
-6. Tests: unit tests for ring math and retention, integration tests for the encoder producing valid segments, and ffprobe checks of saved clips (duration, A/V drift < 40 ms).
+- [x] **Video pipeline** (2026-11-04, `crates/engine`): WGC monitor capture → GPU copy → D3D11 video processor BGRA→NV12 (BT.709 limited) → FFmpeg D3D11VA hwframes → `hevc_amf` (H.264 fallback) → 2 s MPEG-TS segments → ring retention → save as a stream-copy MP4 (faststart, `hvc1`). Verified on the RX 6800 XT at 1080p60: 0 late or dropped frames, about 0.3 % CPU, about 68 MB working set, about 0.25 s to save 10 s. The save cut lands at the save moment (forced IDR). Run it with `cargo run --release -p jondisclip-engine --example record`.
+- [x] Reviewed by `perf-reviewer`. Fixed: AMD `forced_idr`, the save/IDR ordering race, encoder EAGAIN under GPU saturation, the shutdown hang after a thread panic, a dead writer looping on IDRs, resolution change detection (ContentSize), monitor removal (`Closed`), leaked pins on save timeout, long stalls inflating segment duration (it now starts a new run), deletes under the ring lock, and the buffer location plus a stale-session sweep.
+- [ ] App crate: tray icon, single-instance check, settings TOML, global hotkey → `save_clip`.
+- [ ] Audio: WASAPI loopback (process loopback for the detected game) and mic → AAC tracks, A/V sync.
+- [ ] Supervisor: automatically restart the recorder after `DisplayChanged`, `SourceClosed`, device removal and `PBT_APMSUSPEND`/resume.
+- [ ] Low disk space: warn, and stop buffering at the threshold.
+- [ ] Crash recovery: offer "Recover last buffer" before the stale-session sweep deletes it.
+- [ ] Known gaps from review, still to do:
+  - Segment files at background IO priority (`FileIoPriorityHintInfo`).
+  - Handle the 33-bit MPEG-TS timestamp wrap (sessions over about 26.5 h).
+  - Fall back to the next encoder if opening with hwframes fails (e.g. MF).
+  - Capture adapter selection on hybrid-GPU laptops.
+  - `CoDecrementMTAUsage` on stop.
+- [ ] Integration test (`#[ignore]`, GPU machine): record → save → ffprobe assertions, with A/V drift < 40 ms once audio exists.
 
 **Exit criteria:** a 5-minute clip saved from DayZ plays correctly with in-sync audio, and the buffer runs 2 h without leaks or drops.
 

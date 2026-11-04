@@ -94,16 +94,61 @@ pub fn candidates(codec: Codec) -> [EncoderId; 4] {
     .map(|vendor| EncoderId { codec, vendor })
 }
 
-/// Picks the first encoder that opens for the preferred codec, falling back
-/// from HEVC to H.264 (ADR-0005). Returns the chosen encoder or every error.
-pub fn select(preferred: Codec) -> Result<EncoderId, Vec<EncoderError>> {
-    let order: &[Codec] = match preferred {
+/// The encoder vendor for a PCI vendor id, if it has a native FFmpeg encoder.
+pub fn vendor_for_pci(vendor_id: u32) -> Option<Vendor> {
+    match vendor_id {
+        0x1002 => Some(Vendor::Amd),
+        0x10DE => Some(Vendor::Nvidia),
+        0x8086 => Some(Vendor::Intel),
+        _ => None,
+    }
+}
+
+/// Candidates for the capture adapter: its own vendor first (same device, so
+/// it's zero-copy), then Media Foundation. Other vendors' encoders can't take
+/// textures from this device, so they're skipped.
+pub fn candidates_for_adapter(codec: Codec, vendor_id: u32) -> Vec<EncoderId> {
+    let mut v: Vec<EncoderId> = vendor_for_pci(vendor_id)
+        .map(|vendor| EncoderId { codec, vendor })
+        .into_iter()
+        .collect();
+    v.push(EncoderId {
+        codec,
+        vendor: Vendor::MediaFoundation,
+    });
+    v
+}
+
+fn codec_order(preferred: Codec) -> &'static [Codec] {
+    match preferred {
         Codec::H264 => &[Codec::H264],
         Codec::Hevc => &[Codec::Hevc, Codec::H264],
         Codec::Av1 => &[Codec::Av1, Codec::Hevc, Codec::H264],
-    };
+    }
+}
+
+/// Like [`select`], restricted to encoders usable with the capture adapter.
+pub fn select_for_adapter(
+    preferred: Codec,
+    vendor_id: u32,
+) -> Result<EncoderId, Vec<EncoderError>> {
     let mut errors = Vec::new();
-    for &c in order {
+    for &c in codec_order(preferred) {
+        for id in candidates_for_adapter(c, vendor_id) {
+            match probe(id) {
+                Ok(()) => return Ok(id),
+                Err(e) => errors.push(e),
+            }
+        }
+    }
+    Err(errors)
+}
+
+/// Picks the first encoder that opens for the preferred codec, falling back
+/// from HEVC to H.264 (ADR-0005). Returns the chosen encoder or every error.
+pub fn select(preferred: Codec) -> Result<EncoderId, Vec<EncoderError>> {
+    let mut errors = Vec::new();
+    for &c in codec_order(preferred) {
         for id in candidates(c) {
             match probe(id) {
                 Ok(()) => return Ok(id),

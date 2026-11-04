@@ -169,6 +169,27 @@ impl Ring {
         Ok(deletable)
     }
 
+    /// Ends the buffer (recorder stopped). Every segment leaves the window:
+    /// unpinned ones are returned for deletion now, and pinned ones are returned
+    /// by `unpin` when their save finishes.
+    pub fn close(&mut self) -> Vec<Segment> {
+        let mut deletable = Vec::new();
+        while let Some(e) = self.live.pop_front() {
+            if e.pins == 0 {
+                deletable.push(e.seg);
+            } else {
+                self.evicted_pinned.insert(e.seg.seq, e);
+            }
+        }
+        self.live_duration_us = 0;
+        deletable
+    }
+
+    /// True when nothing is on disk any more (every save finished after `close`).
+    pub fn is_drained(&self) -> bool {
+        self.live.is_empty() && self.evicted_pinned.is_empty()
+    }
+
     /// Total duration currently available for a clip.
     pub fn available_us(&self) -> i64 {
         self.live_duration_us
@@ -363,6 +384,17 @@ mod tests {
             (0..8).collect::<Vec<_>>()
         );
         assert_eq!(r.available_us(), 4 * S);
+    }
+
+    #[test]
+    fn close_keeps_pinned_until_unpinned() {
+        let mut r = filled(60, 4);
+        let p = r.pin_last(2 * S).unwrap(); // seg 3
+        assert_eq!(seqs(&r.close()), vec![0, 1, 2]);
+        assert!(!r.is_drained());
+        assert_eq!(r.available_us(), 0);
+        assert_eq!(seqs(&r.unpin(p.id).unwrap()), vec![3]);
+        assert!(r.is_drained());
     }
 
     #[test]
