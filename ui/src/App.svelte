@@ -233,7 +233,7 @@
 
     <section aria-labelledby="h-video">
       <h2 id="h-video">Video</h2>
-      <Row label="Quality" hint={est ? `About ${est.perMin} per minute · a ${replayLabel(settings.replay_seconds)} clip is about ${est.perClip}` : undefined}>
+      <Row label="Quality" hint={est ? `Up to ${est.perMin} per minute in busy scenes (a ${replayLabel(settings.replay_seconds)} clip up to ${est.perClip}). Calm scenes use much less.` : undefined}>
         <Segmented label="Quality" value={settings.quality} options={qualities} onchange={(v) => change({ quality: v })} />
       </Row>
       <Row label="Resolution" hint={est ? `Records at ${est.out}. It never upscales.` : undefined}>

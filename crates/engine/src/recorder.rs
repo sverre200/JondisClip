@@ -47,6 +47,8 @@ pub struct RecorderConfig {
     /// Multiplier on the default bitrate (quality preset: Performance about 0.7,
     /// Balanced 1.0, High about 1.5). Ignored when `bitrate` is set.
     pub quality_scale: f64,
+    /// Minimum QP (quality floor). See `EncodeSettings::qp_floor`.
+    pub qp_floor: Option<u32>,
     /// How much history the buffer keeps.
     pub replay: Duration,
     pub segment_seconds: u32,
@@ -128,6 +130,7 @@ impl Default for RecorderConfig {
             codec: Codec::H264, // ADR-0007: plays everywhere without extra codecs
             bitrate: None,
             quality_scale: 1.0,
+            qp_floor: Some(18),
             replay: Duration::from_secs(300),
             segment_seconds: 2,
             buffer_dir: default_buffer_dir(),
@@ -269,6 +272,7 @@ impl Recorder {
             fps: cfg.fps,
             bitrate,
             gop_seconds: 1,
+            qp_floor: cfg.qp_floor,
         };
         let enc = HwEncoder::open(&gpu, settings)?;
         let conv = Converter::new(&gpu, &capture.latest, width, height, cfg.fps)?;

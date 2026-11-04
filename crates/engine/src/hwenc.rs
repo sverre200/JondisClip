@@ -49,6 +49,9 @@ pub struct EncodeSettings {
     pub fps: u32,
     pub bitrate: u64,
     pub gop_seconds: u32,
+    /// Lowest QP (highest quality) the encoder may use. It stops calm scenes
+    /// spending bits on invisible detail (docs/perf/2026-11-04-rate-control.md).
+    pub qp_floor: Option<u32>,
 }
 
 impl EncodeSettings {
@@ -153,6 +156,12 @@ impl HwEncoder {
             (*raw).color_primaries = ffi::AVColorPrimaries::AVCOL_PRI_BT709;
             (*raw).color_trc = ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
             (*raw).rc_buffer_size = s.bitrate as i32;
+            // Measured on AMF only; other vendors keep their defaults until tested.
+            if s.id.vendor == Vendor::Amd
+                && let Some(q) = s.qp_floor
+            {
+                (*raw).qmin = q as i32;
+            }
             (*raw).hw_frames_ctx = ffi::av_buffer_ref(frames_ref);
         }
 

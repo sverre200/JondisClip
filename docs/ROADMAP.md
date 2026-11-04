@@ -35,6 +35,10 @@
 **Exit criteria:** a 5-minute clip saved from DayZ plays correctly with in-sync audio, and the buffer runs 2 h without leaks or drops.
 
 ## Phase 3: Performance
+- [x] **Rate-control tuning** (2026-11-04, [report](perf/2026-11-04-rate-control.md), bench in `tools/rc-bench/`):
+  - Keep capped VBR and add a per-preset quality floor (qmin 21 / 18 / 16). Calm scenes are about 55–60 % smaller for about 1–2 VMAF, and busy scenes are unchanged.
+  - Rejected: QVBR, which is broken on AMF H.264, and CQP, whose caps are ignored.
+  - **To do:** confirm on a real DayZ sample, and tune NVENC/QSV on that hardware.
 PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread priorities, GOP and segment length, and the conversion path. Only move on when the targets in `PERFORMANCE.md` are met or the owner accepts the gaps.
 
 ## Phase 4: UI and library

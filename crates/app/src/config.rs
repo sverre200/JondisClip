@@ -16,6 +16,7 @@ pub fn recorder_config(s: &Settings) -> RecorderConfig {
             CodecPref::Av1 => Codec::Av1,
         },
         quality_scale: s.quality.scale(),
+        qp_floor: Some(s.quality.qp_floor()),
         replay: s.replay(),
         audio: AudioConfig {
             system: s.system_audio,
@@ -43,6 +44,7 @@ mod tests {
         let (s, _) = Settings::from_toml("quality = \"high\"\nmicrophone = true\n");
         let c = recorder_config(&s);
         assert!((c.quality_scale - 1.5).abs() < f64::EPSILON);
+        assert_eq!(c.qp_floor, Some(16));
         assert!(c.audio.mic && c.audio.system);
     }
 }

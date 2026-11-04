@@ -53,6 +53,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = RecorderConfig {
         replay: Duration::from_secs(save_s.max(1) + 4),
         output_height: height,
+        // Debug aid: JC_QP_FLOOR=none|<n> overrides the quality floor.
+        qp_floor: match std::env::var("JC_QP_FLOOR").as_deref() {
+            Ok("none") => None,
+            Ok(n) => n.parse().ok().or(Some(18)),
+            Err(_) => Some(18),
+        },
         audio: AudioConfig {
             mic,
             ..Default::default()
