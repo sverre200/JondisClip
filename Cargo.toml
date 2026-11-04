@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/engine"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "Proprietary"
+publish = false
+
+[workspace.dependencies]
+thiserror = "2"
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

@@ -1,0 +1,4 @@
+# Dev-time paths for the LGPL FFmpeg build (see docs/adr/0001-stack.md).
+[env]
+FFMPEG_DIR = { value = "third_party/ffmpeg/9.0", relative = true }
+LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
