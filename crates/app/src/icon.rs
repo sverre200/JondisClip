@@ -45,7 +45,7 @@ fn coverage(d: f32, inner: f32, outer: f32) -> f32 {
 
 /// Premultiplied ARGB pixels (top-down rows) for the icon at `size` px.
 pub fn render(state: IconState, size: i32) -> Vec<u32> {
-    let size = size.clamp(16, 256);
+    let size = size.clamp(16, 1024);
     let n = size as usize;
     let s = size as f32;
     let c = (s - 1.0) / 2.0;
@@ -141,6 +141,32 @@ mod tests {
                 "centre should be red at {size}px: {centre:08x}"
             );
         }
+    }
+
+    /// Writes the 1024 px app icon as raw straight-alpha BGRA (for `tauri icon`):
+    /// `JC_APP_ICON=icon.bgra cargo test -p jondisclip dump_app_icon -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_app_icon() {
+        let Ok(path) = std::env::var("JC_APP_ICON") else {
+            return;
+        };
+        let mut out = Vec::with_capacity(1024 * 1024 * 4);
+        for p in render(IconState::Recording, 1024) {
+            let a = p >> 24;
+            let un = |c: u32| {
+                (c * 255 + a / 2)
+                    .checked_div(a)
+                    .map_or(0, |v| v.min(255) as u8)
+            };
+            out.extend_from_slice(&[
+                un(p & 0xFF),
+                un((p >> 8) & 0xFF),
+                un((p >> 16) & 0xFF),
+                a as u8,
+            ]);
+        }
+        std::fs::write(path, out).unwrap();
     }
 
     /// Writes the icons to a 32-bit BMP for visual review:

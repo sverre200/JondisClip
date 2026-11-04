@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine", "crates/app"]
+members = ["crates/core", "crates/engine", "crates/app", "ui/src-tauri"]
 
 [workspace.package]
 edition = "2024"
@@ -16,3 +16,13 @@ ffmpeg-next = { version = "9", default-features = false, features = ["codec", "f
 lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
+
+# bindgen (ffmpeg-sys-next's build script) can overflow the 1 MB main-thread
+# stack on Windows when built unoptimised with feature-unified deps (seen when
+# the Tauri UI crate is in the same build). Optimised build scripts use far
+# less stack.
+[profile.dev.build-override]
+opt-level = 2
+
+[profile.release.build-override]
+opt-level = 2

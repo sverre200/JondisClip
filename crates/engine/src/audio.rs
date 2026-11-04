@@ -60,12 +60,17 @@ const MAX_MIX_BACKLOG_FRAMES: i64 = SAMPLE_RATE as i64; // 1 s
 const DEFAULT_DEVICE_POLL: Duration = Duration::from_secs(1);
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioConfig {
     /// Game/system audio (loopback of the default output device).
     pub system: bool,
-    /// Default microphone. Off by default: never record a voice by surprise.
+    /// Record a microphone. Off by default: never record a voice by surprise.
     pub mic: bool,
+    /// Endpoint ID of the microphone to record, or None for the Windows
+    /// default (which is followed if it changes). If a chosen device is missing,
+    /// the mic track is silent until it returns. It never falls back to a
+    /// different microphone.
+    pub mic_device: Option<String>,
     pub bitrate: u64,
 }
 
@@ -74,6 +79,7 @@ impl Default for AudioConfig {
         Self {
             system: true,
             mic: false,
+            mic_device: None,
             bitrate: 160_000,
         }
     }
@@ -287,6 +293,7 @@ pub fn start(
         .mic
         .then(|| Arc::new(Mutex::new(SourceBuf::new(max_frames))));
 
+    let mic_device = cfg.mic_device.clone();
     let mut threads = Vec::new();
     for (src, buf, name) in [
         (Source::Loopback, &game, "jc-audio-loopback"),
@@ -294,10 +301,14 @@ pub fn start(
     ] {
         if let Some(buf) = buf {
             let (buf, stop, counters) = (buf.clone(), stop.clone(), counters.clone());
+            let device = match src {
+                Source::Mic => mic_device.clone(),
+                Source::Loopback => None,
+            };
             threads.push(
                 thread::Builder::new()
                     .name(name.into())
-                    .spawn(move || capture_thread(src, buf, clock, stop, counters))?,
+                    .spawn(move || capture_thread(src, device, buf, clock, stop, counters))?,
             );
         }
     }
@@ -431,6 +442,7 @@ impl Mixer {
 
 fn capture_thread(
     src: Source,
+    device: Option<String>,
     buf: Arc<Mutex<SourceBuf>>,
     clock: Clock,
     stop: Arc<AtomicBool>,
@@ -448,7 +460,7 @@ fn capture_thread(
         }
         first = false;
         // Ends on stop (Ok) or a device error. On error, retry after a pause.
-        if capture_session(src, &buf, clock, &stop, &mut scratch).is_ok() {
+        if capture_session(src, device.as_deref(), &buf, clock, &stop, &mut scratch).is_ok() {
             break;
         }
         for _ in 0..10 {
@@ -472,6 +484,7 @@ impl Drop for EventHandle {
 
 fn capture_session(
     src: Source,
+    chosen: Option<&str>,
     buf: &Mutex<SourceBuf>,
     clock: Clock,
     stop: &AtomicBool,
@@ -480,7 +493,12 @@ fn capture_session(
     let flow = flow_of(src);
     let enumerator: IMMDeviceEnumerator =
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
-    let device = unsafe { enumerator.GetDefaultAudioEndpoint(flow, eConsole)? };
+    let device = match chosen {
+        // A specific device. If it's unplugged, Activate fails and the caller
+        // retries; the timeline stays silent meanwhile.
+        Some(id) => unsafe { enumerator.GetDevice(&windows::core::HSTRING::from(id))? },
+        None => unsafe { enumerator.GetDefaultAudioEndpoint(flow, eConsole)? },
+    };
     let device_id = endpoint_id(&device);
     let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None)? };
     let fmt = WAVEFORMATEX {
@@ -514,7 +532,7 @@ fn capture_session(
         while !stop.load(Ordering::Acquire) {
             // Loopback may not signal at all while nothing plays. The timeout
             // keeps the stop flag responsive, and the mixer fills silence.
-            if last_poll.elapsed() >= DEFAULT_DEVICE_POLL {
+            if chosen.is_none() && last_poll.elapsed() >= DEFAULT_DEVICE_POLL {
                 last_poll = Instant::now();
                 // The user switched output or input: reopen on the new default.
                 let current = unsafe { enumerator.GetDefaultAudioEndpoint(flow, eConsole) }

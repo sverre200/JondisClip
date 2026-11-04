@@ -2,7 +2,11 @@
 
 Lightweight, always-on game clipping for Windows. It keeps a rolling replay buffer and saves the last N minutes when you press a hotkey. **Gaming performance comes first.** Every design decision answers to that, then to recording quality, then to simplicity.
 
-Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.264 by default, which supersedes ADR-0005's HEVC default) accepted. ADR-0002 to 0004 are still *Proposed*. Code so far: `crates/engine` (video and audio replay pipeline) and `crates/app` (`jondisclip.exe` tray app with hotkey and supervisor). See ROADMAP Phase 2 for status. Next up: a real-game test (DayZ), crash recovery, then Phase 3 perf benchmarks.
+Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.264 by default, which supersedes ADR-0005's HEVC default) accepted. ADR-0002 to 0004 are still *Proposed*. Code so far:
+- `crates/engine`: video and audio replay pipeline.
+- `crates/app`: `jondisclip.exe`, the tray app with hotkey and supervisor.
+- `crates/core`: shared settings, hotkey, paths and status.
+- `ui/` + `ui/src-tauri`: `jondisclip-ui.exe`, the settings window (Tauri 2 + Svelte 5, separate process, ADR-0008). See ROADMAP Phase 2 for status. Next up: a real-game test (DayZ), crash recovery, then Phase 3 perf benchmarks.
 
 ## Read first
 - `docs/ARCHITECTURE.md`: components, processes, threads and data flow
@@ -40,6 +44,11 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
 
 ## Conventions
 - Run the app with `cargo run --release -p jondisclip`. Logs go to `%LOCALAPPDATA%\JondisClip\jondisclip.log` and settings to `%APPDATA%\JondisClip\settings.toml`. Only one instance can run. Quit it from the tray before starting another build. Never run `--example record` while the tray app is running: they share the buffer root.
+- UI:
+  - Design in the browser with the mock API: `npm --prefix ui run dev` (`.claude/launch.json` → `ui-dev`). Use only tokens from `ui/src/tokens.css`.
+  - Before `cargo build -p jondisclip-ui`, run `npm --prefix ui run build`. The exe embeds `ui/dist`.
+  - `npm --prefix ui run check` must pass.
+  - Quit the tray before rebuilding, because Windows locks the running exe.
 - Rust: `cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` must pass. Hot-path crates use no `unwrap()` and return typed errors (`thiserror`).
 - Frontend: TypeScript strict, verified visually in the browser pane against the Vite dev server.
 - Record important decisions as a new ADR (`docs/adr/NNNN-title.md`).

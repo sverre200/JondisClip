@@ -7,9 +7,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use jondisclip_engine::audio::AudioConfig;
-use jondisclip_engine::encoder::Codec;
-use jondisclip_engine::recorder::RecorderConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::hotkey::Hotkey;
@@ -83,6 +80,8 @@ pub struct Settings {
     pub codec: CodecPref,
     pub system_audio: bool,
     pub microphone: bool,
+    /// Windows endpoint ID of the microphone to record. Empty = Windows default.
+    pub microphone_device: String,
     /// Short sound when a clip is saved (works in fullscreen games).
     pub save_sound: bool,
     pub start_with_windows: bool,
@@ -100,6 +99,7 @@ impl Default for Settings {
             codec: CodecPref::Auto,
             system_audio: true,
             microphone: false,
+            microphone_device: String::new(),
             save_sound: true,
             start_with_windows: false,
         }
@@ -175,26 +175,6 @@ impl Settings {
         }
     }
 
-    pub fn recorder_config(&self) -> RecorderConfig {
-        RecorderConfig {
-            fps: self.fps,
-            output_height: self.resolution.height(),
-            codec: match self.codec {
-                CodecPref::Auto | CodecPref::H264 => Codec::H264,
-                CodecPref::Hevc => Codec::Hevc,
-                CodecPref::Av1 => Codec::Av1,
-            },
-            quality_scale: self.quality.scale(),
-            replay: self.replay(),
-            audio: AudioConfig {
-                system: self.system_audio,
-                mic: self.microphone,
-                ..AudioConfig::default()
-            },
-            ..RecorderConfig::default()
-        }
-    }
-
     /// True when switching from `self` to `other` needs a recorder restart
     /// (anything but replay length, hotkey, save dir, sound and autostart).
     pub fn needs_restart(&self, other: &Settings) -> bool {
@@ -204,6 +184,7 @@ impl Settings {
             || self.codec != other.codec
             || self.system_audio != other.system_audio
             || self.microphone != other.microphone
+            || self.microphone_device != other.microphone_device
     }
 }
 
@@ -254,23 +235,13 @@ mod tests {
     }
 
     #[test]
-    fn auto_codec_is_h264() {
-        assert_eq!(Settings::default().recorder_config().codec, Codec::H264);
-        let (s, _) = Settings::from_toml(
-            "codec = \"hevc\"
-",
-        );
-        assert_eq!(s.recorder_config().codec, Codec::Hevc);
-    }
-
-    #[test]
     fn enum_spellings() {
         let (s, w) =
             Settings::from_toml("resolution = \"1080p\"\nquality = \"high\"\ncodec = \"h264\"\n");
         assert!(w.is_empty());
         assert_eq!(s.resolution.height(), Some(1080));
-        assert_eq!(s.recorder_config().codec, Codec::H264);
-        assert!((s.recorder_config().quality_scale - 1.5).abs() < f64::EPSILON);
+        assert_eq!(s.quality, Quality::High);
+        assert_eq!(s.codec, CodecPref::H264);
     }
 
     #[test]

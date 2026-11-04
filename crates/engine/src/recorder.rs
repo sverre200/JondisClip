@@ -300,7 +300,7 @@ impl Recorder {
             freq,
         };
         // Audio problems never stop video recording: fall back to video-only.
-        let (audio_setup, audio_error) = match audio::start(cfg.audio, clock, tx.clone()) {
+        let (audio_setup, audio_error) = match audio::start(cfg.audio.clone(), clock, tx.clone()) {
             Ok(a) => (a, None),
             Err(e) => (
                 audio::AudioSetup {

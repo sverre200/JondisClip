@@ -1,0 +1,32 @@
+[package]
+name = "jondisclip-ui"
+description = "JondisClip settings window (opened on demand from the tray)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "jondisclip-ui"
+path = "src/main.rs"
+
+[features]
+# Embed the built frontend (ui/dist) in the exe. Without it a release build
+# would load the Vite dev server. Design iteration happens in the browser
+# preview (`npm run dev`), so this stays on.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+jondisclip-core = { path = "../../crates/core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.windows]
+version = "0.62"
+features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"]

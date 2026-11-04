@@ -1,0 +1,112 @@
+/* JondisClip design tokens. Components use only these variables. */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --bg: #121316;
+  --surface: #18191d;
+  --surface-raised: #202227;
+  --surface-hover: #272a30;
+  --surface-press: #2d3037;
+  --border: #26282e;
+  --border-strong: #363941;
+
+  /* Text */
+  --text: #ecedef;
+  --text-muted: #a0a3ab;
+  --text-faint: #6f737c;
+
+  /* Brand + semantic (the record-red is the only accent) */
+  --accent: #e5484d;
+  --accent-hover: #ec5d61;
+  --accent-press: #cf3c41;
+  --accent-soft: rgb(229 72 77 / 0.14);
+  --on-accent: #ffffff;
+  --success: #30a46c;
+  --success-soft: rgb(48 164 108 / 0.14);
+  --warning: #f5a524;
+  --warning-soft: rgb(245 165 36 / 0.12);
+  --danger: #e5484d;
+  --focus: #e5484d;
+
+  /* Type */
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, monospace;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-xl: 20px;
+  --fw-regular: 400;
+  --fw-strong: 600;
+
+  /* Spacing (4/8 rhythm) */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* Shape + motion */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+  --control-h: 34px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --t-fast: 120ms;
+  --t-med: 200ms;
+  --shadow-pop: 0 8px 24px rgb(0 0 0 / 0.45), 0 0 0 1px var(--border-strong);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: var(--fs-md);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid var(--bg);
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+  }
+}

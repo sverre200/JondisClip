@@ -11,9 +11,8 @@ name = "jondisclip"
 path = "src/main.rs"
 
 [dependencies]
+jondisclip-core = { path = "../core" }
 jondisclip-engine = { path = "../engine" }
-serde = { version = "1", features = ["derive"] }
-toml = "1"
 
 [dependencies.windows]
 version = "0.62"

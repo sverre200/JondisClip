@@ -38,6 +38,13 @@
 PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread priorities, GOP and segment length, and the conversion path. Only move on when the targets in `PERFORMANCE.md` are met or the owner accepts the gaps.
 
 ## Phase 4: UI and library
+- [x] **Settings window** (2026-11-04, ADR-0008): `jondisclip-ui.exe`, Tauri 2 + Svelte 5.
+  - Settings: replay length, hotkey capture, save folder picker, sound, quality, resolution, frame rate, audio, start with Windows, codec (advanced).
+  - Live tray status, live size estimates, autosave with toast.
+  - Opened by left-clicking the tray icon or choosing Settings….
+  - Verified: browser preview (interactions, validation, 640×520 minimum size) and the real window (live data, single instance). After closing, 0 processes remain.
+  - Not yet clicked by hand in the real window: the folder picker and changing a setting there (the merge logic is unit-tested and the tray's file reload was verified earlier).
+- [ ] Library window: grid, thumbnails, player, rename, delete to the Recycle Bin, open folder, copy path.
 Tauri window with Library (grid, thumbnails, player, rename, delete to the Recycle Bin, open folder, copy path), Recording status and Settings. Trim with stream copy, and a share export.
 
 ## Phase 5: Sharing and cloud

@@ -3,43 +3,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autostart;
-mod hotkey;
+mod config;
 mod icon;
 mod log;
 mod naming;
-mod settings;
 mod tray;
 
-use std::path::PathBuf;
-
+use jondisclip_core::paths;
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
-use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::Shell::{FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
 use windows::core::w;
-
-fn env_dir(var: &str) -> PathBuf {
-    std::env::var_os(var)
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-}
-
-fn videos_dir() -> PathBuf {
-    unsafe {
-        if let Ok(p) = SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, None) {
-            let s = p.to_string().ok();
-            CoTaskMemFree(Some(p.0 as *const _));
-            if let Some(s) = s {
-                return PathBuf::from(s);
-            }
-        }
-    }
-    env_dir("USERPROFILE").join("Videos")
-}
 
 fn main() {
     unsafe {
@@ -58,15 +35,13 @@ fn main() {
     // The handle stays open for the life of the process.
     let _mutex = mutex;
 
-    log::init(env_dir("LOCALAPPDATA").join("JondisClip"));
+    log::init(paths::local_dir());
     log::info!(
         "JondisClip {} starting (args: {:?})",
         env!("CARGO_PKG_VERSION"),
         std::env::args().skip(1).collect::<Vec<_>>()
     );
-    let settings_path = env_dir("APPDATA").join("JondisClip").join("settings.toml");
-    let save_dir = videos_dir().join("JondisClip");
-    if let Err(e) = tray::run(settings_path, save_dir) {
+    if let Err(e) = tray::run(paths::settings_file(), paths::default_save_dir()) {
         log::error!("fatal: {e}");
     }
 }

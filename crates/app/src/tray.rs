@@ -39,11 +39,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::autostart;
-use crate::hotkey::MOD_NOREPEAT;
 use crate::icon::{self, IconState};
 use crate::log::{error, info, warning};
 use crate::naming;
-use crate::settings::{REPLAY_PRESETS, Settings, replay_label};
+use jondisclip_core::hotkey::MOD_NOREPEAT;
+use jondisclip_core::paths;
+use jondisclip_core::settings::{REPLAY_PRESETS, Settings, replay_label};
+use jondisclip_core::status::TrayStatus;
 
 pub const WINDOW_CLASS: PCWSTR = w!("JondisClipTray");
 const WM_APP_TRAY: u32 = WM_APP + 1;
@@ -92,6 +94,8 @@ struct App {
     hotkey_ok: bool,
     icons: [HICON; 4],
     shown: Option<(IconState, String)>,
+    /// Last status published to status.json (written only on change).
+    published: Option<TrayStatus>,
     saved_flash_until: Option<Instant>,
     last_save_at: Option<Instant>,
     saves: Arc<Mutex<Vec<SaveOutcome>>>,
@@ -199,7 +203,7 @@ pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), Stri
         CreateWindowExW(
             WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0),
             WINDOW_CLASS,
-            w!("JondisClip"),
+            w!("JondisClip Tray"),
             WS_OVERLAPPED,
             0,
             0,
@@ -234,6 +238,7 @@ pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), Stri
         hotkey_ok: false,
         icons,
         shown: None,
+        published: None,
         saved_flash_until: None,
         last_save_at: None,
         saves: Arc::new(Mutex::new(Vec::new())),
@@ -269,8 +274,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_APP_TRAY => {
             let event = (lparam.0 & 0xFFFF) as u32;
-            if event == WM_CONTEXTMENU || event == NIN_SELECT || event == (NIN_SELECT | NINF_KEY) {
+            if event == WM_CONTEXTMENU {
                 show_menu(hwnd);
+            } else if event == NIN_SELECT || event == (NIN_SELECT | NINF_KEY) {
+                // Left click / Enter opens the app window.
+                with_app(App::open_settings);
             }
             LRESULT(0)
         }
@@ -457,6 +465,7 @@ impl App {
             .as_ref()
             .is_some_and(|(s, t)| *s == state && *t == tip)
         {
+            self.publish_status();
             return;
         }
         let mut nid = self.base_nid();
@@ -472,6 +481,7 @@ impl App {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
         }
         self.shown = Some((state, tip));
+        self.publish_status();
     }
 
     /// A quiet notification. Windows holds it back during Focus/game mode.
@@ -524,7 +534,7 @@ impl App {
         if self.recorder.is_some() {
             return;
         }
-        let cfg = self.settings.recorder_config();
+        let cfg = crate::config::recorder_config(&self.settings);
         match Recorder::start(&cfg) {
             Ok(r) => {
                 let i = r.info();
@@ -887,7 +897,7 @@ impl App {
                 menu,
                 MF_STRING,
                 ID_EDIT_SETTINGS as usize,
-                &menu_text("Edit settings…"),
+                &menu_text("Settings…"),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(
@@ -936,13 +946,7 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 shell_open(&dir.to_string_lossy(), None);
             }
-            ID_EDIT_SETTINGS => {
-                // Notepad always exists; a .toml file may have no associated app.
-                shell_open(
-                    "notepad.exe",
-                    Some(&format!("\"{}\"", self.settings_path.display())),
-                );
-            }
+            ID_EDIT_SETTINGS => self.open_settings(),
             ID_QUIT => unsafe {
                 let _ = DestroyWindow(self.hwnd);
             },
@@ -959,6 +963,72 @@ impl App {
         self.refresh();
     }
 
+    /// Writes status.json for the settings window when anything changed.
+    fn publish_status(&mut self) {
+        let info = self.recorder.as_ref().map(|r| r.info());
+        let status = TrayStatus {
+            state: match self.status {
+                Status::Recording => "recording",
+                Status::Paused => "paused",
+                Status::Suspended => "sleeping",
+                Status::LowDisk => "low_disk",
+                Status::Restarting { .. } => "restarting",
+            }
+            .into(),
+            summary: self.status_text(),
+            hotkey: self.settings.hotkey().to_string(),
+            hotkey_ok: self.hotkey_ok,
+            encoder: info.map(|i| i.encoder.ffmpeg_name().to_string()),
+            width: info.map(|i| i.width),
+            height: info.map(|i| i.height),
+            fps: info.map(|i| i.fps),
+            bitrate: info.map(|i| i.bitrate),
+            audio_tracks: info
+                .map(|i| i.audio_tracks.iter().map(|t| t.to_string()).collect())
+                .unwrap_or_default(),
+            audio_error: info.and_then(|i| i.audio_error.clone()),
+        };
+        if self.published.as_ref() == Some(&status) {
+            return;
+        }
+        if let Err(e) = status.write(&paths::status_file()) {
+            warning!("could not write status: {e}");
+        }
+        self.published = Some(status);
+    }
+
+    /// Starts the settings window (`jondisclip-ui.exe` next to this exe). The
+    /// window is its own process: it costs nothing until opened and exits on
+    /// close. A second launch just focuses the open window.
+    fn open_settings(&mut self) {
+        let ui = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.join("jondisclip-ui.exe")));
+        match ui {
+            Some(ui) if ui.exists() => {
+                // We got foreground rights from the tray click. Pass them on so the
+                // window opens in front (or the running one can focus itself).
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(
+                        windows::Win32::UI::WindowsAndMessaging::ASFW_ANY,
+                    );
+                }
+                if let Err(e) = std::process::Command::new(&ui).spawn() {
+                    error!("could not start {}: {e}", ui.display());
+                    self.balloon("Couldn't open settings", &e.to_string(), true);
+                }
+            }
+            _ => {
+                warning!("jondisclip-ui.exe not found next to the tray app");
+                self.balloon(
+                    "Settings window missing",
+                    "jondisclip-ui.exe wasn't found next to jondisclip.exe.",
+                    true,
+                );
+            }
+        }
+    }
+
     fn shutdown(&mut self) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_ID);
@@ -967,6 +1037,7 @@ impl App {
             let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
         }
         self.stop_recorder();
+        let _ = std::fs::remove_file(paths::status_file());
         for i in self.icons {
             if !i.is_invalid() {
                 unsafe {

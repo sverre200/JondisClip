@@ -17,7 +17,7 @@ Status: **Proposed.** It depends on ADR-0001 to ADR-0004 being accepted.
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-It is one process built with Tauri 2. The resident state is the Rust core plus the tray. The WebView2 window and its renderer processes exist only while the window is open. If crash isolation is ever needed, the engine can be split into a separate process later behind the same command and status interface (we'd write a new ADR for that).
+The tray and recorder run in **`jondisclip.exe`** (raw Win32, ADR-0006). The app window is a **separate `jondisclip-ui.exe`** (Tauri 2), started on demand and gone when closed. The two share files only: `settings.toml` and `status.json` (ADR-0008). The diagram above shows the original single-process idea.
 
 ## Engine pipeline (hot path)
 
