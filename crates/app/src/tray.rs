@@ -704,6 +704,19 @@ impl App {
                 );
                 r.set_mic_gain_db(self.settings.microphone_gain_db);
             }
+            if old.microphone_low_cut != self.settings.microphone_low_cut
+                && let Some(r) = self.recorder.as_ref()
+            {
+                info!(
+                    "microphone low-cut {}",
+                    if self.settings.microphone_low_cut {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
+                r.set_mic_low_cut(self.settings.microphone_low_cut);
+            }
         }
         self.refresh();
     }

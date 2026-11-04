@@ -3,7 +3,8 @@
 
 pub mod audio;
 pub mod audio_buf;
-pub mod audio_dsp;
+/// Moved to `jondisclip-core` so the settings window's mic check runs the same DSP.
+pub use jondisclip_core::audio_dsp;
 pub mod capture;
 pub mod clip;
 pub mod convert;

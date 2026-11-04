@@ -96,6 +96,8 @@ pub struct Settings {
     pub microphone_device: String,
     /// Microphone gain in dB, -12 to +24. Applied live.
     pub microphone_gain_db: f32,
+    /// 80 Hz low-cut on the mic (off by default). Applied live.
+    pub microphone_low_cut: bool,
     /// Short sound when a clip is saved (works in fullscreen games).
     pub save_sound: bool,
     pub start_with_windows: bool,
@@ -115,6 +117,7 @@ impl Default for Settings {
             microphone: false,
             microphone_device: String::new(),
             microphone_gain_db: 0.0,
+            microphone_low_cut: false,
             save_sound: true,
             start_with_windows: false,
         }

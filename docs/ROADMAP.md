@@ -25,6 +25,7 @@
   - Clock correction by resampling (no more zero-sample clicks or slips; 0 in simulation vs 2.4–2.9/s).
   - Mono mic track, live mic gain, transparent −1 dBFS limiter on Mix and Mic, level meter, warnings for virtual and disconnected mics.
   - A/V re-checked unlocked: median −3 to −8 ms, and Mix and Game are sample-aligned.
+  - G-Track Pro tuning ([report](perf/2026-11-04-gtrack-pro.md)): the right device selected, plus a mic check (level, clipping, noise, mode, playback) and an optional 80 Hz low-cut.
   - **To do:** listening test in DayZ.
 - [ ] Process loopback for the detected game only (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`), so Discord voice and music stay out of clips. This needs game detection. For now, "Game" means all system audio.
 - [ ] Crash recovery: offer "Recover last buffer" before the stale-session sweep deletes it.

@@ -5,6 +5,10 @@
 //!   like the recorder does and reports how its WASAPI QPC timestamps drift
 //!   and jitter against sample counting, and how often the drift corrector
 //!   would intervene.
+//! - `audio_probe device <name substring> [seconds]`: one microphone's real
+//!   configuration (device format, Windows input level, enhancements) plus
+//!   per-channel statistics of a short capture: level, DC, channel identity,
+//!   low-frequency energy, effective bit depth. Statistics only, no audio kept.
 use std::time::{Duration, Instant};
 
 use windows::Win32::Devices::FunctionDiscovery::{
@@ -225,6 +229,231 @@ fn jitter(e: &IMMDeviceEnumerator, which: &str, secs: u64) -> windows::core::Res
     Ok(())
 }
 
+fn device_report(e: &IMMDeviceEnumerator, needle: &str, secs: u64) -> windows::core::Result<()> {
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    use windows::Win32::Media::Audio::{
+        PKEY_AudioEndpoint_Disable_SysFx, PKEY_AudioEngine_DeviceFormat,
+    };
+    let Some(d) = find(e, needle)? else {
+        println!("no capture device matching \"{needle}\"");
+        return Ok(());
+    };
+    println!("device: {}", prop(&d, &PKEY_Device_FriendlyName));
+    unsafe {
+        if let Ok(id) = d.GetId() {
+            println!("  endpoint id: {}", id.to_string().unwrap_or_default());
+            CoTaskMemFree(Some(id.0 as *const _));
+        }
+        let store = d.OpenPropertyStore(STGM_READ)?;
+        // Device (hardware-side) format: a WAVEFORMATEX in a VT_BLOB.
+        if let Ok(v) = store.GetValue(&PKEY_AudioEngine_DeviceFormat) {
+            let blob = v.Anonymous.Anonymous.Anonymous.blob;
+            if blob.cbSize as usize >= std::mem::size_of::<WAVEFORMATEX>()
+                && !blob.pBlobData.is_null()
+            {
+                let f = std::ptr::read_unaligned(blob.pBlobData as *const WAVEFORMATEX);
+                let (rate, ch, bits, tag) = (
+                    f.nSamplesPerSec,
+                    f.nChannels,
+                    f.wBitsPerSample,
+                    f.wFormatTag,
+                );
+                let mut extra = String::new();
+                if tag == 0xFFFE
+                    && blob.cbSize as usize >= std::mem::size_of::<WAVEFORMATEXTENSIBLE>()
+                {
+                    let x = std::ptr::read_unaligned(blob.pBlobData as *const WAVEFORMATEXTENSIBLE);
+                    let (valid, mask) = (x.Samples.wValidBitsPerSample, x.dwChannelMask);
+                    extra = format!(", valid bits {valid}, channel mask {mask:#x}");
+                }
+                println!(
+                    "  device format (Windows 'Default Format'): {rate} Hz, {ch} ch, {bits}-bit container{extra}"
+                );
+            }
+        }
+        let sysfx = store
+            .GetValue(&PKEY_AudioEndpoint_Disable_SysFx)
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        println!(
+            "  audio enhancements disabled flag: {}",
+            if sysfx.is_empty() {
+                "(not set)".into()
+            } else {
+                sysfx
+            }
+        );
+        println!("  shared mix format: {}", mix_format(&d));
+        if let Ok(vol) = d.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
+            let (mut mn, mut mx, mut step) = (0f32, 0f32, 0f32);
+            let _ = vol.GetVolumeRange(&mut mn, &mut mx, &mut step);
+            let db = vol.GetMasterVolumeLevel().unwrap_or(f32::NAN);
+            let sc = vol.GetMasterVolumeLevelScalar().unwrap_or(f32::NAN);
+            let mute = vol.GetMute().map(|b| b.as_bool()).unwrap_or(false);
+            let hw = vol.QueryHardwareSupport().unwrap_or(0);
+            println!(
+                "  Windows input level: {:.0}% = {db:+.1} dB (range {mn:+.1}..{mx:+.1} dB){}{}",
+                sc * 100.0,
+                if mute { ", MUTED" } else { "" },
+                if hw & 1 != 0 {
+                    ", applied in the device (hardware)"
+                } else {
+                    ", applied in software"
+                }
+            );
+        }
+    }
+    // Capture statistics.
+    let fmt = WAVEFORMATEX {
+        wFormatTag: 3,
+        nChannels: 2,
+        nSamplesPerSec: 48_000,
+        nAvgBytesPerSec: 48_000 * 8,
+        nBlockAlign: 8,
+        wBitsPerSample: 32,
+        cbSize: 0,
+    };
+    let mut lr: Vec<[f32; 2]> = Vec::with_capacity(48_000 * secs as usize + 4800);
+    unsafe {
+        let client: IAudioClient = d.Activate(CLSCTX_ALL, None)?;
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            2_000_000,
+            0,
+            &fmt,
+            None,
+        )?;
+        let cap: IAudioCaptureClient = client.GetService()?;
+        client.Start()?;
+        let t_end = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < t_end {
+            std::thread::sleep(Duration::from_millis(10));
+            while cap.GetNextPacketSize()? > 0 {
+                let (mut data, mut n, mut fl) = (std::ptr::null_mut(), 0u32, 0u32);
+                cap.GetBuffer(&mut data, &mut n, &mut fl, None, None)?;
+                if !data.is_null() {
+                    let s = std::slice::from_raw_parts(data as *const f32, n as usize * 2);
+                    lr.extend(s.as_chunks::<2>().0.iter().map(|f| [f[0], f[1]]));
+                }
+                cap.ReleaseBuffer(n)?;
+            }
+        }
+        client.Stop()?;
+    }
+    let n = lr.len().max(1) as f64;
+    let db = |v: f64| if v > 1e-12 { 20.0 * v.log10() } else { -240.0 };
+    println!("  captured {:.1} s", lr.len() as f64 / 48_000.0);
+    for c in 0..2 {
+        let x: Vec<f64> = lr.iter().map(|f| f64::from(f[c])).collect();
+        let mean = x.iter().sum::<f64>() / n;
+        let rms = (x.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
+        let peak = x.iter().fold(0f64, |m, v| m.max(v.abs()));
+        // One-pole low-pass at 80 Hz to estimate rumble energy share.
+        let a = 1.0 - (-2.0 * std::f64::consts::PI * 80.0 / 48_000.0).exp();
+        let (mut y, mut lf) = (0f64, 0f64);
+        for v in &x {
+            y += a * ((v - mean) - y);
+            lf += y * y;
+        }
+        let lf_rms = (lf / n).sqrt();
+        // Effective resolution: are all samples multiples of 2^-15 (16-bit) or 2^-23 (24-bit)?
+        let on = |bits: i32| {
+            x.iter()
+                .filter(|v| {
+                    let s = **v * f64::from(1u32 << bits);
+                    (s - s.round()).abs() < 1e-6
+                })
+                .count() as f64
+                / n
+        };
+        println!(
+            "  ch{} {}: rms {:.1} dBFS, peak {:.1} dBFS, DC {:+.6}, energy below 80 Hz {:.1} dB rel., 16-bit grid {:.0}%, 24-bit grid {:.0}%",
+            c,
+            if c == 0 { "L" } else { "R" },
+            db(rms),
+            db(peak),
+            mean,
+            db(lf_rms) - db(rms),
+            on(15) * 100.0,
+            on(23) * 100.0
+        );
+    }
+    let identical = lr.iter().filter(|f| f[0] == f[1]).count() as f64 / n;
+    let (sl, sr, slr) = lr.iter().fold((0f64, 0f64, 0f64), |(a, b, c), f| {
+        (
+            a + f64::from(f[0]).powi(2),
+            b + f64::from(f[1]).powi(2),
+            c + f64::from(f[0]) * f64::from(f[1]),
+        )
+    });
+    println!(
+        "  L==R identical samples {:.1}%, L/R correlation {:+.3}",
+        identical * 100.0,
+        slr / (sl * sr).sqrt().max(1e-30)
+    );
+    Ok(())
+}
+
+/// Runs the settings window's mic check analysis on a real capture.
+fn mic_check(e: &IMMDeviceEnumerator, needle: &str, secs: u64) -> windows::core::Result<()> {
+    let Some(d) = find(e, needle)? else {
+        println!("no capture device matching \"{needle}\"");
+        return Ok(());
+    };
+    let fmt = WAVEFORMATEX {
+        wFormatTag: 3,
+        nChannels: 2,
+        nSamplesPerSec: 48_000,
+        nAvgBytesPerSec: 48_000 * 8,
+        nBlockAlign: 8,
+        wBitsPerSample: 32,
+        cbSize: 0,
+    };
+    let mut raw: Vec<f32> = Vec::with_capacity(96_000 * secs as usize + 9600);
+    unsafe {
+        let client: IAudioClient = d.Activate(CLSCTX_ALL, None)?;
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            2_000_000,
+            0,
+            &fmt,
+            None,
+        )?;
+        let cap: IAudioCaptureClient = client.GetService()?;
+        client.Start()?;
+        let t_end = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < t_end {
+            std::thread::sleep(Duration::from_millis(10));
+            while cap.GetNextPacketSize()? > 0 {
+                let (mut data, mut n, mut fl) = (std::ptr::null_mut(), 0u32, 0u32);
+                cap.GetBuffer(&mut data, &mut n, &mut fl, None, None)?;
+                if !data.is_null() {
+                    raw.extend_from_slice(std::slice::from_raw_parts(
+                        data as *const f32,
+                        n as usize * 2,
+                    ));
+                }
+                cap.ReleaseBuffer(n)?;
+            }
+        }
+        client.Stop()?;
+    }
+    let gain: f32 = std::env::var("JC_GAIN")
+        .ok()
+        .and_then(|g| g.parse().ok())
+        .unwrap_or(0.0);
+    let (r, processed) = jondisclip_core::mic_check::analyze(&raw, gain, false);
+    println!(
+        "{} s captured, {} processed frames, gain {gain:+} dB",
+        r.seconds,
+        processed.len()
+    );
+    println!("{r:#?}");
+    Ok(())
+}
+
 fn main() -> windows::core::Result<()> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -235,6 +464,16 @@ fn main() -> windows::core::Result<()> {
         unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("miccheck") => mic_check(
+            &e,
+            args.get(1).map_or("Samson", String::as_str),
+            args.get(2).and_then(|s| s.parse().ok()).unwrap_or(8),
+        ),
+        Some("device") => device_report(
+            &e,
+            args.get(1).map_or("Samson", String::as_str),
+            args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5),
+        ),
         Some("jitter") => jitter(
             &e,
             args.get(1).map_or("loopback", String::as_str),

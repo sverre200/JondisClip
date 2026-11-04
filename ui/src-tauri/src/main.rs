@@ -153,6 +153,46 @@ fn mic_meter_stop() {
     meter::stop();
 }
 
+#[derive(Serialize)]
+struct MicCheck {
+    report: jondisclip_core::mic_check::MicReport,
+    /// Processed mic audio (what the Microphone track would contain) as a WAV
+    /// data URL for listening back. Kept in memory only, never written to disk.
+    audio: String,
+}
+
+/// Records `seconds` of the mic, analyses it with the recorder's processing,
+/// saves the statistics (no audio) to `mic-check.json`, and returns them plus
+/// the processed audio for listening back.
+#[tauri::command]
+async fn mic_check(
+    device: String,
+    gain_db: f32,
+    low_cut: bool,
+    seconds: u32,
+) -> Result<MicCheck, String> {
+    let seconds = seconds.clamp(3, 20);
+    tauri::async_runtime::spawn_blocking(move || {
+        let raw = meter::record(&device, seconds)?;
+        let (report, processed) = jondisclip_core::mic_check::analyze(&raw, gain_db, low_cut);
+        let path = paths::local_dir().join("mic-check.json");
+        let _ = std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&report).unwrap_or_default(),
+        );
+        let wav = jondisclip_core::mic_check::wav_bytes(&processed);
+        Ok(MicCheck {
+            report,
+            audio: format!(
+                "data:audio/wav;base64,{}",
+                jondisclip_core::mic_check::base64(&wav)
+            ),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Canonical form of a hotkey ("shift+alt+f10" → "Alt+Shift+F10"), or why it's invalid.
 #[tauri::command]
 fn check_hotkey(text: String) -> Result<String, String> {
@@ -225,6 +265,7 @@ fn main() {
             list_microphones,
             mic_level,
             mic_meter_stop,
+            mic_check,
             load,
             tray_status,
             update,

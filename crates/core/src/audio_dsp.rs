@@ -11,6 +11,9 @@
 //! - [`MonoFold`]: folds a (nearly always mono) mic to one channel. It
 //!   detects mics delivered on one side only (common with USB interfaces).
 //! - [`db_to_gain`] and [`GainRamp`]: zipper-free gain changes.
+//! - [`HighPass`]: optional 80 Hz low-cut for the mic (rumble, proximity
+//!   boom, breath pops). It's off by default and recommended by the mic check
+//!   only when measured.
 
 use std::f64::consts::PI;
 use std::sync::OnceLock;
@@ -431,6 +434,93 @@ impl MonoFold {
     }
 }
 
+/// 2nd-order Butterworth high-pass (RBJ biquad), mono, f64 state. About 5
+/// multiply-adds per sample. -3 dB at the corner, 12 dB/octave below.
+pub struct HighPass {
+    b: [f64; 3],
+    a: [f64; 2],
+    x: [f64; 2],
+    y: [f64; 2],
+}
+
+/// Corner of the mic low-cut: below the fundamental of speech (male voices
+/// rarely go under about 85 Hz), above rumble and handling noise.
+pub const LOW_CUT_HZ: f64 = 80.0;
+
+impl HighPass {
+    pub fn new(freq: f64) -> Self {
+        let w = 2.0 * PI * freq / SR;
+        let (cos, alpha) = (w.cos(), w.sin() / (2.0 * std::f64::consts::FRAC_1_SQRT_2));
+        let a0 = 1.0 + alpha;
+        Self {
+            b: [
+                (1.0 + cos) / 2.0 / a0,
+                -(1.0 + cos) / a0,
+                (1.0 + cos) / 2.0 / a0,
+            ],
+            a: [-2.0 * cos / a0, (1.0 - alpha) / a0],
+            x: [0.0; 2],
+            y: [0.0; 2],
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.x = [0.0; 2];
+        self.y = [0.0; 2];
+    }
+
+    pub fn process(&mut self, buf: &mut [f32]) {
+        for v in buf {
+            let x0 = f64::from(*v);
+            let y0 = self.b[0] * x0 + self.b[1] * self.x[0] + self.b[2] * self.x[1]
+                - self.a[0] * self.y[0]
+                - self.a[1] * self.y[1];
+            self.x = [x0, self.x[0]];
+            self.y = [y0, self.y[0]];
+            *v = y0 as f32;
+        }
+        self.flush_denormals();
+    }
+
+    /// Like `process`, but crossfades from filtered to unfiltered across the
+    /// buffer: used once when the low-cut is switched off, so the mic's DC
+    /// offset returns smoothly instead of as a click.
+    pub fn process_fade_out(&mut self, buf: &mut [f32]) {
+        let n = buf.len().max(1) as f32;
+        for (i, v) in buf.iter_mut().enumerate() {
+            let raw = *v;
+            let mut one = [raw];
+            self.process_one(&mut one);
+            let t = (i + 1) as f32 / n;
+            *v = one[0] * (1.0 - t) + raw * t;
+        }
+        self.flush_denormals();
+    }
+
+    fn process_one(&mut self, s: &mut [f32; 1]) {
+        let x0 = f64::from(s[0]);
+        let y0 = self.b[0] * x0 + self.b[1] * self.x[0] + self.b[2] * self.x[1]
+            - self.a[0] * self.y[0]
+            - self.a[1] * self.y[1];
+        self.x = [x0, self.x[0]];
+        self.y = [y0, self.y[0]];
+        s[0] = y0 as f32;
+    }
+
+    /// On digital silence the recursion decays into subnormals and sticks
+    /// there (slow microcode paths on every sample). Snap it to zero.
+    fn flush_denormals(&mut self) {
+        if self.y[0].abs() < 1e-20
+            && self.y[1].abs() < 1e-20
+            && self.x[0].abs() < 1e-20
+            && self.x[1].abs() < 1e-20
+        {
+            self.x = [0.0; 2];
+            self.y = [0.0; 2];
+        }
+    }
+}
+
 /// Gain that moves to a new target linearly across one block (no zipper noise).
 pub struct GainRamp {
     current: f32,
@@ -690,6 +780,79 @@ mod tests {
         }
         assert_eq!(g.weights(), (1.0, 0.0));
         assert!((mono[500] - left_only[1000]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn low_cut_response_is_gentle_and_voice_safe() {
+        let level = |freq: f64| {
+            let mut hp = HighPass::new(LOW_CUT_HZ);
+            let mut x = tone(48_000, freq, 0.5, 1);
+            hp.process(&mut x);
+            let tail = &x[24_000..];
+            let rms = (tail.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / tail.len() as f64)
+                .sqrt();
+            20.0 * (rms / (0.5 / std::f64::consts::SQRT_2)).log10()
+        };
+        assert!(
+            level(20.0) < -20.0,
+            "rumble at 20 Hz: {:.1} dB",
+            level(20.0)
+        );
+        assert!(
+            (level(80.0) + 3.0).abs() < 0.3,
+            "-3 dB at the corner: {:.2}",
+            level(80.0)
+        );
+        assert!(
+            level(150.0) > -1.0,
+            "voice fundamentals barely touched: {:.2}",
+            level(150.0)
+        );
+        assert!(
+            level(1000.0).abs() < 0.05,
+            "speech band flat: {:.3}",
+            level(1000.0)
+        );
+        let mut hp = HighPass::new(LOW_CUT_HZ);
+        let mut dc = vec![0.1f32; 48_000];
+        hp.process(&mut dc);
+        assert!(dc[47_999].abs() < 1e-6, "DC removed");
+    }
+
+    #[test]
+    fn low_cut_state_does_not_go_subnormal_on_silence() {
+        let mut hp = HighPass::new(LOW_CUT_HZ);
+        let mut x = tone(4800, 200.0, 0.5, 1);
+        hp.process(&mut x);
+        let mut silence = vec![0f32; 1024];
+        for _ in 0..200 {
+            silence.fill(0.0);
+            hp.process(&mut silence);
+        }
+        assert!(
+            hp.y.iter()
+                .chain(hp.x.iter())
+                .all(|v| *v == 0.0 || v.is_normal()),
+            "{:?} {:?}",
+            hp.x,
+            hp.y
+        );
+        assert_eq!(hp.y, [0.0; 2]);
+    }
+
+    #[test]
+    fn low_cut_fade_out_has_no_step() {
+        let mut hp = HighPass::new(LOW_CUT_HZ);
+        let mut on = vec![0.05f32; 48_000]; // DC offset, filtered away
+        hp.process(&mut on);
+        let mut fade = vec![0.05f32; 1024];
+        hp.process_fade_out(&mut fade);
+        let mut prev = on[on.len() - 1];
+        for v in &fade {
+            assert!((v - prev).abs() < 1e-3, "step {prev} -> {v}");
+            prev = *v;
+        }
+        assert!((fade[1023] - 0.05).abs() < 1e-6);
     }
 
     #[test]

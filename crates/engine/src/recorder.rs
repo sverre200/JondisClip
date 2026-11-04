@@ -402,6 +402,13 @@ impl Recorder {
         }
     }
 
+    /// Turns the mic low-cut on or off live.
+    pub fn set_mic_low_cut(&self, on: bool) {
+        if let Some(a) = &self.audio {
+            a.set_mic_low_cut(on);
+        }
+    }
+
     /// Changes how much history is kept, without interrupting recording.
     /// Shrinking deletes the now-expired segments, and growing fills up over time.
     pub fn set_replay(&mut self, replay: Duration) -> Result<(), RecorderError> {

@@ -25,3 +25,8 @@ Each audio device runs on its own clock, and JondisClip's timeline runs on QPC. 
 - About 3 M multiply-adds per second for two sources. No measurable CPU or RAM change (0.48 % vs 0.66 % before, within noise).
 - The Mix and Mic tracks have 1.3 ms of internal latency, compensated in pts.
 - **Windows mic enhancements (APOs, AGC) still apply** in shared mode. Raw mode (`AUDCLNT_STREAMOPTIONS_RAW`) was not adopted, because it would also remove processing some headsets rely on. Revisit it only if listening tests point to driver processing.
+
+## Addendum (2026-11-04): low-cut and mic check
+Evidence: [docs/perf/2026-11-04-gtrack-pro.md](../perf/2026-11-04-gtrack-pro.md).
+- An **optional 80 Hz high-pass** (`audio_dsp::HighPass`, 2nd-order Butterworth) runs on the mic after the fold. It's **off by default** and applied live, and it's the only addition to "minimal processing". Rationale: rumble and proximity boom are physical problems some setups have, a gentle 80 Hz cut leaves voice fundamentals alone (−0.6 dB at 150 Hz), and it costs about 5 multiply-adds per sample.
+- The **mic check** reuses the recorder's DSP from `jondisclip-core` (`audio_dsp`, `mic_check`) in the UI process. It never touches the recorder. It recommends the hardware gain knob over digital gain, because only the knob improves the signal-to-noise ratio.

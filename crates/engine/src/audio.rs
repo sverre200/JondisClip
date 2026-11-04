@@ -43,7 +43,9 @@ use windows::Win32::System::Threading::{
 use windows::core::PCWSTR;
 
 use crate::audio_buf::{CHANNELS, SourceBuf};
-use crate::audio_dsp::{Asrc, GainRamp, LIMIT_DELAY, Limiter, MonoFold, Placed, db_to_gain};
+use crate::audio_dsp::{
+    Asrc, GainRamp, HighPass, LIMIT_DELAY, LOW_CUT_HZ, Limiter, MonoFold, Placed, db_to_gain,
+};
 use crate::segment::WriterMsg;
 
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -78,6 +80,9 @@ pub fn clamp_gain_db(db: f32) -> f32 {
 /// levels and limiting are unit-tested.
 struct MixDsp {
     fold: MonoFold,
+    low_cut: Arc<AtomicBool>,
+    hp: HighPass,
+    hp_was_on: bool,
     gain: GainRamp,
     gain_db: Arc<AtomicU32>,
     mix_limit: Limiter<2>,
@@ -85,10 +90,13 @@ struct MixDsp {
 }
 
 impl MixDsp {
-    fn new(gain_db: Arc<AtomicU32>) -> Self {
+    fn new(gain_db: Arc<AtomicU32>, low_cut: Arc<AtomicBool>) -> Self {
         let g = db_to_gain(f32::from_bits(gain_db.load(Ordering::Relaxed)));
         Self {
             fold: MonoFold::default(),
+            low_cut,
+            hp: HighPass::new(LOW_CUT_HZ),
+            hp_was_on: false,
             gain: GainRamp::new(g),
             gain_db,
             mix_limit: Limiter::new(-1.0, 150.0),
@@ -114,6 +122,16 @@ impl MixDsp {
         mic_track: &mut [f32],
     ) {
         self.fold.process(mic, mic_mono);
+        let hp_on = self.low_cut.load(Ordering::Relaxed);
+        if hp_on {
+            if !self.hp_was_on {
+                self.hp.reset();
+            }
+            self.hp.process(mic_mono);
+        } else if self.hp_was_on {
+            self.hp.process_fade_out(mic_mono);
+        }
+        self.hp_was_on = hp_on;
         let target = db_to_gain(f32::from_bits(self.gain_db.load(Ordering::Relaxed)));
         self.gain.apply(target, mic_mono);
         for (i, f) in mix.as_chunks_mut::<2>().0.iter_mut().enumerate() {
@@ -141,6 +159,8 @@ pub struct AudioConfig {
     pub mic_device: Option<String>,
     /// Mic gain in dB (-12 to +24), changeable live via `AudioPipeline::set_mic_gain_db`.
     pub mic_gain_db: f32,
+    /// 80 Hz low-cut on the mic, changeable live via `AudioPipeline::set_mic_low_cut`.
+    pub mic_low_cut: bool,
     pub bitrate: u64,
 }
 
@@ -151,6 +171,7 @@ impl Default for AudioConfig {
             mic: false,
             mic_device: None,
             mic_gain_db: 0.0,
+            mic_low_cut: false,
             bitrate: 160_000,
         }
     }
@@ -342,6 +363,7 @@ enum Source {
 
 pub struct AudioPipeline {
     mic_gain: Arc<AtomicU32>,
+    mic_low_cut: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
     mixer: Option<JoinHandle<()>>,
@@ -385,6 +407,7 @@ pub fn start(
     let stop = Arc::new(AtomicBool::new(false));
     let counters = Arc::new(AudioCounters::default());
     let mic_gain = Arc::new(AtomicU32::new(clamp_gain_db(cfg.mic_gain_db).to_bits()));
+    let mic_low_cut = Arc::new(AtomicBool::new(cfg.mic_low_cut));
     let max_frames = SAMPLE_RATE as usize * 2;
     let game = cfg
         .system
@@ -421,7 +444,7 @@ pub fn start(
             clock,
             tx,
             counters,
-            dsp: MixDsp::new(mic_gain.clone()),
+            dsp: MixDsp::new(mic_gain.clone(), mic_low_cut.clone()),
         };
         thread::Builder::new()
             .name("jc-audio-mix".into())
@@ -439,6 +462,7 @@ pub fn start(
             mixer: Some(mixer),
             counters,
             mic_gain,
+            mic_low_cut,
         }),
         streams,
     })
@@ -449,6 +473,11 @@ impl AudioPipeline {
     pub fn set_mic_gain_db(&self, db: f32) {
         self.mic_gain
             .store(clamp_gain_db(db).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Turns the 80 Hz mic low-cut on or off live.
+    pub fn set_mic_low_cut(&self, on: bool) {
+        self.mic_low_cut.store(on, Ordering::Relaxed);
     }
 
     /// Stops capture, flushes the encoders and joins every audio thread.
@@ -982,7 +1011,10 @@ mod tests {
 
     #[test]
     fn mic_keeps_its_exact_level_and_mix_is_game_plus_voice() {
-        let mut dsp = MixDsp::new(Arc::new(AtomicU32::new(0f32.to_bits())));
+        let mut dsp = MixDsp::new(
+            Arc::new(AtomicU32::new(0f32.to_bits())),
+            Arc::new(AtomicBool::new(false)),
+        );
         let (mix, mic, mono) = run_dsp(&mut dsp, 8, 0.3, 0.2);
         let d = LIMIT_DELAY as usize;
         for i in 2000..BLOCK * 8 {
@@ -1009,7 +1041,10 @@ mod tests {
 
     #[test]
     fn loud_game_plus_voice_never_clips_the_mix() {
-        let mut dsp = MixDsp::new(Arc::new(AtomicU32::new(0f32.to_bits())));
+        let mut dsp = MixDsp::new(
+            Arc::new(AtomicU32::new(0f32.to_bits())),
+            Arc::new(AtomicBool::new(false)),
+        );
         // Game near full scale (as measured: -0.2 dBFS) plus voice peaks.
         let (mix, mic, _) = run_dsp(&mut dsp, 20, 0.98, 0.5);
         let ceiling = db_to_gain(-1.0);
@@ -1030,7 +1065,7 @@ mod tests {
     #[test]
     fn mic_gain_applies_live_and_mic_only_layout_works() {
         let gain = Arc::new(AtomicU32::new(0f32.to_bits()));
-        let mut dsp = MixDsp::new(gain.clone());
+        let mut dsp = MixDsp::new(gain.clone(), Arc::new(AtomicBool::new(false)));
         let _ = run_dsp(&mut dsp, 2, 0.0, 0.1);
         gain.store(6.0206f32.to_bits(), Ordering::Relaxed); // x2
         let (_, mic, mono) = run_dsp(&mut dsp, 3, 0.0, 0.1);

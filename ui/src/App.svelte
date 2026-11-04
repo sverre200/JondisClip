@@ -9,6 +9,7 @@
   import Segmented from "./lib/Segmented.svelte";
   import StatusPill from "./lib/StatusPill.svelte";
   import LevelMeter from "./lib/LevelMeter.svelte";
+  import MicCheck from "./lib/MicCheck.svelte";
   import Select from "./lib/Select.svelte";
   import Slider from "./lib/Slider.svelte";
   import Toggle from "./lib/Toggle.svelte";
@@ -334,6 +335,26 @@
         </Row>
         <Row label="Level" hint={levelHint}>
           <LevelMeter peakDb={level.peak} rmsDb={level.rms} hold={level.hold} />
+        </Row>
+        <Row
+          label="Low-cut filter"
+          hint="Removes rumble below 80 Hz (desk bumps, boom from speaking close, breath pops). Your voice is unaffected. Turn it on if the mic check suggests it."
+          id="t-lowcut"
+        >
+          <Toggle
+            id="t-lowcut"
+            label="Low-cut filter"
+            checked={settings.microphone_low_cut}
+            onchange={(v) => change({ microphone_low_cut: v })}
+          />
+        </Row>
+        <Row label="Mic check" hint="Record 8 seconds of your voice and get advice on the mic's gain knob and settings. Nothing is saved except the measurements." stacked>
+          <MicCheck
+            device={settings.microphone_device}
+            gainDb={settings.microphone_gain_db}
+            lowCut={settings.microphone_low_cut}
+            onUseGain={(db) => change({ microphone_gain_db: db })}
+          />
         </Row>
       {/if}
     </section>

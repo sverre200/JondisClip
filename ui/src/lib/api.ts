@@ -20,6 +20,8 @@ export interface Settings {
   microphone_device: string;
   /** dB, -12..+24, applied live */
   microphone_gain_db: number;
+  /** 80 Hz low-cut, live */
+  microphone_low_cut: boolean;
   save_sound: boolean;
   start_with_windows: boolean;
 }
@@ -51,6 +53,28 @@ export interface MicLevel {
   peak_db: number;
   rms_db: number;
   error: string | null;
+}
+
+export interface MicReport {
+  seconds: number;
+  mode: "mono" | "two_track" | "stereo";
+  raw_peak_db: number;
+  adc_clipped: number;
+  raw_speech_db: number;
+  speech_db: number;
+  peak_db: number;
+  noise_floor_db: number;
+  limited_ms: number;
+  low_freq_db: number;
+  speech_detected: boolean;
+  verdict: "good" | "quiet" | "hot" | "clipping" | "no_speech";
+  tips: string[];
+  suggested_gain_db: number;
+}
+
+export interface MicCheck {
+  report: MicReport;
+  audio: string;
 }
 
 export interface TrayView {
@@ -87,6 +111,8 @@ export const api = {
   listMicrophones: () => call<InputDevice[]>("list_microphones"),
   micLevel: (device: string, gainDb: number) => call<MicLevel>("mic_level", { device, gainDb }),
   micMeterStop: () => call<void>("mic_meter_stop"),
+  micCheck: (device: string, gainDb: number, lowCut: boolean, seconds: number) =>
+    call<MicCheck>("mic_check", { device, gainDb, lowCut, seconds }),
 
   async pickFolder(current: string): Promise<string | null> {
     if (!isDesktop) return null;
@@ -120,6 +146,7 @@ const mockState: Snapshot = {
     microphone: false,
     microphone_device: "",
     microphone_gain_db: 0,
+    microphone_low_cut: false,
     save_sound: true,
     start_with_windows: false,
   },
@@ -171,6 +198,19 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
     }
     case "mic_meter_stop":
       return undefined;
+    case "mic_check":
+      await new Promise((r) => setTimeout(r, Number(args?.seconds ?? 8) * 1000 - 120));
+      return {
+        report: {
+          seconds: 8, mode: "mono", raw_peak_db: -14.2, adc_clipped: 0, raw_speech_db: -33.5, speech_db: -15.5,
+          peak_db: -0.9, noise_floor_db: -64.8, limited_ms: 0, low_freq_db: -27.1, speech_detected: true,
+          verdict: "good", suggested_gain_db: 14,
+          tips: [
+            "Your voice reaches the computer at -34 dBFS. Turn the G-Track's MIC GAIN knob up (aim for about 14 dB more) and set Microphone gain here back to 0 dB.",
+          ],
+        },
+        audio: "",
+      };
     case "check_hotkey": {
       const text = String(args?.text ?? "");
       if (/^(F\d{1,2})$/.test(text) || text.includes("+")) return text;

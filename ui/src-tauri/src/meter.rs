@@ -124,9 +124,7 @@ fn spawn(device: String) -> Running {
         ended_at.clone(),
     );
     std::thread::spawn(move || {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        }
+        let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
         if let Err(e) = capture(&d, &s, &a, &l) {
             a.lock().unwrap_or_else(|e| e.into_inner()).error = Some(e.message().to_string());
         }
@@ -134,7 +132,9 @@ fn spawn(device: String) -> Running {
         if let Ok(mut t) = e_at.lock() {
             *t = Some(Instant::now());
         }
-        unsafe { CoUninitialize() };
+        if com {
+            unsafe { CoUninitialize() };
+        }
     });
     Running {
         device,
@@ -227,4 +227,80 @@ fn capture(
         let _ = client.Stop();
     }
     result
+}
+
+/// Records `seconds` of interleaved stereo float from the device (in this UI
+/// process, independent of the recorder) for the mic check.
+pub fn record(device: &str, seconds: u32) -> Result<Vec<f32>, String> {
+    // Balance only our own init (S_OK/S_FALSE), never someone else's.
+    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let result = (|| -> windows::core::Result<Vec<f32>> {
+        let client: IAudioClient = unsafe {
+            let e: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let d = if device.is_empty() {
+                e.GetDefaultAudioEndpoint(eCapture, eConsole)?
+            } else {
+                e.GetDevice(&HSTRING::from(device))?
+            };
+            d.Activate(CLSCTX_ALL, None)?
+        };
+        let fmt = WAVEFORMATEX {
+            wFormatTag: 3,
+            nChannels: 2,
+            nSamplesPerSec: 48_000,
+            nAvgBytesPerSec: 48_000 * 8,
+            nBlockAlign: 8,
+            wBitsPerSample: 32,
+            cbSize: 0,
+        };
+        let want = 48_000 * seconds as usize * 2;
+        // Devices can deliver zeros while the stream starts: drop the first 0.4 s.
+        let skip = 48_000 * 4 / 10 * 2;
+        let mut skipped = 0usize;
+        let mut out = Vec::with_capacity(want + 9600);
+        unsafe {
+            client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                2_000_000,
+                0,
+                &fmt,
+                None,
+            )?;
+            let cap: IAudioCaptureClient = client.GetService()?;
+            client.Start()?;
+            let deadline = Instant::now() + Duration::from_millis(u64::from(seconds) * 1000 + 3400);
+            while out.len() < want && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+                while cap.GetNextPacketSize()? > 0 {
+                    let (mut data, mut n, mut flags) = (std::ptr::null_mut(), 0u32, 0u32);
+                    cap.GetBuffer(&mut data, &mut n, &mut flags, None, None)?;
+                    let silent =
+                        flags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data.is_null();
+                    let len = n as usize * 2;
+                    let drop = (skip - skipped).min(len);
+                    skipped += drop;
+                    if silent {
+                        out.extend(std::iter::repeat_n(0.0, len - drop));
+                    } else {
+                        out.extend_from_slice(
+                            &std::slice::from_raw_parts(data as *const f32, len)[drop..],
+                        );
+                    }
+                    cap.ReleaseBuffer(n)?;
+                }
+            }
+            let _ = client.Stop();
+        }
+        out.truncate(want);
+        Ok(out)
+    })();
+    if com {
+        unsafe { CoUninitialize() };
+    }
+    let out = result.map_err(|e| e.message().to_string())?;
+    if out.len() < 48_000 * 2 {
+        return Err("the microphone delivered no audio".into());
+    }
+    Ok(out)
 }
