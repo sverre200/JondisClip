@@ -216,6 +216,8 @@ pub struct Stats {
     pub audio_reopens: u64,
     /// Audio frames skipped because the mixer fell behind (sleep/resume).
     pub audio_skipped_frames: u64,
+    /// Some(false) while the chosen microphone isn't connected (None = mic off).
+    pub mic_connected: Option<bool>,
 }
 
 struct Control {
@@ -393,6 +395,13 @@ impl Recorder {
         &self.info
     }
 
+    /// Changes the microphone gain live (no restart, no buffer loss).
+    pub fn set_mic_gain_db(&self, db: f32) {
+        if let Some(a) = &self.audio {
+            a.set_mic_gain_db(db);
+        }
+    }
+
     /// Changes how much history is kept, without interrupting recording.
     /// Shrinking deletes the now-expired segments, and growing fills up over time.
     pub fn set_replay(&mut self, replay: Duration) -> Result<(), RecorderError> {
@@ -440,6 +449,11 @@ impl Recorder {
                 .audio
                 .as_ref()
                 .map_or(0, |a| a.counters.device_reopens.load(Ordering::Relaxed)),
+            mic_connected: self.info.audio_tracks.contains(&"Microphone").then(|| {
+                self.audio
+                    .as_ref()
+                    .is_some_and(|a| a.counters.mic_connected.load(Ordering::Relaxed))
+            }),
         }
     }
 

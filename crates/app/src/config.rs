@@ -22,6 +22,7 @@ pub fn recorder_config(s: &Settings) -> RecorderConfig {
             system: s.system_audio,
             mic: s.microphone,
             mic_device: (!s.microphone_device.is_empty()).then(|| s.microphone_device.clone()),
+            mic_gain_db: s.microphone_gain_db,
             ..AudioConfig::default()
         },
         ..RecorderConfig::default()

@@ -1,7 +1,9 @@
 //! Audio input devices for the microphone picker.
 
 use serde::Serialize;
-use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+use windows::Win32::Devices::FunctionDiscovery::{
+    PKEY_Device_EnumeratorName, PKEY_Device_FriendlyName,
+};
 use windows::Win32::Media::Audio::{
     DEVICE_STATE_ACTIVE, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eConsole,
 };
@@ -17,6 +19,8 @@ pub struct InputDevice {
     pub name: String,
     /// The current Windows default recording device.
     pub is_default: bool,
+    /// A software device (virtual cable, voice changer...), not a physical mic.
+    pub is_virtual: bool,
 }
 
 fn id_of(d: &IMMDevice) -> Option<String> {
@@ -37,6 +41,17 @@ fn name_of(d: &IMMDevice) -> Option<String> {
     }
 }
 
+/// Bus the device hangs off: "USB", "HDAUDIO", "BTHENUM" or "ROOT"/"SWD"
+/// (software devices such as virtual cables).
+fn bus_of(d: &IMMDevice) -> String {
+    unsafe {
+        d.OpenPropertyStore(STGM_READ)
+            .and_then(|s| s.GetValue(&PKEY_Device_EnumeratorName))
+            .map(|v| v.to_string())
+            .unwrap_or_default()
+    }
+}
+
 /// Active (plugged-in, enabled) microphones, Windows default first.
 pub fn list_inputs() -> windows::core::Result<Vec<InputDevice>> {
     unsafe {
@@ -53,8 +68,10 @@ pub fn list_inputs() -> windows::core::Result<Vec<InputDevice>> {
             let d = coll.Item(i)?;
             let Some(id) = id_of(&d) else { continue };
             let name = name_of(&d).unwrap_or_else(|| "Microphone".into());
+            let bus = bus_of(&d);
             out.push(InputDevice {
                 is_default: default_id.as_deref() == Some(id.as_str()),
+                is_virtual: bus.eq_ignore_ascii_case("ROOT") || bus.eq_ignore_ascii_case("SWD"),
                 id,
                 name,
             });

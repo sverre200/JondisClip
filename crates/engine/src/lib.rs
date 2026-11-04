@@ -3,6 +3,7 @@
 
 pub mod audio;
 pub mod audio_buf;
+pub mod audio_dsp;
 pub mod capture;
 pub mod clip;
 pub mod convert;

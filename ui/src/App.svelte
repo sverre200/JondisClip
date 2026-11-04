@@ -8,7 +8,9 @@
   import Row from "./lib/Row.svelte";
   import Segmented from "./lib/Segmented.svelte";
   import StatusPill from "./lib/StatusPill.svelte";
+  import LevelMeter from "./lib/LevelMeter.svelte";
   import Select from "./lib/Select.svelte";
+  import Slider from "./lib/Slider.svelte";
   import Toggle from "./lib/Toggle.svelte";
 
   let snap = $state<Snapshot | null>(null);
@@ -19,6 +21,9 @@
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let startingTray = $state(false);
   let mics = $state<InputDevice[] | null>(null);
+  // Gain while the slider is being dragged (saved on release).
+  let gainPreview = $state<number | null>(null);
+  let level = $state({ peak: -100, rms: -100, hold: -100, holdAt: 0, error: null as string | null });
   let micsError = $state<string | null>(null);
 
   async function refreshMics() {
@@ -100,7 +105,10 @@
       void api.reveal();
       poll = setInterval(pollTray, 1500);
     })();
-    return () => clearInterval(poll);
+    return () => {
+      clearInterval(poll);
+      void api.micMeterStop();
+    };
   });
 
   const saveDir = $derived(settings && snap ? settings.save_dir || snap.default_save_dir : "");
@@ -125,13 +133,51 @@
     }
     return opts;
   });
+  const activeMic = $derived.by(() => {
+    const chosen = settings?.microphone_device;
+    return mics?.find((m) => (chosen ? m.id === chosen : m.is_default)) ?? null;
+  });
   const micHint = $derived.by(() => {
     if (micsError) return `Couldn't list microphones: ${micsError}`;
     const chosen = settings?.microphone_device;
     if (chosen && mics && !mics.some((m) => m.id === chosen))
       return "Not connected. The mic track stays silent until it's plugged back in.";
+    if (activeMic?.is_virtual)
+      return `${activeMic.name} is a virtual device, not a physical microphone. Choose your real microphone unless you route your voice through it on purpose.`;
     if (!chosen) return "Follows the Windows default if you change it.";
     return "Always records this microphone, even if the Windows default changes.";
+  });
+  const gainDb = $derived(gainPreview ?? settings?.microphone_gain_db ?? 0);
+  const levelHint = $derived.by(() => {
+    if (level.error) return `Can't read this microphone: ${level.error}`;
+    if (level.hold <= -60) return "Speak normally: your voice should reach the green zone.";
+    if (level.hold > -3) return "Peaks are very hot. Lower the gain a little (loud peaks are limited, not clipped).";
+    if (level.hold <= -18) return "Quiet. Raise the gain until normal speech reaches the green zone.";
+    return "Good level.";
+  });
+
+  // Live meter: polls only while the mic is enabled; the backend capture stops
+  // on its own once polling stops (window closed or mic switched off).
+  const micOn = $derived(settings?.microphone ?? false);
+  const micDevice = $derived(settings?.microphone_device ?? "");
+  $effect(() => {
+    if (!micOn) return;
+    const device = micDevice;
+    const timer = setInterval(async () => {
+      try {
+        const l = await api.micLevel(device, gainDb);
+        const now = Date.now();
+        const hold = l.peak_db >= level.hold || now - level.holdAt > 1500 ? l.peak_db : level.hold;
+        level = { peak: l.peak_db, rms: l.rms_db, hold, holdAt: hold === l.peak_db ? now : level.holdAt, error: l.error };
+      } catch {
+        /* transient */
+      }
+    }, 100);
+    return () => {
+      clearInterval(timer);
+      void api.micMeterStop();
+      level = { peak: -100, rms: -100, hold: -100, holdAt: 0, error: null };
+    };
   });
   const hotkeyConflict = $derived(
     !!tray?.running && !!tray.status && !tray.status.hotkey_ok && tray.status.hotkey === settings?.hotkey,
@@ -184,6 +230,9 @@
   {/if}
   {#if snap?.warnings.length}
     <Banner>Some settings in the file were invalid and were reset: {snap.warnings.join("; ")}</Banner>
+  {/if}
+  {#if tray?.status?.mic_connected === false}
+    <Banner>Your microphone isn't connected, so the mic track is silent until it's back.</Banner>
   {/if}
   {#if tray?.status?.audio_error}
     <Banner>Audio couldn't start, so clips are recorded without sound. {tray.status.audio_error}</Banner>
@@ -267,6 +316,24 @@
             onopen={refreshMics}
             onchange={(v) => change({ microphone_device: v })}
           />
+        </Row>
+        <Row label="Microphone gain" hint="Boosts or lowers only your voice. Applies instantly, without restarting recording." id="g-mic">
+          <Slider
+            id="g-mic"
+            label="Microphone gain"
+            min={-12}
+            max={24}
+            value={gainDb}
+            format={(v) => (v > 0 ? `+${v} dB` : `${v} dB`)}
+            oninput={(v) => (gainPreview = v)}
+            onchange={async (v) => {
+              await change({ microphone_gain_db: v });
+              gainPreview = null;
+            }}
+          />
+        </Row>
+        <Row label="Level" hint={levelHint}>
+          <LevelMeter peakDb={level.peak} rmsDb={level.rms} hold={level.hold} />
         </Row>
       {/if}
     </section>

@@ -18,6 +18,8 @@ export interface Settings {
   microphone: boolean;
   /** Windows endpoint ID; empty = Windows default */
   microphone_device: string;
+  /** dB, -12..+24, applied live */
+  microphone_gain_db: number;
   save_sound: boolean;
   start_with_windows: boolean;
 }
@@ -34,12 +36,21 @@ export interface TrayStatus {
   bitrate: number | null;
   audio_tracks: string[];
   audio_error: string | null;
+  /** false while the chosen mic is unplugged; null when the mic is off */
+  mic_connected: boolean | null;
 }
 
 export interface InputDevice {
   id: string;
   name: string;
   is_default: boolean;
+  is_virtual: boolean;
+}
+
+export interface MicLevel {
+  peak_db: number;
+  rms_db: number;
+  error: string | null;
 }
 
 export interface TrayView {
@@ -74,6 +85,8 @@ export const api = {
   openFolder: (path: string) => call<void>("open_folder", { path }),
   startTray: () => call<void>("start_tray"),
   listMicrophones: () => call<InputDevice[]>("list_microphones"),
+  micLevel: (device: string, gainDb: number) => call<MicLevel>("mic_level", { device, gainDb }),
+  micMeterStop: () => call<void>("mic_meter_stop"),
 
   async pickFolder(current: string): Promise<string | null> {
     if (!isDesktop) return null;
@@ -106,6 +119,7 @@ const mockState: Snapshot = {
     system_audio: true,
     microphone: false,
     microphone_device: "",
+    microphone_gain_db: 0,
     save_sound: true,
     start_with_windows: false,
   },
@@ -127,6 +141,7 @@ const mockState: Snapshot = {
       bitrate: 21_150_000,
       audio_tracks: ["Game"],
       audio_error: null,
+      mic_connected: null,
     },
   },
 };
@@ -143,9 +158,19 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       return structuredClone(mockState.settings);
     case "list_microphones":
       return [
-        { id: "{mock-1}", name: "Microphone (Arctis 7 Chat)", is_default: true },
-        { id: "{mock-2}", name: "Microphone (Logitech BRIO)", is_default: false },
+        { id: "{mock-1}", name: "CABLE Output (VB-Audio Virtual Cable)", is_default: true, is_virtual: true },
+        { id: "{mock-2}", name: "Headset Microphone (Arctis GameBuds)", is_default: false, is_virtual: false },
       ];
+    case "mic_level": {
+      // Speech-like: bursts around -22 dBFS with pauses.
+      const t = Date.now() / 1000;
+      const talking = Math.sin(t * 1.3) > -0.2;
+      const base = talking ? -24 + 6 * Math.sin(t * 7.1) : -62;
+      const gain = Number(args?.gainDb ?? 0);
+      return { peak_db: base + 9 + gain, rms_db: base + gain, error: null };
+    }
+    case "mic_meter_stop":
+      return undefined;
     case "check_hotkey": {
       const text = String(args?.text ?? "");
       if (/^(F\d{1,2})$/.test(text) || text.includes("+")) return text;

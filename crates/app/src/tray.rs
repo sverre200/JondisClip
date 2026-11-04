@@ -688,11 +688,22 @@ impl App {
             if self.recorder.is_some() {
                 self.restart_recorder("settings changed");
             }
-        } else if old.replay_seconds != self.settings.replay_seconds
-            && let Some(r) = self.recorder.as_mut()
-            && let Err(e) = r.set_replay(self.settings.replay())
-        {
-            warning!("replay change: {e}");
+        } else {
+            if old.replay_seconds != self.settings.replay_seconds
+                && let Some(r) = self.recorder.as_mut()
+                && let Err(e) = r.set_replay(self.settings.replay())
+            {
+                warning!("replay change: {e}");
+            }
+            if old.microphone_gain_db != self.settings.microphone_gain_db
+                && let Some(r) = self.recorder.as_ref()
+            {
+                info!(
+                    "microphone gain {:+.1} dB",
+                    self.settings.microphone_gain_db
+                );
+                r.set_mic_gain_db(self.settings.microphone_gain_db);
+            }
         }
         self.refresh();
     }
@@ -987,6 +998,7 @@ impl App {
                 .map(|i| i.audio_tracks.iter().map(|t| t.to_string()).collect())
                 .unwrap_or_default(),
             audio_error: info.and_then(|i| i.audio_error.clone()),
+            mic_connected: self.recorder.as_ref().and_then(|r| r.stats().mic_connected),
         };
         if self.published.as_ref() == Some(&status) {
             return;

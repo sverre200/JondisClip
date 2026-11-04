@@ -5,6 +5,8 @@
 //! applies it within 2 s) and reads `status.json` (published by the tray).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod meter;
+
 use std::path::PathBuf;
 
 use jondisclip_core::hotkey::Hotkey;
@@ -139,6 +141,18 @@ fn list_microphones() -> Result<Vec<jondisclip_core::devices::InputDevice>, Stri
     jondisclip_core::devices::list_inputs().map_err(|e| e.to_string())
 }
 
+/// Microphone level since the last call (starts the meter on first use; it
+/// stops by itself shortly after the window stops asking).
+#[tauri::command]
+fn mic_level(device: String, gain_db: f32) -> meter::Level {
+    meter::read(&device, gain_db)
+}
+
+#[tauri::command]
+fn mic_meter_stop() {
+    meter::stop();
+}
+
 /// Canonical form of a hotkey ("shift+alt+f10" → "Alt+Shift+F10"), or why it's invalid.
 #[tauri::command]
 fn check_hotkey(text: String) -> Result<String, String> {
@@ -209,6 +223,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             list_microphones,
+            mic_level,
+            mic_meter_stop,
             load,
             tray_status,
             update,

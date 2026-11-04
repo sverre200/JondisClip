@@ -14,6 +14,8 @@ use crate::hotkey::Hotkey;
 pub const REPLAY_PRESETS: [u32; 7] = [30, 60, 120, 180, 300, 600, 900];
 pub const FPS_PRESETS: [u32; 4] = [30, 60, 120, 144];
 pub const DEFAULT_HOTKEY: &str = "Alt+F10";
+/// Microphone gain range in dB (matches the engine's clamp).
+pub const MIC_GAIN_RANGE: (f32, f32) = (-12.0, 24.0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -92,6 +94,8 @@ pub struct Settings {
     pub microphone: bool,
     /// Windows endpoint ID of the microphone to record. Empty = Windows default.
     pub microphone_device: String,
+    /// Microphone gain in dB, -12 to +24. Applied live.
+    pub microphone_gain_db: f32,
     /// Short sound when a clip is saved (works in fullscreen games).
     pub save_sound: bool,
     pub start_with_windows: bool,
@@ -110,6 +114,7 @@ impl Default for Settings {
             system_audio: true,
             microphone: false,
             microphone_device: String::new(),
+            microphone_gain_db: 0.0,
             save_sound: true,
             start_with_windows: false,
         }
@@ -144,6 +149,21 @@ impl Settings {
         if !FPS_PRESETS.contains(&s.fps) {
             warnings.push(format!("fps {} is not supported; using 60", s.fps));
             s.fps = 60;
+        }
+        if !s.microphone_gain_db.is_finite()
+            || !(MIC_GAIN_RANGE.0..=MIC_GAIN_RANGE.1).contains(&s.microphone_gain_db)
+        {
+            let fixed = if s.microphone_gain_db.is_finite() {
+                s.microphone_gain_db
+                    .clamp(MIC_GAIN_RANGE.0, MIC_GAIN_RANGE.1)
+            } else {
+                0.0
+            };
+            warnings.push(format!(
+                "microphone_gain_db {} is outside {}..{}; using {fixed}",
+                s.microphone_gain_db, MIC_GAIN_RANGE.0, MIC_GAIN_RANGE.1
+            ));
+            s.microphone_gain_db = fixed;
         }
         if let Err(e) = Hotkey::parse(&s.hotkey) {
             warnings.push(format!(
@@ -186,7 +206,7 @@ impl Settings {
     }
 
     /// True when switching from `self` to `other` needs a recorder restart
-    /// (anything but replay length, hotkey, save dir, sound and autostart).
+    /// (anything but replay length, mic gain, hotkey, save dir, sound and autostart).
     pub fn needs_restart(&self, other: &Settings) -> bool {
         self.fps != other.fps
             || self.resolution != other.resolution
@@ -252,6 +272,22 @@ mod tests {
         assert_eq!(s.resolution.height(), Some(1080));
         assert_eq!(s.quality, Quality::High);
         assert_eq!(s.codec, CodecPref::H264);
+    }
+
+    #[test]
+    fn mic_gain_is_validated_and_live() {
+        let (s, w) = Settings::from_toml("microphone_gain_db = 40.0\n");
+        assert_eq!(s.microphone_gain_db, 24.0);
+        assert_eq!(w.len(), 1);
+        let a = Settings::default();
+        let b = Settings {
+            microphone_gain_db: 6.0,
+            ..a.clone()
+        };
+        assert!(
+            !a.needs_restart(&b),
+            "gain applies without restarting recording"
+        );
     }
 
     #[test]

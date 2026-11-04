@@ -22,6 +22,8 @@ pub struct TrayStatus {
     pub audio_tracks: Vec<String>,
     /// Set when audio failed to start.
     pub audio_error: Option<String>,
+    /// Some(false) while the chosen microphone isn't connected (None = mic off).
+    pub mic_connected: Option<bool>,
 }
 
 impl TrayStatus {

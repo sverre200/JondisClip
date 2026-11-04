@@ -21,6 +21,11 @@
   - A clip including the session's first segment failed to save (negative AAC priming timestamps). The clip writer now also skips any non-advancing packet.
   - The start-up sweep could delete another live session. Sessions are now locked.
 - [x] **Audio** (2026-11-04): WASAPI loopback of the default output (game/system audio) plus an optional mic (off by default), 48 kHz stereo, on the same QPC clock as video, mixed 100 ms behind real time into native AAC (160 kb/s per track). Track layout: Mix (default) / Game / Microphone, or a single track when only one source is on. The writer routes audio to segments by timestamp, so clips have no holes at either end. Verified: flash/beep A/V offset median +4 ms (−39 to +14 ms, 11 pairs, after the drift fix), 3-track mic run correct, CPU 0.2–0.7 %, devices reopened automatically.
+- [x] **Mic audio overhaul** (2026-11-04, [report](perf/2026-11-04-mic-audio.md), ADR-0009):
+  - Clock correction by resampling (no more zero-sample clicks or slips; 0 in simulation vs 2.4–2.9/s).
+  - Mono mic track, live mic gain, transparent −1 dBFS limiter on Mix and Mic, level meter, warnings for virtual and disconnected mics.
+  - A/V re-checked unlocked: median −3 to −8 ms, and Mix and Game are sample-aligned.
+  - **To do:** listening test in DayZ.
 - [ ] Process loopback for the detected game only (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`), so Discord voice and music stay out of clips. This needs game detection. For now, "Game" means all system audio.
 - [ ] Crash recovery: offer "Recover last buffer" before the stale-session sweep deletes it.
 - [ ] Known gaps from review, still to do:
