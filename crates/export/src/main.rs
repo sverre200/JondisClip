@@ -1,4 +1,5 @@
 //! `jondisclip-export trim <input> <output> <start> <end> <copy|exact>`
+//! `jondisclip-export share <input> <output> <start> <end> <limit-bytes>` (ADR-0012)
 //!
 //! Started by the library window (ADR-0011). Prints one JSON object per line
 //! on stdout: `{"progress":0.42}` while working, then `{"done":{…}}` or
@@ -10,7 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use jondisclip_export::{Mode, Trim, trim};
+use jondisclip_export::{Mode, Share, Trim, share, trim};
 
 fn emit(v: serde_json::Value) {
     let mut out = std::io::stdout().lock();
@@ -18,27 +19,46 @@ fn emit(v: serde_json::Value) {
     let _ = out.flush();
 }
 
-fn parse(args: &[String]) -> Result<Trim, String> {
-    let [cmd, input, output, start, end, mode] = args else {
-        return Err(
-            "usage: jondisclip-export trim <input> <output> <start> <end> <copy|exact>".into(),
-        );
+enum Job {
+    Trim(Trim),
+    Share(Share),
+}
+
+const USAGE: &str = "usage: jondisclip-export trim <input> <output> <start> <end> <copy|exact>
+       jondisclip-export share <input> <output> <start> <end> <limit-bytes>";
+
+fn parse(args: &[String]) -> Result<Job, String> {
+    let [cmd, input, output, start, end, last] = args else {
+        return Err(USAGE.into());
     };
-    if cmd != "trim" {
-        return Err(format!("unknown command {cmd}"));
-    }
     let num = |s: &str| s.parse::<f64>().map_err(|_| format!("not a number: {s}"));
-    Ok(Trim {
-        input: PathBuf::from(input),
-        output: PathBuf::from(output),
-        start: num(start)?,
-        end: num(end)?,
-        mode: match mode.as_str() {
-            "copy" => Mode::Copy,
-            "exact" => Mode::Exact,
-            m => return Err(format!("unknown mode {m}")),
-        },
-    })
+    let (input, output, start, end) = (
+        PathBuf::from(input),
+        PathBuf::from(output),
+        num(start)?,
+        num(end)?,
+    );
+    match cmd.as_str() {
+        "trim" => Ok(Job::Trim(Trim {
+            input,
+            output,
+            start,
+            end,
+            mode: match last.as_str() {
+                "copy" => Mode::Copy,
+                "exact" => Mode::Exact,
+                m => return Err(format!("unknown mode {m}")),
+            },
+        })),
+        "share" => Ok(Job::Share(Share {
+            input,
+            output,
+            start,
+            end,
+            limit_bytes: last.parse().map_err(|_| format!("not a size: {last}"))?,
+        })),
+        c => Err(format!("unknown command {c}")),
+    }
 }
 
 /// Priority follows the user's attention. While the library window is in
@@ -98,6 +118,9 @@ impl Attention {
         if unsafe { SetPriorityClass(GetCurrentProcess(), mode) }.is_ok() {
             self.background = background;
         }
+        // In the background (the game is in front) encode no faster than
+        // real time; with the window in front, 4×.
+        jondisclip_export::set_max_speed(if background { 1.0 } else { 4.0 });
     }
 
     /// Re-checks at most twice a second.
@@ -123,14 +146,20 @@ fn main() {
     let mut last = Instant::now();
     let started = Instant::now();
     let mut attention = Attention::new();
-    let result = trim(&job, |p| {
+    let mut report = |p: f64| {
         attention.tick();
         // At most ~10 updates a second.
         if last.elapsed().as_millis() >= 100 || p >= 1.0 {
             last = Instant::now();
             emit(serde_json::json!({ "progress": (p * 1000.0).round() / 1000.0 }));
         }
-    });
+    };
+    let result = match &job {
+        Job::Trim(t) => trim(t, &mut report).map(|o| serde_json::to_value(o).unwrap_or_default()),
+        Job::Share(sh) => {
+            share(sh, &mut report).map(|o| serde_json::to_value(o).unwrap_or_default())
+        }
+    };
     match result {
         Ok(o) => emit(serde_json::json!({ "done": o, "seconds": started.elapsed().as_secs_f64() })),
         Err(e) => {
@@ -150,20 +179,27 @@ mod tests {
 
     #[test]
     fn parses_arguments() {
-        let j = parse(&a(&[
+        let Ok(Job::Trim(j)) = parse(&a(&[
             "trim",
             "C:/in clip.mp4",
             "C:/out.mp4",
             "1.5",
             "20",
             "exact",
-        ]))
-        .unwrap();
+        ])) else {
+            panic!("trim job")
+        };
         assert_eq!((j.start, j.end, j.mode), (1.5, 20.0, Mode::Exact));
         assert_eq!(j.input, PathBuf::from("C:/in clip.mp4"));
         assert!(parse(&a(&["trim", "a", "b", "x", "2", "copy"])).is_err());
         assert!(parse(&a(&["trim", "a", "b", "1", "2", "fast"])).is_err());
         assert!(parse(&a(&["cut", "a", "b", "1", "2", "copy"])).is_err());
         assert!(parse(&a(&["trim"])).is_err());
+        let Ok(Job::Share(sh)) = parse(&a(&["share", "a.mp4", "b.mp4", "1", "21", "19922944"]))
+        else {
+            panic!("share job")
+        };
+        assert_eq!((sh.start, sh.end, sh.limit_bytes), (1.0, 21.0, 19_922_944));
+        assert!(parse(&a(&["share", "a", "b", "1", "2", "19MB"])).is_err());
     }
 }

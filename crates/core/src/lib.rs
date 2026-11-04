@@ -4,6 +4,7 @@
 
 pub mod audio_dsp;
 pub mod devices;
+pub mod discord;
 pub mod hotkey;
 pub mod library;
 pub mod mic_check;

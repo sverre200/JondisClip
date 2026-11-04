@@ -367,3 +367,83 @@ fn killing_the_process_cancels_without_a_finished_file() {
         "a cancelled export never appears under its final name"
     );
 }
+
+// ---------------------------------------------------------------- sharing
+
+use jondisclip_export::{Share, share};
+
+fn sjob(src: &Path, out: &Path, start: f64, end: f64, limit: u64) -> Share {
+    Share {
+        input: src.into(),
+        output: out.into(),
+        start,
+        end,
+        limit_bytes: limit,
+    }
+}
+
+#[test]
+fn share_that_fits_is_a_lossless_copy_with_only_the_mix() {
+    let Some(src) = source() else { return };
+    let d = dir("share-copy");
+    let before = sha(src);
+    let out = d.0.join("share.mp4");
+    let o = share(&sjob(src, &out, 4.0, 7.0, 19_000_000), |_| {}).unwrap();
+    assert!(o.copied, "{o:?}");
+    assert!(o.size <= 19_000_000);
+    let p = probe(&out);
+    assert_eq!(p.streams, 2, "video + Mix only");
+    assert_eq!(p.titles, ["Mix"]);
+    assert_eq!(p.video_frames, 180);
+    assert!((p.beep.unwrap() - p.flash.unwrap()).abs() < 0.025);
+    assert_eq!(sha(src), before, "the original is untouched");
+}
+
+#[test]
+fn share_reencodes_to_fit_a_tight_limit_and_stays_in_sync() {
+    let Some(src) = source() else { return };
+    let d = dir("share-tight");
+    let out = d.0.join("share.mp4");
+    // Off-keyframe start forces a re-encode; 600 kB for 6 s is tight.
+    let o = share(&sjob(src, &out, 4.3, 10.3, 600_000), |_| {}).unwrap();
+    assert!(!o.copied);
+    assert!(o.size <= 600_000, "size {} over the limit", o.size);
+    assert_eq!(
+        std::fs::metadata(&out).unwrap().len(),
+        o.size,
+        "reported size is the real size"
+    );
+    let p = probe(&out);
+    assert_eq!(p.streams, 2);
+    // 360p source: the only rung is 360p30, so frames are halved.
+    assert!(
+        (175..=182).contains(&p.video_frames),
+        "frames {}",
+        p.video_frames
+    );
+    let (flash, beep) = (p.flash.unwrap(), p.beep.unwrap());
+    assert!((flash - 0.7).abs() < 0.04, "flash at {flash}");
+    assert!(
+        (beep - flash).abs() < 0.04,
+        "A/V offset {:.1} ms",
+        (beep - flash) * 1000.0
+    );
+}
+
+#[test]
+fn share_that_cannot_fit_says_so_and_leaves_nothing() {
+    let Some(src) = source() else { return };
+    let d = dir("share-toolong");
+    let out = d.0.join("share.mp4");
+    match share(&sjob(src, &out, 0.5, 11.5, 60_000), |_| {}) {
+        Err(ExportError::TooLongForLimit { max_seconds, .. }) => assert!(max_seconds < 11.0),
+        other => panic!("{other:?}"),
+    }
+    assert!(!out.exists() && !out.with_extension("mp4.partial").exists());
+    std::fs::write(&out, b"earlier share").unwrap();
+    assert!(matches!(
+        share(&sjob(src, &out, 1.0, 2.0, 19_000_000), |_| {}),
+        Err(ExportError::Exists(_))
+    ));
+    assert_eq!(std::fs::read(&out).unwrap(), b"earlier share");
+}

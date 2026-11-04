@@ -6,7 +6,7 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
 - `crates/engine`: video and audio replay pipeline.
 - `crates/app`: `jondisclip.exe`, the tray app with hotkey and supervisor.
 - `crates/core`: shared settings, hotkey, paths and status.
-- `ui/` + `ui/src-tauri`: `jondisclip-ui.exe`, the clip library and settings window (Tauri 2 + Svelte 5, separate process, ADR-0008/0010). Library stage 1 (browse, thumbnails, player) and stage 2 (trim editor, `crates/export` = `jondisclip-export.exe`, ADR-0011) are done. Next: stage 3 Discord export, stage 4 Drive folder (ROADMAP Phase 4).
+- `ui/` + `ui/src-tauri`: `jondisclip-ui.exe`, the clip library and settings window (Tauri 2 + Svelte 5, separate process, ADR-0008/0010). Library stage 1 (browse, thumbnails, player), stage 2 (trim editor, `crates/export` = `jondisclip-export.exe`, ADR-0011) and stage 3 (Share to Discord: size-targeted file on the clipboard, ADR-0012) are done. Next: stage 4 Drive folder (ROADMAP Phase 4).
 - To drive the real window in tests, launch it with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333` and use the DevTools protocol. Synthetic mouse input doesn't reach it from the agent shell.
 
 ## Read first

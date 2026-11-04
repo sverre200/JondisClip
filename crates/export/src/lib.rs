@@ -18,6 +18,9 @@ use ffmpeg_next as ffmpeg;
 use jondisclip_engine::encoder::{Codec, EncoderId, Vendor, candidates};
 use serde::{Deserialize, Serialize};
 
+mod share;
+pub use share::{Share, ShareOutcome, share};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
@@ -71,6 +74,10 @@ pub enum ExportError {
     BFrames,
     #[error("the encoder stayed busy for too long (the GPU is fully loaded); try again")]
     EncoderBusy,
+    #[error("too long for {:.0} MB: trim it to under {} s", *limit as f64 / 1e6, *max_seconds as u64)]
+    TooLongForLimit { max_seconds: f64, limit: u64 },
+    #[error("couldn't get it under the limit ({:.1} MB, limit {:.1} MB); trim it shorter", *size as f64 / 1e6, *limit as f64 / 1e6)]
+    OverLimit { size: u64, limit: u64 },
 }
 
 fn is_again(e: &ffmpeg::Error) -> bool {
@@ -78,8 +85,41 @@ fn is_again(e: &ffmpeg::Error) -> bool {
 }
 
 /// Encode at most this many times faster than real time, so an export never
-/// monopolises the GPU's video engine that the recorder also uses.
-const MAX_SPEED: f64 = 4.0;
+/// monopolises the GPU's video engine that the recorder also uses. The
+/// exporter's main sets 1× while the library window isn't in front (the game
+/// is), 4× while it is.
+static MAX_SPEED_BITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x4010_0000_0000_0000); // 4.0
+
+pub fn set_max_speed(x: f64) {
+    MAX_SPEED_BITS.store(
+        x.clamp(0.25, 16.0).to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn max_speed() -> f64 {
+    f64::from_bits(MAX_SPEED_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Paces encoding frame by frame, so a speed change applies from the next
+/// frame (no catch-up burst or long stall).
+#[derive(Default)]
+struct Pacer {
+    last: Option<(f64, Instant)>,
+}
+
+impl Pacer {
+    fn wait(&mut self, media: f64) {
+        if let Some((m, at)) = self.last {
+            let due = at + Duration::from_secs_f64(((media - m) / max_speed()).max(0.0));
+            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                std::thread::sleep(wait.min(Duration::from_millis(500)));
+            }
+        }
+        self.last = Some((media, Instant::now()));
+    }
+}
 
 fn ff(what: &'static str) -> impl FnOnce(ffmpeg::Error) -> ExportError {
     move |source| ExportError::Ffmpeg { what, source }
@@ -99,7 +139,7 @@ pub fn trim(job: &Trim, mut progress: impl FnMut(f64)) -> Result<Outcome, Export
     ffmpeg::init().map_err(ff("FFmpeg init"))?;
     unsafe { ffmpeg::ffi::av_log_set_level(ffmpeg::ffi::AV_LOG_ERROR) };
     let tmp = job.output.with_extension("mp4.partial");
-    match run(job, &tmp, &mut progress) {
+    match run(job, &tmp, &mut progress, None) {
         Ok(mut out) => {
             if job.output.exists() {
                 let _ = std::fs::remove_file(&tmp);
@@ -191,18 +231,12 @@ struct VideoEncoder {
     frame: frame::Video,
     /// One frame in `tb` ticks.
     frame_ticks: i64,
-    /// Pacing: when the first frame went in, and media time encoded since.
-    started: Option<Instant>,
+    pacer: Pacer,
 }
 
 impl VideoEncoder {
     fn encode(&mut self, pts: i64, mux: &mut Mux, i: usize) -> Result<(), ExportError> {
-        // Pace to MAX_SPEED × real time.
-        let started = *self.started.get_or_insert_with(Instant::now);
-        let due = Duration::from_secs_f64((secs(pts, self.tb) / MAX_SPEED).max(0.0));
-        if let Some(wait) = due.checked_sub(started.elapsed()) {
-            std::thread::sleep(wait);
-        }
+        self.pacer.wait(secs(pts, self.tb));
         self.frame.set_pts(Some(pts));
         self.frame.set_kind(picture::Type::None);
         // EAGAIN means "take packets out first", e.g. when the GPU encoder's
@@ -281,7 +315,23 @@ fn to_ts(s: f64, tb: Rational) -> i64 {
     (s / f64::from(tb)).round() as i64
 }
 
-fn run(job: &Trim, tmp: &Path, progress: &mut impl FnMut(f64)) -> Result<Outcome, ExportError> {
+/// A trim that keeps only one audio track (`None`: no audio), for sharing.
+fn run_tracks(
+    job: &Trim,
+    tmp: &Path,
+    progress: &mut impl FnMut(f64),
+    only_audio: Option<usize>,
+) -> Result<Outcome, ExportError> {
+    run(job, tmp, progress, Some(only_audio))
+}
+
+/// `only_audio`: `None` keeps every track; `Some(x)` keeps only audio stream `x`.
+fn run(
+    job: &Trim,
+    tmp: &Path,
+    progress: &mut impl FnMut(f64),
+    only_audio: Option<Option<usize>>,
+) -> Result<Outcome, ExportError> {
     let mut ictx = format::input(&job.input).map_err(ff("open the clip"))?;
     let vidx = ictx
         .streams()
@@ -302,11 +352,25 @@ fn run(job: &Trim, tmp: &Path, progress: &mut impl FnMut(f64)) -> Result<Outcome
     let mut venc: Option<VideoEncoder> = None;
     let mut frame_dur = 1.0 / 60.0;
     let mut audio_seen = 0;
+    // Input stream → output stream (dropped tracks map to None).
+    let mut map: Vec<Option<usize>> = Vec::new();
     for ist in ictx.streams() {
         let params = ist.parameters();
         let kind = params.medium();
         kinds.push(kind);
         in_tbs.push(ist.time_base());
+        if kind == media::Type::Audio
+            && let Some(keep) = only_audio
+            && keep != Some(ist.index())
+        {
+            map.push(None);
+            continue;
+        }
+        if kind != media::Type::Audio && kind != media::Type::Video {
+            map.push(None);
+            continue;
+        }
+        map.push(Some(map.iter().flatten().count()));
         let mut ost = octx
             .add_stream(encoder::find(codec::Id::None))
             .map_err(ff("add stream"))?;
@@ -371,8 +435,9 @@ fn run(job: &Trim, tmp: &Path, progress: &mut impl FnMut(f64)) -> Result<Outcome
         last_dts: vec![None; out_tbs.len()],
         out_tbs,
         written: 0,
-        video: vidx,
+        video: map[vidx].unwrap_or(0),
     };
+    let vout = map[vidx].unwrap_or(0);
 
     // To the keyframe at or before the start (both modes).
     let start_us = (job.start * 1e6) as i64;
@@ -383,7 +448,11 @@ fn run(job: &Trim, tmp: &Path, progress: &mut impl FnMut(f64)) -> Result<Outcome
     // first frame at or after `start` (Exact). Known once video decides it.
     let mut base: Option<f64> = None;
     let mut video_done = false;
-    let mut audio_done: Vec<bool> = kinds.iter().map(|k| *k != media::Type::Audio).collect();
+    let mut audio_done: Vec<bool> = kinds
+        .iter()
+        .zip(&map)
+        .map(|(k, m)| *k != media::Type::Audio || m.is_none())
+        .collect();
     let mut pending_audio: Vec<(Packet, usize)> = Vec::new();
     let mut video_end = 0.0f64;
     let span = (job.end - job.start).max(1e-6);
@@ -426,12 +495,12 @@ fn run(job: &Trim, tmp: &Path, progress: &mut impl FnMut(f64)) -> Result<Outcome
                         continue;
                     }
                     let b = *base.get_or_insert(ft);
-                    v.encode(fp - to_ts(b, vtb), &mut mux, i)?;
+                    v.encode(fp - to_ts(b, vtb), &mut mux, vout)?;
                     video_end = ft - b + frame_dur;
                     progress(((ft - job.start) / span).clamp(0.0, 0.99));
                 }
                 if video_done {
-                    v.finish(&mut mux, i)?;
+                    v.finish(&mut mux, vout)?;
                 }
             } else {
                 if base.is_none() {
@@ -445,19 +514,21 @@ fn run(job: &Trim, tmp: &Path, progress: &mut impl FnMut(f64)) -> Result<Outcome
                     continue;
                 }
                 let b = base.unwrap_or(t);
-                mux.write(pkt, i, tb, to_ts(b, tb))?;
+                mux.write(pkt, vout, tb, to_ts(b, tb))?;
                 video_end = t - b + frame_dur;
                 progress(((t - job.start) / span).clamp(0.0, 0.99));
             }
             if let Some(b) = base {
-                write_pending(&mut mux, &mut pending_audio, &in_tbs, b, job.end)?;
+                write_pending(&mut mux, &mut pending_audio, &in_tbs, &map, b, job.end)?;
             }
         } else if kinds[i] == media::Type::Audio && !audio_done[i] {
             if t >= job.end {
                 audio_done[i] = true;
             } else {
                 match base {
-                    Some(b) if t >= b - 1e-6 => mux.write(pkt, i, tb, to_ts(b, tb))?,
+                    Some(b) if t >= b - 1e-6 => {
+                        mux.write(pkt, map[i].unwrap_or(0), tb, to_ts(b, tb))?
+                    }
                     Some(_) => {}
                     None => pending_audio.push((pkt, i)),
                 }
@@ -481,15 +552,15 @@ fn run(job: &Trim, tmp: &Path, progress: &mut impl FnMut(f64)) -> Result<Outcome
                 continue;
             }
             let b = *base.get_or_insert(ft);
-            v.encode(fp - to_ts(b, vtb), &mut mux, vidx)?;
+            v.encode(fp - to_ts(b, vtb), &mut mux, vout)?;
             video_end = ft - b + frame_dur;
         }
-        v.finish(&mut mux, vidx)?;
+        v.finish(&mut mux, vout)?;
     }
     // Audio held back until the start was known (it may only be known now,
     // when the selection's frames came out of the decoder at the flush).
     if let Some(b) = base {
-        write_pending(&mut mux, &mut pending_audio, &in_tbs, b, job.end)?;
+        write_pending(&mut mux, &mut pending_audio, &in_tbs, &map, b, job.end)?;
     }
     if mux.written == 0 || base.is_none() {
         return Err(ExportError::NothingWritten);
@@ -508,13 +579,17 @@ fn write_pending(
     mux: &mut Mux,
     pending: &mut Vec<(Packet, usize)>,
     in_tbs: &[Rational],
+    map: &[Option<usize>],
     base: f64,
     end: f64,
 ) -> Result<(), ExportError> {
     for (p, pi) in pending.drain(..) {
         let pt = secs(p.pts().unwrap_or(i64::MIN), in_tbs[pi]);
-        if pt >= base - 1e-6 && pt < end {
-            mux.write(p, pi, in_tbs[pi], to_ts(base, in_tbs[pi]))?;
+        if pt >= base - 1e-6
+            && pt < end
+            && let Some(o) = map[pi]
+        {
+            mux.write(p, o, in_tbs[pi], to_ts(base, in_tbs[pi]))?;
         }
     }
     Ok(())
@@ -554,7 +629,7 @@ fn open_video_encoder(
                     tb,
                     frame: frame::Video::empty(),
                     frame_ticks: (1.0 / f64::from(fps) / f64::from(tb)).round() as i64,
-                    started: None,
+                    pacer: Pacer::default(),
                 });
             }
             Err(e) => errors.push(format!("{}: {e}", id.ffmpeg_name())),

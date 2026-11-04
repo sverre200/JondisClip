@@ -16,6 +16,9 @@ pub const FPS_PRESETS: [u32; 4] = [30, 60, 120, 144];
 pub const DEFAULT_HOTKEY: &str = "Alt+F10";
 /// Microphone gain range in dB (matches the engine's clamp).
 pub const MIC_GAIN_RANGE: (f32, f32) = (-12.0, 24.0);
+/// Discord upload limit in MB (decimal). 19 is a safe margin under the common free limit.
+pub const DISCORD_LIMIT_RANGE: (u32, u32) = (5, 1000);
+pub const DISCORD_LIMIT_DEFAULT: u32 = 19;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -101,6 +104,8 @@ pub struct Settings {
     /// Short sound when a clip is saved (works in fullscreen games).
     pub save_sound: bool,
     pub start_with_windows: bool,
+    /// "Share to Discord" keeps files under this many MB (1 MB = 1,000,000 bytes).
+    pub discord_limit_mb: u32,
 }
 
 impl Default for Settings {
@@ -120,6 +125,7 @@ impl Default for Settings {
             microphone_low_cut: false,
             save_sound: true,
             start_with_windows: false,
+            discord_limit_mb: DISCORD_LIMIT_DEFAULT,
         }
     }
 }
@@ -167,6 +173,13 @@ impl Settings {
                 s.microphone_gain_db, MIC_GAIN_RANGE.0, MIC_GAIN_RANGE.1
             ));
             s.microphone_gain_db = fixed;
+        }
+        if !(DISCORD_LIMIT_RANGE.0..=DISCORD_LIMIT_RANGE.1).contains(&s.discord_limit_mb) {
+            warnings.push(format!(
+                "discord_limit_mb {} is outside {}..{}; using {DISCORD_LIMIT_DEFAULT}",
+                s.discord_limit_mb, DISCORD_LIMIT_RANGE.0, DISCORD_LIMIT_RANGE.1
+            ));
+            s.discord_limit_mb = DISCORD_LIMIT_DEFAULT;
         }
         if let Err(e) = Hotkey::parse(&s.hotkey) {
             warnings.push(format!(
@@ -233,6 +246,27 @@ pub fn replay_label(secs: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_limit_is_validated_and_never_restarts_the_recorder() {
+        let (s, w) = Settings::from_toml(
+            "discord_limit_mb = 2
+",
+        );
+        assert_eq!((s.discord_limit_mb, w.len()), (DISCORD_LIMIT_DEFAULT, 1));
+        let (s, w) = Settings::from_toml(
+            "discord_limit_mb = 50
+",
+        );
+        assert_eq!((s.discord_limit_mb, w.len()), (50, 0));
+        let (s, _) = Settings::from_toml("");
+        assert_eq!(s.discord_limit_mb, 19, "old settings files get the default");
+        let other = Settings {
+            discord_limit_mb: 500,
+            ..s.clone()
+        };
+        assert!(!s.needs_restart(&other));
+    }
 
     #[test]
     fn defaults_round_trip() {

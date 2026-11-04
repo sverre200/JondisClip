@@ -5,6 +5,7 @@
 //! applies it within 2 s) and reads `status.json` (published by the tray).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clipboard;
 mod export;
 mod library;
 mod meter;
@@ -288,10 +289,131 @@ async fn export_start(
         let duration = jondisclip_core::library::probe_file(&path)
             .map_err(|e| e.to_string())?
             .duration;
-        export::start(app, path, duration, size, start, end, exact)
+        export::start(
+            app,
+            path,
+            duration,
+            size,
+            start,
+            end,
+            export::Kind::Trim { exact },
+        )
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// What "Share to Discord" will produce for `[start, end)` of a clip with the
+/// current limit (ADR-0012), so the button can say so before anything runs.
+#[derive(Serialize)]
+struct SharePlan {
+    limit_mb: u32,
+    plan: Option<jondisclip_core::discord::Plan>,
+    /// Longest selection that can fit, when this one can't.
+    max_seconds: Option<f64>,
+}
+
+#[tauri::command]
+async fn share_plan(id: String, start: f64, end: f64) -> Result<SharePlan, String> {
+    // File IO (and a possibly sleeping disk) off the main thread.
+    tauri::async_runtime::spawn_blocking(move || share_plan_blocking(id, start, end))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn share_plan_blocking(id: String, start: f64, end: f64) -> Result<SharePlan, String> {
+    use jondisclip_core::discord::{PlanError, plan};
+    let path = library::path_of(&id)?;
+    let probe = jondisclip_core::library::probe_file(&path).map_err(|e| e.to_string())?;
+    let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    let (settings, _) = read_settings();
+    let limit = u64::from(settings.discord_limit_mb) * 1_000_000;
+    // Video bitrate ≈ the file's average minus its audio tracks.
+    let source_bps =
+        (size as f64 * 8.0 / probe.duration.max(0.1)) - 160_000.0 * f64::from(probe.audio_tracks);
+    // The window doesn't know the exact frame rate; recordings are 60 fps class.
+    let r = plan(
+        (end - start).max(0.0),
+        probe.width,
+        probe.height,
+        60.0,
+        Some(source_bps),
+        limit,
+    );
+    Ok(SharePlan {
+        limit_mb: settings.discord_limit_mb,
+        max_seconds: match &r {
+            Err(PlanError::TooLong { max_seconds }) => Some(*max_seconds),
+            _ => None,
+        },
+        plan: r.ok(),
+    })
+}
+
+/// Makes a Discord-sized copy of `[start, end)` and puts it on the clipboard.
+#[tauri::command]
+async fn share_start(
+    app: tauri::AppHandle,
+    id: String,
+    start: f64,
+    end: f64,
+) -> Result<export::Started, String> {
+    let path = library::path_of(&id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        let duration = jondisclip_core::library::probe_file(&path)
+            .map_err(|e| e.to_string())?
+            .duration;
+        let (settings, _) = read_settings();
+        let limit = u64::from(settings.discord_limit_mb) * 1_000_000;
+        export::start(
+            app,
+            path,
+            duration,
+            size,
+            start,
+            end,
+            export::Kind::Share { limit },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Copies a finished share file to the clipboard again (only files in our
+/// share folder).
+#[tauri::command]
+async fn share_copy_again(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let owner = export::main_hwnd(&app);
+    tauri::async_runtime::spawn_blocking(move || share_copy_again_blocking(path, owner))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn share_copy_again_blocking(path: String, owner: Option<isize>) -> Result<(), String> {
+    let p = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let dir = std::fs::canonicalize(export::share_dir()).map_err(|e| e.to_string())?;
+    if !p.starts_with(&dir) {
+        return Err("not a share file".into());
+    }
+    clipboard::copy_file(&p, owner)
+}
+
+/// Shows a share file in Explorer (only files in our share folder).
+#[tauri::command]
+fn share_reveal(path: String) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let p = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let dir = std::fs::canonicalize(export::share_dir()).map_err(|e| e.to_string())?;
+    if !p.starts_with(&dir) {
+        return Err("not a share file".into());
+    }
+    let plain = p.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+    std::process::Command::new("explorer")
+        .raw_arg(format!("/select,\"{plain}\""))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -406,7 +528,11 @@ fn main() {
             open_external,
             clip_keyframes,
             export_start,
-            export_cancel
+            export_cancel,
+            share_plan,
+            share_start,
+            share_copy_again,
+            share_reveal
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the JondisClip window");

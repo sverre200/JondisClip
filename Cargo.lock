@@ -1699,6 +1699,7 @@ name = "jondisclip-export"
 version = "0.1.0"
 dependencies = [
  "ffmpeg-next",
+ "jondisclip-core",
  "jondisclip-engine",
  "serde",
  "serde_json",

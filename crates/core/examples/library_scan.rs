@@ -3,6 +3,18 @@
 use jondisclip_core::library::{Cache, probe_file, scan};
 
 fn main() {
+    if let Some(f) = std::env::args()
+        .nth(2)
+        .filter(|_| std::env::args().nth(1).as_deref() == Some("--kf"))
+    {
+        let k = jondisclip_core::library::keyframes_file(std::path::Path::new(&f)).unwrap();
+        println!(
+            "{} keyframes; 115..121: {:?}",
+            k.len(),
+            &k[115.min(k.len())..121.min(k.len())]
+        );
+        return;
+    }
     let root = std::env::args()
         .nth(1)
         .map(Into::into)
@@ -37,7 +49,7 @@ fn main() {
             t.elapsed(),
             k.map(|k| (
                 k.len(),
-                k.iter().take(4).copied().collect::<Vec<_>>(),
+                k.iter().skip(115).take(6).copied().collect::<Vec<_>>(),
                 k.last().copied()
             ))
         );

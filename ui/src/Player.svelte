@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
-  import { api, clipUrl, type Clip, type ExportEvent } from "./lib/api";
+  import { api, clipUrl, type Clip, type ExportEvent, type SharePlan } from "./lib/api";
   import { bytes, clock, clockPrecise, codecName, fromWithin, whenShort } from "./lib/format";
   import { cutPlan, estimateSize } from "./lib/trim";
   import Button from "./lib/Button.svelte";
@@ -38,9 +38,44 @@
   let preferLossless = $state(false);
   type Job =
     | { state: "idle" }
-    | { state: "running"; job: number | null; progress: number }
+    | { state: "running"; job: number | null; progress: number; share: boolean }
     | { state: "done"; path: string; size: number; duration: number; lossless: boolean; seconds: number }
+    | {
+        state: "shared";
+        path: string;
+        size: number;
+        height: number;
+        fps: number;
+        copied: boolean;
+        clipboardError: string | null;
+      }
     | { state: "error"; message: string };
+
+  // What "Share to Discord" would make of the current selection.
+  let sharePlan = $state<SharePlan | null>(null);
+  $effect(() => {
+    const id = clip.id;
+    const [s, e] = [trimStart, trimEnd];
+    if (!(e > s)) return;
+    const t = setTimeout(() => {
+      api
+        .sharePlan(id, s, e)
+        .then((p) => {
+          if (clip.id === id) sharePlan = p;
+        })
+        .catch(() => (sharePlan = null));
+    }, 200);
+    return () => clearTimeout(t);
+  });
+  const shareHint = $derived.by(() => {
+    if (!sharePlan) return "";
+    if (!sharePlan.plan) {
+      const m = sharePlan.max_seconds ?? 0;
+      return `Too long for ${sharePlan.limit_mb} MB: trim it to under ${clock(m)}`;
+    }
+    const p = sharePlan.plan;
+    return `Discord: ${p.height}p${p.fps} under ${sharePlan.limit_mb} MB${p.rough ? " (will look rough; trim it shorter)" : ""}`;
+  });
   let job = $state<Job>({ state: "idle" });
 
   let video = $state<HTMLVideoElement>();
@@ -82,7 +117,7 @@
   function setTrim(start: number, end: number, edge: "start" | "end") {
     trimStart = Math.max(0, start);
     trimEnd = Math.min(duration, end);
-    if (job.state === "done" || job.state === "error") job = { state: "idle" };
+    if (job.state === "done" || job.state === "shared" || job.state === "error") job = { state: "idle" };
     // Show the frame at the handle being dragged.
     video?.pause();
     seek(edge === "start" ? trimStart : Math.max(trimStart, trimEnd - 1 / 60), true);
@@ -99,9 +134,29 @@
     job = { state: "idle" };
   }
 
+  async function shareToDiscord() {
+    if (job.state === "running" || !sharePlan?.plan) return;
+    job = { state: "running", job: null, progress: 0, share: true };
+    try {
+      const r = await api.shareStart(clip.id, trimStart, trimEnd);
+      if (job.state === "running") job = { ...job, job: r.job };
+    } catch (e) {
+      job = { state: "error", message: String(e) };
+    }
+  }
+
+  async function copyAgain(path: string) {
+    try {
+      await api.shareCopyAgain(path);
+      if (job.state === "shared") job = { ...job, clipboardError: null };
+    } catch (e) {
+      if (job.state === "shared") job = { ...job, clipboardError: String(e) };
+    }
+  }
+
   async function save() {
     if (!trimmed || job.state === "running") return;
-    job = { state: "running", job: null, progress: 0 };
+    job = { state: "running", job: null, progress: 0, share: false };
     try {
       const r = await api.exportStart(clip.id, trimStart, trimEnd, !plan.lossless);
       if (job.state === "running") job = { ...job, job: r.job };
@@ -117,7 +172,17 @@
     if (job.state !== "running") return;
     if (job.job !== null && e.job !== job.job && e.kind !== "cancelled") return;
     if (e.kind === "progress") job = { ...job, progress: e.progress };
-    else if (e.kind === "done") {
+    else if (e.kind === "done" && e.share) {
+      job = {
+        state: "shared",
+        path: e.path,
+        size: e.size,
+        height: e.share.height,
+        fps: e.share.fps,
+        copied: e.share.copied,
+        clipboardError: e.clipboard && "Err" in e.clipboard ? e.clipboard.Err : null,
+      };
+    } else if (e.kind === "done") {
       job = { state: "done", path: e.path, size: e.size, duration: e.duration, lossless: e.video === "copy", seconds: e.seconds };
       onsaved(e.path);
     } else if (e.kind === "error") job = { state: "error", message: e.message };
@@ -222,6 +287,10 @@
           return true;
         case "Escape":
           if (job.state === "running") return true; // cancel explicitly instead
+          if (job.state === "shared") {
+            job = { state: "idle" };
+            return true;
+          }
           onclose();
           return true;
         case "PageUp":
@@ -389,15 +458,17 @@
     <div class="sel-info">
       {#if trimmed}
         <strong>{clockPrecise(trimStart)} – {clockPrecise(trimEnd)}</strong>
-        <span>{clockPrecise(trimEnd - plan.start)} · ≈ {bytes(estimate)}</span>
+        <span>{clockPrecise(trimEnd - plan.start)} · ≈ {bytes(estimate)}{shareHint ? ` · ${shareHint}` : ""}</span>
       {:else}
         <strong>Trim</strong>
-        <span>Drag the red handles, or press I and O at the playhead</span>
+        <span>Drag the red handles, or press I and O at the playhead{shareHint ? ` · ${shareHint}` : ""}</span>
       {/if}
     </div>
 
     <div class="mode">
-      {#if trimmed && plan.onKeyframe}
+      {#if job.state !== "idle" && job.state !== "error"}
+        <!-- the cut mode only matters before saving -->
+      {:else if trimmed && plan.onKeyframe}
         <span class="badge ok" title="The start is on a keyframe, so the clip is copied exactly, with no quality loss">Lossless · exact</span>
       {:else if trimmed}
         <Segmented
@@ -414,7 +485,8 @@
 
     <div class="save">
       {#if job.state === "running"}
-        <div class="progress" role="progressbar" aria-label="Saving clip" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress * 100)}>
+        <span class="what">{job.share ? "Preparing for Discord…" : "Saving…"}</span>
+        <div class="progress" role="progressbar" aria-label={job.share ? "Preparing for Discord" : "Saving clip"} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress * 100)}>
           <div style:width="{Math.round(job.progress * 100)}%"></div>
         </div>
         <span class="pct">{Math.round(job.progress * 100)}%</span>
@@ -427,11 +499,33 @@
         </span>
         <Button variant="ghost" onclick={() => onopensaved(saved.path)}>Play it</Button>
         <Button variant="ghost" onclick={resetTrim}>New trim</Button>
+      {:else if job.state === "shared"}
+        {@const sh = job}
+        {#if sh.clipboardError}
+          <span class="err" role="alert" title={sh.clipboardError}>Ready, but not on the clipboard: {sh.clipboardError}</span>
+        {:else}
+          <span class="done" role="status" title="{sh.height}p{sh.fps} · {bytes(sh.size)}{sh.copied ? ' · no re-encode' : ''}">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+            Copied: paste it in Discord with Ctrl+V · {sh.height}p{sh.fps} · {bytes(sh.size)}
+          </span>
+        {/if}
+        <Button variant="ghost" onclick={() => copyAgain(sh.path)}>Copy again</Button>
+        <Button variant="ghost" onclick={() => api.shareReveal(sh.path).catch((e) => onerror(String(e)))}>Show file</Button>
+        <Button variant="ghost" onclick={() => (job = { state: "idle" })}>Done</Button>
       {:else}
         {#if job.state === "error"}<span class="err" role="alert" title={job.message}>{job.message}</span>{/if}
         {#if trimmed}<Button variant="ghost" onclick={resetTrim}>Reset</Button>{/if}
-        <Button variant="primary" onclick={save} disabled={!trimmed || !!failed} title="Save the selection as a new clip (Ctrl+S). The original is kept.">
+        <Button onclick={save} disabled={!trimmed || !!failed} title="Save the selection as a new clip next to the original (Ctrl+S). The original is kept.">
           Save clip
+        </Button>
+        <Button
+          variant="primary"
+          onclick={shareToDiscord}
+          disabled={!!failed || !sharePlan?.plan}
+          title={sharePlan?.plan ? `Makes a copy under ${sharePlan.limit_mb} MB and puts the file on the clipboard. Paste it in any Discord chat.` : shareHint}
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2v8M4.5 5.5 8 2l3.5 3.5M3 10v3h10v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          Share to Discord
         </Button>
       {/if}
     </div>
@@ -646,6 +740,11 @@
     height: 100%;
     background: var(--accent);
     transition: width var(--t-fast) linear;
+  }
+  .what {
+    color: var(--text-muted);
+    font-size: var(--fs-sm);
+    white-space: nowrap;
   }
   .pct {
     width: 40px;

@@ -153,6 +153,18 @@
     !!tray?.running && !!tray.status && !tray.status.hotkey_ok && tray.status.hotkey === settings?.hotkey,
   );
 
+  function discordLimits(current: number) {
+    const presets = [
+      { value: "10", label: "10 MB", title: "Very strict servers or older limits" },
+      { value: "19", label: "19 MB", title: "Free account (recommended)" },
+      { value: "50", label: "50 MB", title: "Nitro Basic" },
+      { value: "500", label: "500 MB", title: "Nitro" },
+    ];
+    // A custom value from the settings file stays visible.
+    if (!presets.some((p) => p.value === String(current))) presets.push({ value: String(current), label: `${current} MB`, title: "Set in settings.toml" });
+    return presets;
+  }
+
   const resolutions: { value: Resolution; label: string }[] = [
     { value: "source", label: "Native" },
     { value: "1440p", label: "1440p" },
@@ -300,6 +312,21 @@
           />
         </Row>
       {/if}
+    </section>
+
+    <section aria-labelledby="h-share">
+      <h2 id="h-share">Sharing</h2>
+      <Row
+        label="Discord upload limit"
+        hint="Share to Discord keeps files under this size. 19 MB is safe on a free account; Nitro allows more, which means better quality."
+      >
+        <Segmented
+          label="Discord upload limit"
+          value={String(settings.discord_limit_mb)}
+          options={discordLimits(settings.discord_limit_mb)}
+          onchange={(v) => change({ discord_limit_mb: Number(v) })}
+        />
+      </Row>
     </section>
 
     <section aria-labelledby="h-general">

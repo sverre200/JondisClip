@@ -70,7 +70,12 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
   - `jondisclip-export.exe` runs as a below-normal-priority child in a kill-on-close job, with progress, cancel and a free-space check.
   - Measured: a lossless 20 s cut takes 0.12 s and an exact one 5.3 s. 0 late or dropped recorder frames over 12 back-to-back exports (desktop, no game).
   - **Not verified:** export while a game is running (needs `/perf-benchmark`), NVENC, QSV and MF on real hardware, and HEVC sources in Exact mode (output is H.264).
-- [ ] **Stage 3: Discord.** A size-targeted H.264 export (default about 19 MB, configurable) with Mix audio only. It checks the final size and copies the file to the clipboard (`CF_HDROP`, ADR-0004).
+- [x] **Stage 3: Discord** (2026-11-04, ADR-0012, [report](perf/2026-11-04-discord-share.md)):
+  - **Share to Discord** is the editor's main button. It works on the selection or the whole clip, and before you click it shows what you'll get ("Discord: 720p60 under 19 MB", or "Too long for 19 MB: trim it to under 10:53").
+  - It makes an H.264 Main file with the Mix track only, in `%LOCALAPPDATA%\JondisClip\share` (pruned after 14 days), and puts **the file on the clipboard**, so you paste it into a chat with Ctrl+V.
+  - It's a lossless copy when that fits. Otherwise it follows the quality ladder (1080p60 → 720p60 → 720p30 → … 360p30), encoded CBR and measured, with one smaller retry. A file over the limit is never handed over.
+  - Settings → Sharing → Discord upload limit: 10 / 19 (default) / 50 / 500 MB.
+  - **Not verified:** pasting into the Discord app itself (the clipboard was read back by Windows' own API), NVENC/QSV CBR behaviour, and a game running during the export.
 - [ ] **Stage 4: Google Drive.** An optional synced-folder destination and "Save to Drive" (copy or export, with checks for free space and an unavailable destination). It never claims the upload finished.
 - [ ] Later: rename, delete to the Recycle Bin, copy path. If the window is already open, "Settings…" should switch its page (today it only focuses the window).
 Tauri window with Library (grid, thumbnails, player, rename, delete to the Recycle Bin, open folder, copy path), Recording status and Settings. Trim with stream copy, and a share export.

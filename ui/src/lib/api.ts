@@ -24,6 +24,24 @@ export interface Settings {
   microphone_low_cut: boolean;
   save_sound: boolean;
   start_with_windows: boolean;
+  /** "Share to Discord" size limit, MB (1 MB = 1,000,000 bytes) */
+  discord_limit_mb: number;
+}
+
+export interface SharePlan {
+  limit_mb: number;
+  plan: { width: number; height: number; fps: number; video_bps: number; audio_bps: number; bpp: number; rough: boolean } | null;
+  /** longest selection that fits, when this one doesn't */
+  max_seconds: number | null;
+}
+
+export interface ShareInfo {
+  width: number;
+  height: number;
+  fps: number;
+  copied: boolean;
+  limit: number;
+  attempts: number;
 }
 
 export interface Probe {
@@ -53,7 +71,20 @@ export interface Clip {
 
 export type ExportEvent =
   | { kind: "progress"; job: number; progress: number }
-  | { kind: "done"; job: number; path: string; size: number; start: number; duration: number; video: string; seconds: number }
+  | {
+      kind: "done";
+      job: number;
+      path: string;
+      size: number;
+      start: number;
+      duration: number;
+      video: string;
+      seconds: number;
+      /** set for a Discord share */
+      share: ShareInfo | null;
+      /** for a share: on the clipboard, or why not (Rust Result) */
+      clipboard: { Ok: null } | { Err: string } | null;
+    }
   | { kind: "error"; job: number; message: string }
   | { kind: "cancelled"; job: number };
 
@@ -151,6 +182,10 @@ export const api = {
   exportStart: (id: string, start: number, end: number, exact: boolean) =>
     call<{ job: number; output: string }>("export_start", { id, start, end, exact }),
   exportCancel: () => call<void>("export_cancel"),
+  sharePlan: (id: string, start: number, end: number) => call<SharePlan>("share_plan", { id, start, end }),
+  shareStart: (id: string, start: number, end: number) => call<{ job: number; output: string }>("share_start", { id, start, end }),
+  shareCopyAgain: (path: string) => call<void>("share_copy_again", { path }),
+  shareReveal: (path: string) => call<void>("share_reveal", { path }),
   /** Subscribes to export progress; returns the unsubscribe function. */
   async onExport(fn: (e: ExportEvent) => void): Promise<() => void> {
     if (!isDesktop) {
@@ -247,6 +282,7 @@ const mockState: Snapshot = {
     microphone_low_cut: false,
     save_sound: true,
     start_with_windows: false,
+    discord_limit_mb: 19,
   },
   default_save_dir: "C:\\Users\\you\\Videos\\JondisClip",
   replay_presets: [30, 60, 120, 180, 300, 600, 900],
@@ -296,12 +332,41 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
           clearInterval(mockExport);
           const s = exact ? start : Math.floor(start);
           mockExportListeners.forEach((f) =>
-            f({ kind: "done", job, path: "C:\Users\you\Videos\JondisClip\DayZ\DayZ 2026-11-04 17-47-11 edit.mp4", size: (end - s) * 2.9e6, start: s, duration: end - s, video: exact ? "h264_amf" : "copy", seconds: 1 }),
+            f({ kind: "done", job, path: "C:\Users\you\Videos\JondisClip\DayZ\DayZ 2026-11-04 17-47-11 edit.mp4", size: (end - s) * 2.9e6, start: s, duration: end - s, video: exact ? "h264_amf" : "copy", seconds: 1, share: null, clipboard: null }),
           );
         }
       }, 200);
       return { job, output: "C:\…\DayZ 2026-11-04 17-47-11 edit.mp4" };
     }
+    case "share_plan": {
+      const len = Number(args?.end ?? 0) - Number(args?.start ?? 0);
+      const mb = mockState.settings.discord_limit_mb;
+      const total = (mb * 1e6 * 0.92 * 8) / Math.max(len, 0.1);
+      if (total < 214_000) return { limit_mb: mb, plan: null, max_seconds: Math.floor((mb * 1e6 * 0.92 * 8) / 214_000) };
+      const rungs = [[1920, 1080, 60], [1280, 720, 60], [1280, 720, 30], [960, 540, 30], [852, 480, 30], [640, 360, 30]] as const;
+      let pick = rungs[rungs.length - 1]!;
+      for (const r of rungs) if ((total - 160_000) / (r[0] * r[1] * r[2]) >= 0.06) { pick = r; break; }
+      return { limit_mb: mb, plan: { width: pick[0], height: pick[1], fps: pick[2], video_bps: total - 160_000, audio_bps: 0, bpp: 0.07, rough: false }, max_seconds: null };
+    }
+    case "share_start": {
+      const job = Date.now();
+      let p = 0;
+      clearInterval(mockExport);
+      mockExport = setInterval(() => {
+        p = Math.min(1, p + 0.12);
+        mockExportListeners.forEach((f) => f({ kind: "progress", job, progress: p }));
+        if (p >= 1) {
+          clearInterval(mockExport);
+          mockExportListeners.forEach((f) =>
+            f({ kind: "done", job, path: "C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\JondisClip\\\\share\\\\DayZ 2026-11-04 17-47-11.mp4", size: 18.1e6, start: 0, duration: 20, video: "h264_amf", seconds: 5, share: { width: 1280, height: 720, fps: 60, copied: false, limit: 19e6, attempts: 1 }, clipboard: { Ok: null } }),
+          );
+        }
+      }, 200);
+      return { job, output: "share.mp4" };
+    }
+    case "share_copy_again":
+    case "share_reveal":
+      return undefined;
     case "export_cancel":
       clearInterval(mockExport);
       mockExportListeners.forEach((f) => f({ kind: "cancelled", job: 0 }));
