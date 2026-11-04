@@ -9,6 +9,7 @@ pub mod drive;
 pub mod hotkey;
 pub mod library;
 pub mod mic_check;
+pub mod organize;
 pub mod paths;
 pub mod settings;
 pub mod status;

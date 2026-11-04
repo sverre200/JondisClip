@@ -43,6 +43,9 @@ pub struct Clip {
     pub thumb: bool,
     /// Made by the editor (`<stem> edit[ N].mp4`), not by the recorder.
     pub edit: bool,
+    /// Content fingerprint (ADR-0014): identifies the clip for titles and
+    /// folders even if it's renamed or moved outside JondisClip.
+    pub key: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -56,9 +59,13 @@ struct Entry {
     size: u64,
     mtime: u64,
     probe: Result<Probe, String>,
+    /// Content fingerprint; None if the file couldn't be read.
+    #[serde(default)]
+    key: Option<String>,
 }
 
-const INDEX_VERSION: u32 = 1;
+/// 2: adds the content fingerprint (a one-time re-read of every clip).
+const INDEX_VERSION: u32 = 2;
 
 /// Where the index and thumbnails live.
 pub struct Cache {
@@ -98,7 +105,9 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
     let mut index: Index = std::fs::read(cache.index_file())
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .filter(|i: &Index| i.version == INDEX_VERSION)
+        // v1 indexes are kept: their entries only lack fingerprints, which
+        // are filled in below (no full re-probe after the upgrade).
+        .filter(|i: &Index| i.version == INDEX_VERSION || i.version == 1)
         .unwrap_or_default();
 
     let mut files = Vec::new();
@@ -122,22 +131,32 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
         .unwrap_or_default();
 
     let mut probed = 0;
+    let mut fingerprinted = 0;
     let mut fresh = BTreeMap::new();
     let mut clips = Vec::with_capacity(files.len());
     for (path, folder_game, size, mtime) in files {
         let mut transient = false;
         let key = path.to_string_lossy().into_owned();
         let entry = match index.entries.remove(&key) {
-            Some(e) if e.size == size && e.mtime == mtime => e,
+            Some(mut e) if e.size == size && e.mtime == mtime => {
+                if e.key.is_none() {
+                    e.key = fingerprint(&path, size).ok();
+                    fingerprinted += 1;
+                }
+                e
+            }
             _ => {
                 probed += 1;
                 let probe = probe_file(&path);
                 // A busy file (antivirus, backup) isn't broken: don't remember that.
                 transient |= matches!(&probe, Err(e) if e.is_transient());
+                let key = fingerprint(&path, size).ok();
+                transient |= key.is_none();
                 Entry {
                     size,
                     mtime,
                     probe: probe.map_err(|e| e.to_string()),
+                    key,
                 }
             }
         };
@@ -155,6 +174,9 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
         let id = clip_id(&key, size, mtime);
         let thumb = thumbs.contains(&format!("{id}.jpg"));
         let edit = split_edit(file_stem(&file_name)).1.is_some();
+        // No fingerprint (file busy): an empty key, which organising refuses
+        // until a later scan can read the file.
+        let clip_key = entry.key.clone().unwrap_or_default();
         clips.push(Clip {
             id,
             path,
@@ -166,6 +188,7 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
             error: entry.probe.clone().err(),
             thumb,
             edit,
+            key: clip_key,
         });
         if !transient {
             fresh.insert(key, entry);
@@ -173,7 +196,10 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
     }
 
     // Write the index only when something changed (new, changed or removed files).
-    let changed = probed > 0 || !index.entries.is_empty();
+    let changed = probed > 0
+        || fingerprinted > 0
+        || !index.entries.is_empty()
+        || index.version != INDEX_VERSION;
     if changed {
         let _ = std::fs::create_dir_all(&cache.dir);
         let out = Index {
@@ -252,6 +278,38 @@ fn prune_thumbs(cache: &Cache, clips: &[Clip], thumbs: &HashSet<String>) -> usiz
         }
     }
     n
+}
+
+/// Bytes read from each end of a file for its fingerprint.
+const FP_SPAN: u64 = 64 * 1024;
+
+/// Content fingerprint: FNV-1a 64 over the size and the first and last
+/// 64 KB, as 16 hex digits. Survives renames and moves; reads 128 KB once
+/// per new or changed file (cached in the index).
+pub fn fingerprint(path: &Path, size: u64) -> io::Result<String> {
+    let mut f = File::open(path)?;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    eat(&size.to_le_bytes());
+    let mut buf = Vec::with_capacity(FP_SPAN as usize);
+    (&mut f).take(FP_SPAN).read_to_end(&mut buf)?;
+    eat(&buf);
+    let mut buf = vec![0u8; FP_SPAN as usize];
+    if size > FP_SPAN * 2 {
+        f.seek(SeekFrom::Start(size - FP_SPAN))?;
+        f.read_exact(&mut buf)?;
+        eat(&buf);
+    } else if size > FP_SPAN {
+        let mut rest = Vec::new();
+        f.read_to_end(&mut rest)?;
+        eat(&rest);
+    }
+    Ok(format!("{h:016x}"))
 }
 
 /// FNV-1a 64 of the path (case-folded, as Windows paths are) plus size and
@@ -1267,6 +1325,38 @@ pub(crate) mod tests {
             .find(|c| c.file_name == "DayZ 2026-11-04 14-35-41.mp4")
             .unwrap();
         assert_eq!(c.probe.as_ref().unwrap().duration, 20.0);
+    }
+
+    #[test]
+    fn fingerprints_follow_content_not_names() {
+        let t = TempDir::new("fp");
+        let a = t.0.join("a.mp4");
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+        std::fs::write(&a, &data).unwrap();
+        let fa = fingerprint(&a, data.len() as u64).unwrap();
+        // Renamed/moved: same key.
+        let b = t.0.join("sub").join("renamed.mp4");
+        std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+        std::fs::rename(&a, &b).unwrap();
+        assert_eq!(fingerprint(&b, data.len() as u64).unwrap(), fa);
+        // Different content (end changed): different key.
+        let mut other = data.clone();
+        *other.last_mut().unwrap() ^= 1;
+        let c = t.0.join("c.mp4");
+        std::fs::write(&c, &other).unwrap();
+        assert_ne!(fingerprint(&c, other.len() as u64).unwrap(), fa);
+        // Small files (under two spans) are covered completely.
+        let s = t.0.join("s.mp4");
+        std::fs::write(&s, &data[..100_000]).unwrap();
+        let mut s2 = data[..100_000].to_vec();
+        s2[90_000] ^= 1;
+        let s2p = t.0.join("s2.mp4");
+        std::fs::write(&s2p, &s2).unwrap();
+        assert_ne!(
+            fingerprint(&s, 100_000).unwrap(),
+            fingerprint(&s2p, 100_000).unwrap()
+        );
+        assert!(is_clip_id(&fa));
     }
 
     #[test]

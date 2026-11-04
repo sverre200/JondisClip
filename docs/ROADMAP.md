@@ -84,7 +84,14 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
   - The copy runs on a background-IO thread with progress and cancel, written as `.partial` and renamed without overwriting.
   - Verified in the real window against a stand-in folder: byte-identical copy (hash), "already there", trim into Drive, and the "isn't available" error. Plus 4 new Rust tests.
   - **Not verified:** a real Google Drive for desktop install (not on this PC), so there's no check yet that Drive picks up and uploads the file.
-- [ ] Later: rename, delete to the Recycle Bin, copy path. If the window is already open, "Settings…" should switch its page (today it only focuses the window).
+- [x] **Organisation** (2026-11-04, ADR-0014):
+  - A collapsible **Folders** sidebar (All clips, Not in a folder, your folders) with muted colour icons and counts. You can create, rename, recolour (7-colour palette), delete (recordings are kept) and drag folders to reorder them (or Alt+↑/↓).
+  - **Clip titles**: F2, right-click → Rename, or the Rename button in the selection bar. The title replaces the game name on the card, and the game moves to the metadata line. Search matches titles, and Share to Discord names the file after the title.
+  - **Drag and drop**: drag one or several (Ctrl/Shift-click) clips onto a folder, or onto "Not in a folder". Inside a folder in **Custom order** (the default there), dragging rearranges clips with an insertion bar. With a search or game filter active, it explains why it can't reorder.
+  - **Context menus**: Open, Rename, Move to folder ▸, Show in folder, Copy file, Open in default player, Delete… (Recycle Bin, with confirmation).
+  - Organisation is metadata in `library\organize.json` (atomic writes and a `.bak`), keyed by a content fingerprint, so it survives renames and moves. Recordings never move.
+  - Verified on the real clips: everything persisted across a reload, the Edit badges stayed on all 6 edits, playback worked, and the recordings were byte-identical afterwards. 15 new Rust tests.
+- [ ] Later: export a folder as real files, and folder sharing. If the window is already open, "Settings…" should switch its page (today it only focuses the window).
 Tauri window with Library (grid, thumbnails, player, rename, delete to the Recycle Bin, open folder, copy path), Recording status and Settings. Trim with stream copy, and a share export.
 
 ## Phase 5: Sharing and cloud

@@ -160,7 +160,7 @@
     if (job.state === "running" || !sharePlan?.plan) return;
     job = { state: "running", job: null, progress: 0, share: true };
     try {
-      const r = await api.shareStart(clip.id, trimStart, trimEnd);
+      const r = await api.shareStart(clip.id, trimStart, trimEnd, clip.title ?? null);
       if (job.state === "running") job = { ...job, job: r.job };
     } catch (e) {
       job = { state: "error", message: String(e) };
@@ -375,6 +375,7 @@
 
   const meta = $derived(
     [
+      clip.title ? clip.game : null,
       whenShort(clip.recorded),
       clock(clip.probe?.duration ?? 0),
       bytes(clip.size),
@@ -411,7 +412,7 @@
       Library
     </Button>
     <div class="title">
-      <strong>{clip.game}</strong>
+      <strong title={clip.title ?? clip.game}>{clip.title ?? clip.game}</strong>
       <span>{meta}</span>
     </div>
     <div class="nav">

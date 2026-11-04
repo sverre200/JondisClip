@@ -9,6 +9,7 @@ mod clipboard;
 mod export;
 mod library;
 mod meter;
+mod organize;
 
 use std::path::PathBuf;
 
@@ -367,6 +368,7 @@ async fn share_start(
     id: String,
     start: f64,
     end: f64,
+    title: Option<String>,
 ) -> Result<export::Started, String> {
     let path = library::path_of(&id)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -383,7 +385,7 @@ async fn share_start(
             size,
             start,
             end,
-            export::Kind::Share { limit },
+            export::Kind::Share { limit, title },
         )
     })
     .await
@@ -730,7 +732,17 @@ fn main() {
             share_reveal,
             drive_status,
             drive_save,
-            drive_reveal
+            drive_reveal,
+            organize::organize_get,
+            organize::folder_create,
+            organize::folder_rename,
+            organize::folder_color,
+            organize::folder_delete,
+            organize::folders_reorder,
+            organize::clips_move,
+            organize::clip_title,
+            organize::clips_delete,
+            organize::clip_copy_file
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the JondisClip window");

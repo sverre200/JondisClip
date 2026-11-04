@@ -75,6 +75,35 @@ export interface Clip {
   thumb: boolean;
   /** Made by the editor (`… edit.mp4`) */
   edit: boolean;
+  /** Content fingerprint: identity for titles and folders (ADR-0014) */
+  key: string;
+  /** Custom title (filled in by the library from the organize document) */
+  title?: string;
+}
+
+export type FolderColor = "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "gray";
+export const FOLDER_COLORS: { value: FolderColor; label: string }[] = [
+  { value: "red", label: "Red" },
+  { value: "orange", label: "Orange" },
+  { value: "yellow", label: "Yellow" },
+  { value: "green", label: "Green" },
+  { value: "blue", label: "Blue" },
+  { value: "purple", label: "Purple" },
+  { value: "gray", label: "Gray" },
+];
+
+export interface Folder {
+  id: string;
+  name: string;
+  color: FolderColor;
+  /** clip keys, in custom order */
+  clips: string[];
+}
+
+export interface Organize {
+  version: number;
+  folders: Folder[];
+  titles: Record<string, string>;
 }
 
 export type ExportEvent =
@@ -184,6 +213,16 @@ export const thumbUrl = (id: string) => (isDesktop ? `${CLIP_BASE}/t/${id}.jpg` 
 
 export const api = {
   initialPage: () => call<"library" | "settings">("initial_page"),
+  organizeGet: () => call<Organize>("organize_get"),
+  folderCreate: (name: string, color: FolderColor) => call<Organize>("folder_create", { name, color }),
+  folderRename: (id: string, name: string) => call<Organize>("folder_rename", { id, name }),
+  folderColor: (id: string, color: FolderColor) => call<Organize>("folder_color", { id, color }),
+  folderDelete: (id: string) => call<Organize>("folder_delete", { id }),
+  foldersReorder: (ids: string[]) => call<Organize>("folders_reorder", { ids }),
+  clipsMove: (keys: string[], to: string | null, before: string | null) => call<Organize>("clips_move", { keys, to, before }),
+  clipTitle: (key: string, title: string) => call<Organize>("clip_title", { key, title }),
+  clipsDelete: (ids: string[]) => call<number>("clips_delete", { ids }),
+  clipCopyFile: (id: string) => call<void>("clip_copy_file", { id }),
   libraryScan: () => call<LibraryView>("library_scan"),
   showInFolder: (id: string) => call<void>("show_in_folder", { id }),
   clipKeyframes: (id: string) => call<number[]>("clip_keyframes", { id }),
@@ -191,7 +230,8 @@ export const api = {
     call<{ job: number; output: string }>("export_start", { id, start, end, exact }),
   exportCancel: () => call<void>("export_cancel"),
   sharePlan: (id: string, start: number, end: number) => call<SharePlan>("share_plan", { id, start, end }),
-  shareStart: (id: string, start: number, end: number) => call<{ job: number; output: string }>("share_start", { id, start, end }),
+  shareStart: (id: string, start: number, end: number, title: string | null) =>
+    call<{ job: number; output: string }>("share_start", { id, start, end, title }),
   shareCopyAgain: (path: string) => call<void>("share_copy_again", { path }),
   shareReveal: (path: string) => call<void>("share_reveal", { path }),
   driveStatus: () => call<DriveStatus>("drive_status"),
@@ -254,6 +294,15 @@ export const api = {
 // ---------- browser-preview mock (never used in the desktop app) ----------
 
 const mockThumbs = new Map<string, string>();
+const mockOrg: Organize = {
+  version: 1,
+  folders: [
+    { id: "f1", name: "DayZ Raids", color: "red", clips: ["000000000000a000", "000000000000a004"] },
+    { id: "f2", name: "Funny Moments", color: "green", clips: ["000000000000a001"] },
+    { id: "f3", name: "Friends", color: "blue", clips: [] },
+  ],
+  titles: { "000000000000a000": "Our Base Got Raided", "000000000000a001": "The Worst Grenade Ever, Thrown Straight Into Our Own Car" },
+};
 const mockExportListeners = new Set<(e: ExportEvent) => void>();
 let mockExport: ReturnType<typeof setInterval> | undefined;
 
@@ -279,6 +328,7 @@ function mockClips(): Clip[] {
       error: broken ? "the file is cut off (incomplete recording?)" : null,
       thumb: false,
       edit: i === 3,
+      key: (0xa000 + i).toString(16).padStart(16, "0"),
     });
   }
   return out;
@@ -408,6 +458,57 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
     case "export_cancel":
       clearInterval(mockExport);
       mockExportListeners.forEach((f) => f({ kind: "cancelled", job: 0 }));
+      return undefined;
+    case "organize_get":
+      return structuredClone(mockOrg);
+    case "folder_create": {
+      const name = String(args?.name ?? "").trim();
+      if (!name) throw "Give the folder a name.";
+      if (mockOrg.folders.some((f) => f.name.toLowerCase() === name.toLowerCase())) throw `There's already a folder called "${name}".`;
+      mockOrg.folders.push({ id: `f${Date.now().toString(16)}`, name, color: args?.color as FolderColor, clips: [] });
+      return structuredClone(mockOrg);
+    }
+    case "folder_rename": {
+      const f = mockOrg.folders.find((x) => x.id === args?.id);
+      const name = String(args?.name ?? "").trim();
+      if (!name) throw "Give the folder a name.";
+      if (f) f.name = name;
+      return structuredClone(mockOrg);
+    }
+    case "folder_color": {
+      const f = mockOrg.folders.find((x) => x.id === args?.id);
+      if (f) f.color = args?.color as FolderColor;
+      return structuredClone(mockOrg);
+    }
+    case "folder_delete":
+      mockOrg.folders = mockOrg.folders.filter((x) => x.id !== args?.id);
+      return structuredClone(mockOrg);
+    case "folders_reorder": {
+      const ids = args?.ids as string[];
+      mockOrg.folders.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+      return structuredClone(mockOrg);
+    }
+    case "clips_move": {
+      const keys = args?.keys as string[];
+      for (const f of mockOrg.folders) f.clips = f.clips.filter((k) => !keys.includes(k));
+      const to = mockOrg.folders.find((x) => x.id === args?.to);
+      if (to) {
+        const before = args?.before as string | null;
+        let at = before ? to.clips.indexOf(before) : -1;
+        if (at < 0) at = to.clips.length;
+        to.clips.splice(at, 0, ...keys);
+      }
+      return structuredClone(mockOrg);
+    }
+    case "clip_title": {
+      const t = String(args?.title ?? "").trim();
+      if (t) mockOrg.titles[String(args?.key)] = t;
+      else delete mockOrg.titles[String(args?.key)];
+      return structuredClone(mockOrg);
+    }
+    case "clips_delete":
+      return (args?.ids as string[]).length;
+    case "clip_copy_file":
       return undefined;
     case "library_scan":
       await new Promise((r) => setTimeout(r, 300));

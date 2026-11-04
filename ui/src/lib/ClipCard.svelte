@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { thumbUrl, type Clip } from "./api";
   import { bytes, clock, timeOfDay } from "./format";
   import { requestThumb } from "./thumbs";
@@ -8,17 +8,54 @@
     clip,
     selected,
     tabindex,
+    folderColor = null,
+    renaming = false,
+    lifted = false,
     onselect,
     onopen,
+    oncontext,
+    onpointerdown,
+    onrename,
     el = $bindable(),
   }: {
     clip: Clip;
     selected: boolean;
     tabindex: number;
-    onselect: () => void;
+    /** colour of the clip's folder (a small dot), when shown outside it */
+    folderColor?: string | null;
+    /** inline title editor open */
+    renaming?: boolean;
+    /** being dragged (dimmed) */
+    lifted?: boolean;
+    onselect: (e: MouseEvent) => void;
     onopen: () => void;
-    el?: HTMLButtonElement;
+    oncontext: (e: MouseEvent) => void;
+    onpointerdown: (e: PointerEvent) => void;
+    /** title saved (string) or editing cancelled (null) */
+    onrename: (title: string | null) => void;
+    el?: HTMLDivElement;
   } = $props();
+
+  let field = $state<HTMLInputElement>();
+  let draft = $state("");
+  $effect(() => {
+    if (renaming) {
+      // Only when renaming starts: a rescan (new clip objects) must not wipe
+      // what's being typed.
+      draft = untrack(() => clip.title ?? "");
+      void tick().then(() => {
+        field?.focus();
+        field?.select();
+      });
+    }
+  });
+  let done = false;
+  function finish(save: boolean) {
+    if (done) return;
+    done = true;
+    onrename(save ? draft : null);
+    void tick().then(() => (done = false));
+  }
 
   // Reset only when the file changes (new id), not on every rescan, which
   // hands us new objects for the same clips.
@@ -67,16 +104,25 @@
   const res = $derived(clip.probe ? `${clip.probe.height}p` : null);
 </script>
 
-<button
+<!-- Keys (Enter, F2, Delete, arrows…) are handled by the library grid. -->
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<div
   bind:this={el}
-  type="button"
+  role="button"
+  data-key={clip.key}
   class="card"
   class:selected
+  class:lifted
   {tabindex}
   aria-pressed={selected}
-  aria-label="{clip.game}, {timeOfDay(clip.recorded)}, {clip.probe ? clock(clip.probe.duration) : 'unreadable'}"
-  onclick={onselect}
-  ondblclick={onopen}
+  aria-label="{clip.title ? `${clip.title}, ` : ''}{clip.game}, {timeOfDay(clip.recorded)}, {clip.probe ? clock(clip.probe.duration) : 'unreadable'}{clip.edit ? ', edit' : ''}"
+  onclick={(e) => !renaming && onselect(e)}
+  ondblclick={() => !renaming && onopen()}
+  oncontextmenu={(e) => {
+    e.preventDefault();
+    oncontext(e);
+  }}
+  onpointerdown={(e) => !renaming && onpointerdown(e)}
 >
   <div class="thumb">
     {#if clip.error}
@@ -98,14 +144,35 @@
   </div>
   <div class="meta">
     <div class="l1">
-      <span class="game">{clip.game}</span>
-      <span class="time">{timeOfDay(clip.recorded)}</span>
+      {#if renaming}
+        <input
+          bind:this={field}
+          bind:value={draft}
+          class="rename"
+          maxlength="120"
+          placeholder={clip.game}
+          aria-label="Clip title"
+          spellcheck="false"
+          onkeydown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") finish(true);
+            else if (e.key === "Escape") finish(false);
+          }}
+          onblur={() => finish(true)}
+          onclick={(e) => e.stopPropagation()}
+          ondblclick={(e) => e.stopPropagation()}
+        />
+      {:else}
+        <span class="game" class:titled={!!clip.title} title={clip.title ?? clip.game}>{clip.title ?? clip.game}</span>
+        <span class="time">{timeOfDay(clip.recorded)}</span>
+      {/if}
     </div>
     <div class="l2">
-      {#if res}{res} · {/if}{bytes(clip.size)}
+      {#if folderColor}<span class="fdot" style:background="var(--folder-{folderColor})" aria-hidden="true"></span>{/if}
+      <span class="l2text">{#if clip.title}{clip.game} · {/if}{#if res}{res} · {/if}{bytes(clip.size)}</span>
     </div>
   </div>
-</button>
+</div>
 
 <style>
   .card {
@@ -121,6 +188,36 @@
     transition:
       border-color var(--t-fast) var(--ease),
       background var(--t-fast) var(--ease);
+  }
+  .card.lifted {
+    opacity: 0.45;
+  }
+  .rename {
+    width: 100%;
+    min-width: 0;
+    height: 22px;
+    margin: -2px 0;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--text-faint);
+    background: var(--bg);
+    font-size: var(--fs-sm);
+    font-weight: var(--fw-strong);
+    outline: none;
+    user-select: text;
+  }
+  .fdot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .l2text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .card:hover {
     background: var(--surface-raised);
@@ -225,6 +322,10 @@
     flex: none;
   }
   .l2 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
     color: var(--text-faint);
     font-size: var(--fs-xs);
   }

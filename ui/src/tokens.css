@@ -27,6 +27,15 @@
   --warning: #f5a524;
   --warning-soft: rgb(245 165 36 / 0.12);
   --danger: #e5484d;
+
+  /* Folder colours: muted, for small dots and icons only (never fills) */
+  --folder-red: #d4625f;
+  --folder-orange: #d38a4f;
+  --folder-yellow: #c9a94e;
+  --folder-green: #52a57b;
+  --folder-blue: #5b8ed4;
+  --folder-purple: #9a7dd0;
+  --folder-gray: #8a8f98;
   --focus: #e5484d;
 
   /* Type */

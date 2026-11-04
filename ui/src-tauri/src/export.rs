@@ -42,7 +42,8 @@ pub enum Kind {
     /// A trim written to a given path (the Drive folder, ADR-0013).
     TrimTo { exact: bool, output: PathBuf },
     /// A file under `limit` bytes in the share folder, put on the clipboard (ADR-0012).
-    Share { limit: u64 },
+    /// `title`: the clip's custom title, used as the file name Discord shows.
+    Share { limit: u64, title: Option<String> },
 }
 
 /// The volume a path lives on, as Windows' volume GUID path (so mount
@@ -192,13 +193,48 @@ pub fn cap_share_dir(dir: &Path, cap: u64) -> usize {
     n
 }
 
-/// `<share dir>\<clip name>.mp4`, or `… (2).mp4` if that's taken. The name is
-/// what Discord shows, so it stays the clip's own.
-pub fn share_path(dir: &Path, input: &Path) -> PathBuf {
-    let stem = input
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "clip".into());
+/// A clip title as a safe Windows file name: no `<>:"/\|?*` or control
+/// characters, no trailing dots/spaces, no reserved device names, at most
+/// 80 characters. None if nothing usable is left.
+pub fn title_to_file_stem(title: &str) -> Option<String> {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut s = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if s.chars().count() > 80 {
+        s = s.chars().take(80).collect();
+    }
+    let s = s.trim_matches(|c| c == '.' || c == ' ').to_string();
+    if s.is_empty() {
+        return None;
+    }
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3",
+    ];
+    let base = s.split('.').next().unwrap_or("");
+    Some(if reserved.iter().any(|r| r.eq_ignore_ascii_case(base)) {
+        format!("{s} clip")
+    } else {
+        s
+    })
+}
+
+/// `<share dir>\<title or clip name>.mp4`, or `… (2).mp4` if that's taken.
+/// The name is what Discord shows, so it's the clip's title when it has one.
+pub fn share_path(dir: &Path, input: &Path, title: Option<&str>) -> PathBuf {
+    let stem = title.and_then(title_to_file_stem).unwrap_or_else(|| {
+        input
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "clip".into())
+    });
     let mut n = 1;
     loop {
         let name = if n == 1 {
@@ -333,7 +369,7 @@ pub fn start(
                 * (end - start + 1.0)
                 * if *exact { 1.35 } else { 1.0 }) as u64,
         ),
-        Kind::Share { limit } => {
+        Kind::Share { limit, title } => {
             let dir = share_dir();
             std::fs::create_dir_all(&dir)
                 .map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
@@ -350,7 +386,7 @@ pub fn start(
             }
             prune_share_dir(&dir, SHARE_KEEP);
             cap_share_dir(&dir, SHARE_CAP);
-            (share_path(&dir, &input), *limit)
+            (share_path(&dir, &input, title.as_deref()), *limit)
         }
     };
     let dir = output.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -368,7 +404,7 @@ pub fn start(
                 "copy".to_string()
             },
         ),
-        Kind::Share { limit } => ("share", limit.to_string()),
+        Kind::Share { limit, .. } => ("share", limit.to_string()),
     };
     let mut child = Command::new(exporter()?)
         .arg(cmd)
@@ -785,18 +821,60 @@ mod tests {
     }
 
     #[test]
+    fn titles_become_safe_file_names() {
+        assert_eq!(
+            title_to_file_stem("Our Base Got Raided").as_deref(),
+            Some("Our Base Got Raided")
+        );
+        assert_eq!(
+            title_to_file_stem(r#"What? A "kill": 1/2\3 *wow*|<>"#).as_deref(),
+            Some("What A kill 1 2 3 wow")
+        );
+        assert_eq!(title_to_file_stem("  ...  ").as_deref(), None);
+        assert_eq!(title_to_file_stem("con").as_deref(), Some("con clip"));
+        assert_eq!(title_to_file_stem(&"x".repeat(200)).unwrap().len(), 80);
+        assert_eq!(
+            title_to_file_stem("Ærø 😂 trip.").as_deref(),
+            Some("Ærø 😂 trip")
+        );
+        let d = std::env::temp_dir();
+        let p = share_path(
+            &d,
+            Path::new(r"D:\c\DayZ 2026-11-04 15-27-02.mp4"),
+            Some("Driving Disaster"),
+        );
+        assert!(
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("Driving Disaster")
+        );
+        let p = share_path(
+            &d,
+            Path::new(r"D:\c\DayZ 2026-11-04 15-27-02.mp4"),
+            Some("???"),
+        );
+        assert!(
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("DayZ 2026-11-04 15-27-02")
+        );
+    }
+
+    #[test]
     fn share_names_and_pruning_stay_in_our_folder() {
         let d = std::env::temp_dir().join(format!("jc-share-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let input = Path::new(r"D:\Clips\DayZ\DayZ 2026-11-04 15-27-02 edit.mp4");
-        let first = share_path(&d, input);
+        let first = share_path(&d, input, None);
         assert_eq!(
             first.file_name().unwrap(),
             "DayZ 2026-11-04 15-27-02 edit.mp4"
         );
         std::fs::write(&first, b"x").unwrap();
         assert_eq!(
-            share_path(&d, input).file_name().unwrap(),
+            share_path(&d, input, None).file_name().unwrap(),
             "DayZ 2026-11-04 15-27-02 edit (2).mp4"
         );
         std::fs::write(d.join("notes.txt"), b"keep").unwrap();
