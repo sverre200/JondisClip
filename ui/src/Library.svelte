@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { api, thumbUrl, type Clip, type LibraryView } from "./lib/api";
   import { bytes, clock, dayLabel, fromWithin, whenShort } from "./lib/format";
   import Banner from "./lib/Banner.svelte";
@@ -9,10 +9,15 @@
 
   let {
     hotkey,
+    refreshToken = 0,
+    onscanned,
     onopen,
     onerror,
   }: {
     hotkey: string | null;
+    /** bump to rescan (after an export) */
+    refreshToken?: number;
+    onscanned?: (clips: Clip[]) => void;
     onopen: (clip: Clip, all: Clip[]) => void;
     onerror: (msg: string) => void;
   } = $props();
@@ -39,6 +44,7 @@
     try {
       view = await api.libraryScan();
       loadError = null;
+      onscanned?.(view.clips);
       if (selectedId && !view.clips.some((c) => c.id === selectedId)) selectedId = null;
     } catch (e) {
       loadError = String(e);
@@ -50,6 +56,14 @@
       }
     }
   }
+  let seenToken = untrack(() => refreshToken);
+  $effect(() => {
+    if (refreshToken !== seenToken) {
+      seenToken = refreshToken;
+      void refresh();
+    }
+  });
+
   onMount(() => {
     void refresh();
     // Pick up clips saved while the window was open (cheap: unchanged files

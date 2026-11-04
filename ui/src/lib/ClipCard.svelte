@@ -94,6 +94,7 @@
       </div>
     {/if}
     {#if clip.probe}<span class="dur">{clock(clip.probe.duration)}</span>{/if}
+    {#if clip.edit}<span class="tag">Edit</span>{/if}
   </div>
   <div class="meta">
     <div class="l1">
@@ -187,6 +188,17 @@
     font-size: var(--fs-xs);
     font-weight: var(--fw-strong);
     font-variant-numeric: tabular-nums;
+  }
+  .tag {
+    position: absolute;
+    left: var(--s2);
+    top: var(--s2);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    background: var(--accent);
+    color: var(--on-accent);
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-strong);
   }
   .meta {
     padding: var(--s2) var(--s3) var(--s3);

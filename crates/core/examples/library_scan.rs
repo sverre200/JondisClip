@@ -30,5 +30,16 @@ fn main() {
         let t = std::time::Instant::now();
         let _ = probe_file(&c.path);
         println!("one header read: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let k = jondisclip_core::library::keyframes_file(&c.path);
+        println!(
+            "keyframes in {:?}: {:?}",
+            t.elapsed(),
+            k.map(|k| (
+                k.len(),
+                k.iter().take(4).copied().collect::<Vec<_>>(),
+                k.last().copied()
+            ))
+        );
     }
 }

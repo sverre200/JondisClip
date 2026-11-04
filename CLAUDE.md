@@ -6,7 +6,7 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
 - `crates/engine`: video and audio replay pipeline.
 - `crates/app`: `jondisclip.exe`, the tray app with hotkey and supervisor.
 - `crates/core`: shared settings, hotkey, paths and status.
-- `ui/` + `ui/src-tauri`: `jondisclip-ui.exe`, the clip library and settings window (Tauri 2 + Svelte 5, separate process, ADR-0008/0010). Library stage 1 (browse, thumbnails, player) is done. Next: stage 2 editor (trim/export), stage 3 Discord export, stage 4 Drive folder (ROADMAP Phase 4).
+- `ui/` + `ui/src-tauri`: `jondisclip-ui.exe`, the clip library and settings window (Tauri 2 + Svelte 5, separate process, ADR-0008/0010). Library stage 1 (browse, thumbnails, player) and stage 2 (trim editor, `crates/export` = `jondisclip-export.exe`, ADR-0011) are done. Next: stage 3 Discord export, stage 4 Drive folder (ROADMAP Phase 4).
 - To drive the real window in tests, launch it with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333` and use the DevTools protocol. Synthetic mouse input doesn't reach it from the agent shell.
 
 ## Read first
@@ -48,6 +48,7 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
 - UI:
   - Design in the browser with the mock API: `npm --prefix ui run dev` (`.claude/launch.json` → `ui-dev`). Use only tokens from `ui/src/tokens.css`.
   - Before `cargo build -p jondisclip-ui`, run `npm --prefix ui run build`. The exe embeds `ui/dist`.
+  - Build `jondisclip-export` as well (`cargo build --release -p jondisclip -p jondisclip-ui -p jondisclip-export`). The window looks for the exporter next to its own exe.
   - `npm --prefix ui run check` must pass.
   - Quit the tray before rebuilding, because Windows locks the running exe.
 - Rust: `cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` must pass. Hot-path crates use no `unwrap()` and return typed errors (`thiserror`).

@@ -64,7 +64,12 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
     - The real window on 6 real clips: thumbnails, playback, seeks of 5–128 ms in a 661 MB clip, Esc back.
     - After closing, 0 UI processes remain and the tray keeps recording.
   - **Not verified:** a long library (1000+ clips) and the FPS impact of playing a clip while a game records. The player pauses on blur, so this needs a `/perf-benchmark` run.
-- [ ] **Stage 2: editor.** Trim handles on the player's timeline, trimmed duration and size estimate, and non-destructive export. Stream copy when the cut falls on keyframes, and a smart re-encode of the edges otherwise (to be decided in a new ADR). Runs as an FFmpeg child process at below-normal priority, one job at a time.
+- [x] **Stage 2: editor** (2026-11-04, ADR-0011, [report](perf/2026-11-04-trim-export.md)):
+  - The player's timeline has red trim handles (drag them, or use I/O at the playhead, or arrow keys on a focused handle). It shows the selection, its length and an estimated size, and playback stops at the end of the selection. **Save clip** (Ctrl+S) writes `<name> edit.mp4` next to the original, which is never modified.
+  - **Lossless · exact** is automatic when the start is on a keyframe. Otherwise you choose **Exact** (video re-encoded at 1.3× the source bitrate, audio copied) or **Lossless · N s earlier**.
+  - `jondisclip-export.exe` runs as a below-normal-priority child in a kill-on-close job, with progress, cancel and a free-space check.
+  - Measured: a lossless 20 s cut takes 0.12 s and an exact one 5.3 s. 0 late or dropped recorder frames over 12 back-to-back exports (desktop, no game).
+  - **Not verified:** export while a game is running (needs `/perf-benchmark`), NVENC, QSV and MF on real hardware, and HEVC sources in Exact mode (output is H.264).
 - [ ] **Stage 3: Discord.** A size-targeted H.264 export (default about 19 MB, configurable) with Mix audio only. It checks the final size and copies the file to the clipboard (`CF_HDROP`, ADR-0004).
 - [ ] **Stage 4: Google Drive.** An optional synced-folder destination and "Save to Drive" (copy or export, with checks for free space and an unavailable destination). It never claims the upload finished.
 - [ ] Later: rename, delete to the Recycle Bin, copy path. If the window is already open, "Settings…" should switch its page (today it only focuses the window).

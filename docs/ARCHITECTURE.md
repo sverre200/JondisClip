@@ -17,7 +17,7 @@ Status: **Proposed.** It depends on ADR-0001 to ADR-0004 being accepted.
 └─────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-The tray and recorder run in **`jondisclip.exe`** (raw Win32, ADR-0006). The app window is a **separate `jondisclip-ui.exe`** (Tauri 2), started on demand and gone when closed. The two share files only: `settings.toml` and `status.json` (ADR-0008). The diagram above shows the original single-process idea. The window holds the **clip library** and settings (ADR-0010). It scans the save folder only when it opens or regains focus, and it caches headers and thumbnails in `%LOCALAPPDATA%\JondisClip\library`. It streams clips to WebView2 through a `clip:` protocol: two below-normal-priority workers serving 1 MB ranges, only for clip IDs from the latest scan. It never writes to the save folder.
+The tray and recorder run in **`jondisclip.exe`** (raw Win32, ADR-0006). The app window is a **separate `jondisclip-ui.exe`** (Tauri 2), started on demand and gone when closed. The two share files only: `settings.toml` and `status.json` (ADR-0008). The diagram above shows the original single-process idea. The window holds the **clip library** and settings (ADR-0010). It scans the save folder only when it opens or regains focus, and it caches headers and thumbnails in `%LOCALAPPDATA%\JondisClip\library`. It streams clips to WebView2 through a `clip:` protocol: two below-normal-priority workers serving 1 MB ranges, only for clip IDs from the latest scan. It never writes to the save folder, except new `… edit.mp4` files written by `jondisclip-export.exe` (ADR-0011). That's a below-normal-priority child of the window, in a kill-on-close job object.
 
 ## Engine pipeline (hot path)
 

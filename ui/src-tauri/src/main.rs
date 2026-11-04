@@ -5,6 +5,7 @@
 //! applies it within 2 s) and reads `status.json` (published by the tray).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod export;
 mod library;
 mod meter;
 
@@ -228,9 +229,20 @@ fn initial_page() -> &'static str {
 async fn library_scan() -> Result<library::LibraryView, String> {
     let (settings, _) = read_settings();
     let root = settings.save_dir_or(&paths::default_save_dir());
-    tauri::async_runtime::spawn_blocking(move || library::in_background(|| library::scan(root)))
-        .await
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        library::in_background(|| {
+            // Left over if the window closed mid-export (the exporter dies
+            // with it). Only one window runs, so none of these is in use.
+            if !export::busy() {
+                for p in jondisclip_core::library::stale_edit_partials(&root) {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+            library::scan(root)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Stores a thumbnail the page drew. Body: JPEG bytes; header `x-clip-id`.
@@ -247,6 +259,44 @@ fn thumb_save(request: tauri::ipc::Request<'_>) -> Result<(), String> {
         }
         _ => Err("expected raw JPEG bytes".into()),
     }
+}
+
+/// Keyframe times (s) of a clip, so the editor knows when a cut is lossless.
+#[tauri::command]
+async fn clip_keyframes(id: String) -> Result<Vec<f64>, String> {
+    let path = library::path_of(&id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        jondisclip_core::library::keyframes_file(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Saves `[start, end)` of a clip as a new file next to it (ADR-0011).
+#[tauri::command]
+async fn export_start(
+    app: tauri::AppHandle,
+    id: String,
+    start: f64,
+    end: f64,
+    exact: bool,
+) -> Result<export::Started, String> {
+    let path = library::path_of(&id)?;
+    // File IO off the main thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        let duration = jondisclip_core::library::probe_file(&path)
+            .map_err(|e| e.to_string())?
+            .duration;
+        export::start(app, path, duration, size, start, end, exact)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn export_cancel() {
+    export::cancel();
 }
 
 /// Opens Explorer with the clip selected.
@@ -353,7 +403,10 @@ fn main() {
             library_scan,
             thumb_save,
             show_in_folder,
-            open_external
+            open_external,
+            clip_keyframes,
+            export_start,
+            export_cancel
         ])
         .run(tauri::generate_context!())
         .expect("failed to start the JondisClip window");

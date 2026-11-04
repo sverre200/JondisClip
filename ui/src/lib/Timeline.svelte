@@ -1,25 +1,34 @@
 <script lang="ts">
-  import { clock } from "./format";
+  import { clock, clockPrecise } from "./format";
 
-  // Seek bar. Stage 2 adds trim handles on top of the same track.
+  // Seek bar with an optional trim selection: the area between the handles is
+  // what gets saved; outside it is dimmed. Handles drag; the playhead drags.
   let {
     duration,
     time,
     buffered = 0,
+    trim = null,
     onseek,
+    ontrim,
   }: {
     duration: number;
     time: number;
     /** seconds buffered ahead (for the faint fill) */
     buffered?: number;
+    /** selection in seconds, or null for a plain seek bar */
+    trim?: { start: number; end: number } | null;
     /** `fast` while dragging: the player may seek to the nearest keyframe */
     onseek: (t: number, fast?: boolean) => void;
+    /** new selection; `edge` says which handle moved (to preview that frame) */
+    ontrim?: (start: number, end: number, edge: "start" | "end") => void;
   } = $props();
 
   let track = $state<HTMLDivElement>();
   let hover = $state<number | null>(null);
-  let dragging = $state(false);
+  let drag = $state<"head" | "start" | "end" | null>(null);
 
+  /** Shortest selection: a quarter of a second. */
+  const MIN = 0.25;
   const pct = (t: number) => (duration > 0 ? Math.min(100, Math.max(0, (t / duration) * 100)) : 0);
 
   function at(e: PointerEvent): number {
@@ -42,23 +51,39 @@
     });
   }
 
-  function down(e: PointerEvent) {
+  function setEdge(edge: "start" | "end", t: number) {
+    if (!trim || !ontrim) return;
+    if (edge === "start") ontrim(Math.min(t, trim.end - MIN), trim.end, edge);
+    else ontrim(trim.start, Math.max(t, trim.start + MIN), edge);
+  }
+
+  function down(e: PointerEvent, what: "head" | "start" | "end") {
     if (e.button !== 0) return;
-    dragging = true;
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    seekSoon(at(e));
+    e.stopPropagation();
+    drag = what;
+    try {
+      track?.setPointerCapture(e.pointerId);
+    } catch {
+      /* synthetic or already-released pointer: dragging still works inside the bar */
+    }
+    const t = at(e);
+    if (what === "head") seekSoon(t);
+    else setEdge(what, t);
   }
   function move(e: PointerEvent) {
-    hover = at(e);
-    if (dragging) seekSoon(hover);
+    const t = at(e);
+    hover = t;
+    if (drag === "head") seekSoon(t);
+    else if (drag) setEdge(drag, t);
   }
   function up(e: PointerEvent) {
-    if (!dragging) return;
-    dragging = false;
+    if (!drag) return;
+    const was = drag;
+    drag = null;
     cancelAnimationFrame(frame);
     frame = 0;
     pending = null;
-    onseek(at(e)); // exact position on release
+    if (was === "head") onseek(at(e)); // exact position on release
   }
 
   function key(e: KeyboardEvent) {
@@ -66,41 +91,97 @@
     let t: number | null = null;
     if (e.key === "ArrowRight") t = time + step;
     else if (e.key === "ArrowLeft") t = time - step;
-    else if (e.key === "Home") t = 0;
-    else if (e.key === "End") t = duration;
+    else if (e.key === "Home") t = trim ? trim.start : 0;
+    else if (e.key === "End") t = trim ? trim.end : duration;
     if (t === null) return;
     e.preventDefault();
     e.stopPropagation();
     onseek(Math.min(duration, Math.max(0, t)));
   }
+
+  function handleKey(e: KeyboardEvent, edge: "start" | "end") {
+    if (!trim) return;
+    const step = e.shiftKey ? 1 / 60 : 1;
+    const cur = edge === "start" ? trim.start : trim.end;
+    let t: number | null = null;
+    if (e.key === "ArrowRight") t = cur + step;
+    else if (e.key === "ArrowLeft") t = cur - step;
+    if (t === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setEdge(edge, Math.min(duration, Math.max(0, t)));
+  }
+
+  const tip = $derived(
+    drag === "start" && trim ? trim.start : drag === "end" && trim ? trim.end : hover,
+  );
 </script>
 
 <div
   class="tl"
-  class:dragging
-  role="slider"
-  tabindex="0"
-  aria-label="Position"
-  aria-valuemin={0}
-  aria-valuemax={Math.round(duration)}
-  aria-valuenow={Math.round(time)}
-  aria-valuetext="{clock(time)} of {clock(duration)}"
+  class:dragging={drag !== null}
+  class:trimming={!!trim}
   bind:this={track}
-  onpointerdown={down}
+  onpointerdown={(e) => down(e, "head")}
   onpointermove={move}
   onpointerup={up}
   onpointercancel={up}
   onpointerleave={() => (hover = null)}
-  onkeydown={key}
+  role="presentation"
 >
   <div class="rail">
     <div class="buf" style:width="{pct(buffered)}%"></div>
-    <div class="fill" style:width="{pct(time)}%"></div>
-    {#if hover !== null}<div class="ghost" style:left="{pct(hover)}%"></div>{/if}
+    {#if trim}
+      <div class="sel" style:left="{pct(trim.start)}%" style:width="{pct(trim.end) - pct(trim.start)}%"></div>
+    {:else}
+      <div class="fill" style:width="{pct(time)}%"></div>
+    {/if}
+    {#if hover !== null && drag === null}<div class="ghost" style:left="{pct(hover)}%"></div>{/if}
   </div>
-  <div class="head" style:left="{pct(time)}%"></div>
-  {#if hover !== null}
-    <div class="tip" style:left="{pct(hover)}%">{clock(hover)}</div>
+  {#if trim}
+    <div class="shade" style:left="0" style:width="{pct(trim.start)}%"></div>
+    <div class="shade" style:left="{pct(trim.end)}%" style:right="0"></div>
+    <div
+      class="handle start"
+      style:left="{pct(trim.start)}%"
+      role="slider"
+      tabindex="0"
+      aria-label="Start of the selection"
+      aria-valuemin={0}
+      aria-valuemax={Math.round(duration)}
+      aria-valuenow={Math.round(trim.start)}
+      aria-valuetext={clockPrecise(trim.start)}
+      onpointerdown={(e) => down(e, "start")}
+      onkeydown={(e) => handleKey(e, "start")}
+    ></div>
+    <div
+      class="handle end"
+      style:left="{pct(trim.end)}%"
+      role="slider"
+      tabindex="0"
+      aria-label="End of the selection"
+      aria-valuemin={0}
+      aria-valuemax={Math.round(duration)}
+      aria-valuenow={Math.round(trim.end)}
+      aria-valuetext={clockPrecise(trim.end)}
+      onpointerdown={(e) => down(e, "end")}
+      onkeydown={(e) => handleKey(e, "end")}
+    ></div>
+  {/if}
+  <div
+    class="head"
+    style:left="{pct(time)}%"
+    role="slider"
+    tabindex="0"
+    aria-label="Position"
+    aria-valuemin={0}
+    aria-valuemax={Math.round(duration)}
+    aria-valuenow={Math.round(time)}
+    aria-valuetext="{clock(time)} of {clock(duration)}"
+    onkeydown={key}
+  ></div>
+  {#if tip !== null}
+    <div class="tip" style:left="{pct(tip)}%">{drag === "start" || drag === "end" ? clockPrecise(tip) : clock(tip)}</div>
   {/if}
 </div>
 
@@ -110,7 +191,9 @@
     height: 28px;
     cursor: pointer;
     touch-action: none;
-    border-radius: var(--radius-sm);
+  }
+  .tl.trimming {
+    height: 40px;
   }
   .rail {
     position: absolute;
@@ -123,6 +206,11 @@
     background: var(--surface-press);
     overflow: hidden;
   }
+  .trimming .rail {
+    height: 28px;
+    margin-top: -14px;
+    border-radius: var(--radius-sm);
+  }
   .buf {
     position: absolute;
     inset: 0 auto 0 0;
@@ -133,6 +221,23 @@
     inset: 0 auto 0 0;
     background: var(--accent);
   }
+  .sel {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: var(--accent-soft);
+    box-shadow:
+      inset 0 2px 0 var(--accent),
+      inset 0 -2px 0 var(--accent);
+  }
+  .shade {
+    position: absolute;
+    top: 50%;
+    height: 28px;
+    margin-top: -14px;
+    background: rgb(0 0 0 / 0.35);
+    pointer-events: none;
+  }
   .ghost {
     position: absolute;
     top: 0;
@@ -140,6 +245,37 @@
     width: 2px;
     margin-left: -1px;
     background: rgb(255 255 255 / 0.5);
+  }
+  .handle {
+    position: absolute;
+    top: 50%;
+    width: 12px;
+    height: 36px;
+    margin-top: -18px;
+    background: var(--accent);
+    cursor: ew-resize;
+    z-index: 2;
+  }
+  .handle.start {
+    margin-left: -12px;
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  }
+  .handle.end {
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  }
+  .handle::after {
+    /* grip */
+    content: "";
+    position: absolute;
+    left: 5px;
+    top: 12px;
+    width: 2px;
+    height: 12px;
+    border-radius: 1px;
+    background: rgb(255 255 255 / 0.8);
+  }
+  .handle:hover {
+    background: var(--accent-hover);
   }
   .head {
     position: absolute;
@@ -152,10 +288,18 @@
     box-shadow: 0 1px 4px rgb(0 0 0 / 0.5);
     transform: scale(0.85);
     transition: transform var(--t-fast) var(--ease);
+    z-index: 3;
+  }
+  .trimming .head {
+    width: 3px;
+    height: 40px;
+    margin: -20px 0 0 -1.5px;
+    border-radius: 2px;
+    transform: none;
   }
   .tl:hover .head,
   .tl.dragging .head,
-  .tl:focus-visible .head {
+  .head:focus-visible {
     transform: scale(1);
   }
   .tip {
@@ -171,5 +315,6 @@
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     pointer-events: none;
+    z-index: 4;
   }
 </style>

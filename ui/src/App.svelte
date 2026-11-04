@@ -14,6 +14,29 @@
   let startingTray = $state(false);
   // The clip open in the player, and the list it was opened from (for prev/next).
   let playing = $state<{ clip: Clip; list: Clip[] } | null>(null);
+  // Latest scan, so a saved edit can be opened as soon as the library sees it.
+  let clips = $state<Clip[]>([]);
+  let refreshToken = $state(0);
+  let openWhenScanned: string | null = null;
+  const samePath = (a: string, b: string) => a.replaceAll("/", "\\").toLowerCase() === b.replaceAll("/", "\\").toLowerCase();
+
+  function scanned(list: Clip[]) {
+    clips = list;
+    if (openWhenScanned) {
+      const c = list.find((x) => samePath(x.path, openWhenScanned!));
+      if (c) playing = { clip: c, list };
+      openWhenScanned = null;
+    }
+  }
+  function openSaved(path: string) {
+    const c = clips.find((x) => samePath(x.path, path));
+    if (c) playing = { clip: c, list: clips };
+    else {
+      openWhenScanned = path;
+      refreshToken++;
+    }
+  }
+
   let toast = $state<string | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -106,7 +129,13 @@
          scroll position survive opening a clip. -->
     {#if page === "library"}
       <div class="fill" hidden={!!playing}>
-        <Library hotkey={tray?.status?.hotkey ?? null} onopen={(clip, list) => (playing = { clip, list })} onerror={error} />
+        <Library
+          hotkey={tray?.status?.hotkey ?? null}
+          {refreshToken}
+          onscanned={scanned}
+          onopen={(clip, list) => (playing = { clip, list })}
+          onerror={error}
+        />
       </div>
     {:else if page === "settings"}
       <div class="scroll"><Settings {tray} /></div>
@@ -120,6 +149,8 @@
           onclose={() => (playing = null)}
           onstep={step}
           onerror={error}
+          onsaved={() => refreshToken++}
+          onopensaved={openSaved}
         />
       </div>
     {/if}

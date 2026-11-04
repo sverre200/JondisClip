@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { onMount } from "svelte";
-  import { api, clipUrl, type Clip } from "./lib/api";
-  import { bytes, clock, codecName, fromWithin, whenShort } from "./lib/format";
+  import { onMount, untrack } from "svelte";
+  import { api, clipUrl, type Clip, type ExportEvent } from "./lib/api";
+  import { bytes, clock, clockPrecise, codecName, fromWithin, whenShort } from "./lib/format";
+  import { cutPlan, estimateSize } from "./lib/trim";
   import Button from "./lib/Button.svelte";
+  import Segmented from "./lib/Segmented.svelte";
   import Timeline from "./lib/Timeline.svelte";
 
   let {
@@ -12,6 +14,8 @@
     onclose,
     onstep,
     onerror,
+    onsaved,
+    onopensaved,
   }: {
     clip: Clip;
     hasPrev: boolean;
@@ -20,7 +24,24 @@
     /** -1 previous clip, +1 next clip (in the library's current order) */
     onstep: (dir: -1 | 1) => void;
     onerror: (msg: string) => void;
+    /** an edit was saved at `path` (the library should rescan) */
+    onsaved: (path: string) => void;
+    /** play the saved edit */
+    onopensaved: (path: string) => void;
   } = $props();
+
+  // ---- trim state
+  let trimStart = $state(0);
+  let trimEnd = $state(0);
+  let keyframes = $state<number[]>([]);
+  /** The user's choice when the start isn't on a keyframe. */
+  let preferLossless = $state(false);
+  type Job =
+    | { state: "idle" }
+    | { state: "running"; job: number | null; progress: number }
+    | { state: "done"; path: string; size: number; duration: number; lossless: boolean; seconds: number }
+    | { state: "error"; message: string };
+  let job = $state<Job>({ state: "idle" });
 
   let video = $state<HTMLVideoElement>();
   let time = $state(0);
@@ -33,18 +54,105 @@
 
   // A new clip: reset and autoplay.
   $effect(() => {
-    void clip.id;
+    const id = clip.id;
+    untrack(() => reset(id));
+  });
+  function reset(id: string) {
     time = 0;
     duration = clip.probe?.duration ?? 0;
+    trimStart = 0;
+    trimEnd = duration;
+    keyframes = [];
+    if (job.state !== "running") job = { state: "idle" };
     buffered = 0;
     loading = true;
     failed = null;
-  });
+    api
+      .clipKeyframes(id)
+      .then((k) => {
+        if (clip.id === id) keyframes = k;
+      })
+      .catch(() => {});
+  }
+
+  const trimmed = $derived(trimStart > 0.05 || trimEnd < duration - 0.05);
+  const plan = $derived(cutPlan(trimStart, trimEnd, keyframes, preferLossless));
+  const estimate = $derived(estimateSize(clip.size, duration, plan, trimEnd));
+
+  function setTrim(start: number, end: number, edge: "start" | "end") {
+    trimStart = Math.max(0, start);
+    trimEnd = Math.min(duration, end);
+    if (job.state === "done" || job.state === "error") job = { state: "idle" };
+    // Show the frame at the handle being dragged.
+    video?.pause();
+    seek(edge === "start" ? trimStart : Math.max(trimStart, trimEnd - 1 / 60), true);
+  }
+  function markIn() {
+    setTrim(Math.min(time, trimEnd - 0.25), trimEnd, "start");
+  }
+  function markOut() {
+    setTrim(trimStart, Math.max(time, trimStart + 0.25), "end");
+  }
+  function resetTrim() {
+    trimStart = 0;
+    trimEnd = duration;
+    job = { state: "idle" };
+  }
+
+  async function save() {
+    if (!trimmed || job.state === "running") return;
+    job = { state: "running", job: null, progress: 0 };
+    try {
+      const r = await api.exportStart(clip.id, trimStart, trimEnd, !plan.lossless);
+      if (job.state === "running") job = { ...job, job: r.job };
+    } catch (e) {
+      job = { state: "error", message: String(e) };
+    }
+  }
+  function cancel() {
+    void api.exportCancel();
+  }
+
+  function onExport(e: ExportEvent) {
+    if (job.state !== "running") return;
+    if (job.job !== null && e.job !== job.job && e.kind !== "cancelled") return;
+    if (e.kind === "progress") job = { ...job, progress: e.progress };
+    else if (e.kind === "done") {
+      job = { state: "done", path: e.path, size: e.size, duration: e.duration, lossless: e.video === "copy", seconds: e.seconds };
+      onsaved(e.path);
+    } else if (e.kind === "error") job = { state: "error", message: e.message };
+    else job = { state: "idle" };
+  }
+
+  // Stop at the end of the selection (checked every displayed frame). One
+  // callback chain per element: re-arming cancels the previous one.
+  let frameCb: { v: HTMLVideoElement; id: number } | null = null;
+  function stopWatching() {
+    if (frameCb) frameCb.v.cancelVideoFrameCallback(frameCb.id);
+    frameCb = null;
+  }
+  function watchEnd() {
+    stopWatching();
+    const v = video;
+    if (!v || typeof v.requestVideoFrameCallback !== "function") return;
+    const tick = (_: number, meta: VideoFrameCallbackMetadata) => {
+      if (!v.paused && trimmed && meta.mediaTime >= trimEnd - 1 / 120) {
+        v.pause();
+        v.currentTime = trimEnd;
+        time = trimEnd;
+      }
+      frameCb = { v, id: v.requestVideoFrameCallback(tick) };
+    };
+    frameCb = { v, id: v.requestVideoFrameCallback(tick) };
+  }
 
   function toggle() {
     if (!video || failed) return;
-    if (video.paused) void video.play().catch(() => {});
-    else video.pause();
+    if (video.paused) {
+      // Play the selection: from its start if we're outside it or at its end.
+      if (trimmed && (time < trimStart - 0.01 || time >= trimEnd - 0.05)) seek(trimStart);
+      void video.play().catch(() => {});
+    } else video.pause();
   }
   function seek(t: number, fast = false) {
     if (!video || failed) return;
@@ -60,6 +168,11 @@
   }
 
   function onkey(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+      e.preventDefault();
+      void save();
+      return;
+    }
     if (e.ctrlKey || e.metaKey || e.altKey || fromWithin(e, "input, select")) return;
     const handled = (() => {
       switch (e.key) {
@@ -99,14 +212,23 @@
         case "M":
           muted = !muted;
           return true;
+        case "i":
+        case "I":
+          markIn();
+          return true;
+        case "o":
+        case "O":
+          markOut();
+          return true;
         case "Escape":
+          if (job.state === "running") return true; // cancel explicitly instead
           onclose();
           return true;
         case "PageUp":
-          if (hasPrev) onstep(-1);
+          if (hasPrev && job.state !== "running") onstep(-1);
           return true;
         case "PageDown":
-          if (hasNext) onstep(1);
+          if (hasNext && job.state !== "running") onstep(1);
           return true;
       }
       return false;
@@ -121,10 +243,19 @@
   }
 
   onMount(() => {
+    let unlisten: (() => void) | undefined;
+    let gone = false;
+    void api.onExport(onExport).then((u) => {
+      if (gone) u();
+      else unlisten = u;
+    });
     window.addEventListener("keydown", onkey);
     window.addEventListener("blur", pauseInBackground);
     document.addEventListener("visibilitychange", pauseInBackground);
     return () => {
+      gone = true;
+      unlisten?.();
+      stopWatching();
       window.removeEventListener("keydown", onkey);
       window.removeEventListener("blur", pauseInBackground);
       document.removeEventListener("visibilitychange", pauseInBackground);
@@ -159,6 +290,15 @@
       .join(" · "),
   );
 
+  // The element's duration can differ slightly from the header's: keep an
+  // untouched end handle at the real end.
+  function durationChanged() {
+    if (!video || !Number.isFinite(video.duration)) return;
+    const was = duration;
+    duration = video.duration;
+    if (trimEnd >= was - 0.05 || trimEnd > duration) trimEnd = duration;
+  }
+
   function mediaError() {
     const code = video?.error?.code;
     const codec = clip.probe ? codecName(clip.probe.codec) : "";
@@ -172,7 +312,7 @@
 
 <div class="player">
   <div class="bar">
-    <Button variant="ghost" onclick={onclose} title="Back to library (Esc)">
+    <Button variant="ghost" onclick={onclose} disabled={job.state === "running"} title={job.state === "running" ? "Saving… cancel or wait first" : "Back to library (Esc)"}>
       <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
       Library
     </Button>
@@ -181,10 +321,10 @@
       <span>{meta}</span>
     </div>
     <div class="nav">
-      <button type="button" class="icon-btn" aria-label="Previous clip (Page Up)" title="Previous clip (Page Up)" disabled={!hasPrev} onclick={() => onstep(-1)}>
+      <button type="button" class="icon-btn" aria-label="Previous clip (Page Up)" title="Previous clip (Page Up)" disabled={!hasPrev || job.state === "running"} onclick={() => onstep(-1)}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
       </button>
-      <button type="button" class="icon-btn" aria-label="Next clip (Page Down)" title="Next clip (Page Down)" disabled={!hasNext} onclick={() => onstep(1)}>
+      <button type="button" class="icon-btn" aria-label="Next clip (Page Down)" title="Next clip (Page Down)" disabled={!hasNext || job.state === "running"} onclick={() => onstep(1)}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
       </button>
     </div>
@@ -205,9 +345,10 @@
         bind:paused
         bind:muted
         ontimeupdate={() => video && (time = video.currentTime)}
-        ondurationchange={() => video && Number.isFinite(video.duration) && (duration = video.duration)}
+        ondurationchange={durationChanged}
         onprogress={progress}
         oncanplay={() => (loading = false)}
+        onloadedmetadata={watchEnd}
         onwaiting={() => (loading = true)}
         onplaying={() => (loading = false)}
         onerror={mediaError}
@@ -233,7 +374,9 @@
       {/if}
     </button>
     <span class="time"><span class="now">{clock(time)}</span> / {clock(duration)}</span>
-    <div class="seek"><Timeline {duration} {time} {buffered} onseek={seek} /></div>
+    <div class="seek">
+      <Timeline {duration} {time} {buffered} trim={{ start: trimStart, end: trimEnd }} onseek={seek} ontrim={setTrim} />
+    </div>
     <button type="button" class="icon-btn" aria-label={muted ? "Unmute (M)" : "Mute (M)"} title={muted ? "Unmute (M)" : "Mute (M)"} onclick={() => (muted = !muted)}>
       {#if muted}
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6h2.5L8.5 3v10L5 10H2.5z" fill="currentColor" /><path d="m11 6 3.5 4m0-4L11 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
@@ -242,7 +385,58 @@
       {/if}
     </button>
   </div>
-  <p class="keys">Space play/pause · ←/→ 5 s · J/L 10 s · ,/. frame · Page Up/Down previous/next clip · Esc back</p>
+  <div class="edit" aria-label="Trim and save">
+    <div class="sel-info">
+      {#if trimmed}
+        <strong>{clockPrecise(trimStart)} – {clockPrecise(trimEnd)}</strong>
+        <span>{clockPrecise(trimEnd - plan.start)} · ≈ {bytes(estimate)}</span>
+      {:else}
+        <strong>Trim</strong>
+        <span>Drag the red handles, or press I and O at the playhead</span>
+      {/if}
+    </div>
+
+    <div class="mode">
+      {#if trimmed && plan.onKeyframe}
+        <span class="badge ok" title="The start is on a keyframe, so the clip is copied exactly, with no quality loss">Lossless · exact</span>
+      {:else if trimmed}
+        <Segmented
+          label="How to cut"
+          value={preferLossless ? "lossless" : "exact"}
+          options={[
+            { value: "exact", label: "Exact", title: "Starts on the frame you chose. Video is re-encoded at high quality; audio is copied." },
+            { value: "lossless", label: `Lossless · ${plan.snapBy.toFixed(1)} s earlier`, title: "No quality loss, but the clip starts at the previous keyframe" },
+          ]}
+          onchange={(v) => (preferLossless = v === "lossless")}
+        />
+      {/if}
+    </div>
+
+    <div class="save">
+      {#if job.state === "running"}
+        <div class="progress" role="progressbar" aria-label="Saving clip" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress * 100)}>
+          <div style:width="{Math.round(job.progress * 100)}%"></div>
+        </div>
+        <span class="pct">{Math.round(job.progress * 100)}%</span>
+        <Button variant="ghost" onclick={cancel}>Cancel</Button>
+      {:else if job.state === "done"}
+        {@const saved = job}
+        <span class="done" role="status">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          Saved {clockPrecise(saved.duration)} · {bytes(saved.size)}{saved.lossless ? " · lossless" : ""}
+        </span>
+        <Button variant="ghost" onclick={() => onopensaved(saved.path)}>Play it</Button>
+        <Button variant="ghost" onclick={resetTrim}>New trim</Button>
+      {:else}
+        {#if job.state === "error"}<span class="err" role="alert" title={job.message}>{job.message}</span>{/if}
+        {#if trimmed}<Button variant="ghost" onclick={resetTrim}>Reset</Button>{/if}
+        <Button variant="primary" onclick={save} disabled={!trimmed || !!failed} title="Save the selection as a new clip (Ctrl+S). The original is kept.">
+          Save clip
+        </Button>
+      {/if}
+    </div>
+  </div>
+  <p class="keys">Space play/pause · I/O set start/end · Ctrl+S save · ←/→ 5 s · J/L 10 s · ,/. frame · Page Up/Down other clips · Esc back</p>
 </div>
 
 <style>
@@ -396,6 +590,84 @@
   .icon-btn svg {
     width: 16px;
     height: 16px;
+  }
+  .edit {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    gap: var(--s4);
+    padding: var(--s2) var(--s4) 0;
+    background: var(--surface);
+    min-height: 48px;
+  }
+  .sel-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
+  }
+  .sel-info span {
+    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .mode {
+    display: flex;
+    justify-content: center;
+  }
+  .badge {
+    padding: 4px 10px;
+    border-radius: var(--radius-pill);
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-strong);
+  }
+  .badge.ok {
+    background: var(--success-soft);
+    color: var(--success);
+  }
+  .save {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--s2);
+    min-width: 0;
+  }
+  .progress {
+    width: 160px;
+    height: 6px;
+    border-radius: var(--radius-pill);
+    background: var(--surface-press);
+    overflow: hidden;
+  }
+  .progress div {
+    height: 100%;
+    background: var(--accent);
+    transition: width var(--t-fast) linear;
+  }
+  .pct {
+    width: 40px;
+    color: var(--text-muted);
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
+  }
+  .done {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s1);
+    color: var(--success);
+    font-size: var(--fs-sm);
+    white-space: nowrap;
+  }
+  .err {
+    color: var(--danger);
+    font-size: var(--fs-sm);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
   .keys {
     margin: 0;

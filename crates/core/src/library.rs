@@ -41,6 +41,8 @@ pub struct Clip {
     pub error: Option<String>,
     /// A cached thumbnail exists.
     pub thumb: bool,
+    /// Made by the editor (`<stem> edit[ N].mp4`), not by the recorder.
+    pub edit: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -152,6 +154,7 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
             .unwrap_or_else(|| local_time(mtime / 1_000_000_000));
         let id = clip_id(&key, size, mtime);
         let thumb = thumbs.contains(&format!("{id}.jpg"));
+        let edit = split_edit(file_stem(&file_name)).1.is_some();
         clips.push(Clip {
             id,
             path,
@@ -162,6 +165,7 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
             probe: entry.probe.clone().ok(),
             error: entry.probe.clone().err(),
             thumb,
+            edit,
         });
         if !transient {
             fresh.insert(key, entry);
@@ -280,6 +284,8 @@ pub fn parse_name(file_name: &str) -> Option<(String, String)> {
             .eq_ignore_ascii_case(".mp4")
             .then(|| &file_name[..n])
     })?;
+    // Edits keep the original's name plus " edit[ N]".
+    let stem = split_edit(stem).0;
     // Drop a " (n)" duplicate suffix.
     let stem = match stem.rsplit_once(" (") {
         Some((s, n))
@@ -317,6 +323,241 @@ pub fn parse_name(file_name: &str) -> Option<(String, String)> {
             &stamp[17..19]
         ),
     ))
+}
+
+fn file_stem(file_name: &str) -> &str {
+    match file_name.len().checked_sub(4) {
+        Some(n)
+            if file_name
+                .get(n..)
+                .is_some_and(|x| x.eq_ignore_ascii_case(".mp4")) =>
+        {
+            &file_name[..n]
+        }
+        _ => file_name,
+    }
+}
+
+/// `"X edit"` → `("X", Some(1))`, `"X edit 3"` → `("X", Some(3))`, else `(stem, None)`.
+pub fn split_edit(stem: &str) -> (&str, Option<u32>) {
+    if let Some(base) = stem.strip_suffix(" edit") {
+        return (base, Some(1));
+    }
+    if let Some((rest, n)) = stem.rsplit_once(' ')
+        && let Some(base) = rest.strip_suffix(" edit")
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(n) = n.parse::<u32>()
+        && n >= 2
+    {
+        return (base, Some(n));
+    }
+    (stem, None)
+}
+
+/// A free name for an edit of `original`, in the same folder:
+/// `<stem> edit.mp4`, `<stem> edit 2.mp4`, … Editing an edit numbers from the
+/// same original name. Never returns an existing path.
+pub fn edit_path(original: &Path) -> PathBuf {
+    let name = original
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let base = split_edit(file_stem(&name)).0.to_owned();
+    let dir = original.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut n = 1u32;
+    loop {
+        let candidate = if n == 1 {
+            dir.join(format!("{base} edit.mp4"))
+        } else {
+            dir.join(format!("{base} edit {n}.mp4"))
+        };
+        let partial = candidate.with_extension("mp4.partial");
+        if !candidate.exists() && !partial.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Unfinished editor exports (`<stem> edit[ N].mp4.partial`) left behind when
+/// the window closed mid-export. The recorder's own `.partial` files (no
+/// " edit" suffix) are never listed: it may be writing one right now.
+pub fn stale_edit_partials(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![root.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(root) {
+        dirs.extend(
+            rd.flatten()
+                .filter(|d| d.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|d| d.path()),
+        );
+    }
+    let mut out = Vec::new();
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(".mp4.partial")
+                && split_edit(stem).1.is_some()
+                && e.file_type().is_ok_and(|t| t.is_file())
+            {
+                out.push(e.path());
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------- keyframes
+
+/// Presentation times (seconds) of the video track's sync samples, from the
+/// MP4 sample tables. No decoding. Assumes no B-frames (our recordings have
+/// none), so decode order is display order.
+pub fn keyframes_file(path: &Path) -> Result<Vec<f64>, ProbeError> {
+    let mut f = File::open(path)?;
+    let len = f.metadata()?.len();
+    keyframes(&mut std::io::BufReader::new(&mut f), len)
+}
+
+#[derive(Default)]
+struct KfTrack {
+    handler: [u8; 4],
+    timescale: u32,
+    /// (sample count, delta)
+    stts: Vec<(u32, u32)>,
+    /// 1-based sample numbers; `None` = every sample is a sync sample.
+    stss: Option<Vec<u32>>,
+}
+
+/// Largest sample table we'll read (a 5-minute clip's is a few KB).
+const MAX_TABLE: u64 = 16 * 1024 * 1024;
+
+pub fn keyframes<R: Read + Seek>(r: &mut R, len: u64) -> Result<Vec<f64>, ProbeError> {
+    let mut magic = [0u8; 8];
+    r.seek(SeekFrom::Start(0))?;
+    if len < 8 || r.read_exact(&mut magic).is_err() || &magic[4..] != b"ftyp" {
+        return Err(ProbeError::NotMp4("no ftyp box"));
+    }
+    let mut pos = 0;
+    let mut tracks: Vec<KfTrack> = Vec::new();
+    let mut boxes = 0u32;
+    while pos + 8 <= len {
+        let (kind, start, end) = header(r, pos, len)?;
+        if &kind == b"moov" {
+            kf_walk(r, start, end, &mut tracks, 0, &mut boxes)?;
+            break;
+        }
+        pos = end;
+    }
+    let t = tracks
+        .iter()
+        .find(|t| &t.handler == b"vide")
+        .ok_or(ProbeError::NotMp4("no video track"))?;
+    if t.timescale == 0 {
+        return Err(ProbeError::NotMp4("no media timescale"));
+    }
+    // Sample number (1-based) → decode time, walking stts once.
+    let mut out = Vec::new();
+    let mut sync = t.stss.as_ref().map(|v| v.iter().copied().peekable());
+    let (mut sample, mut time) = (1u64, 0u64);
+    for &(count, delta) in &t.stts {
+        for _ in 0..count {
+            let is_sync = match sync.as_mut() {
+                None => true,
+                Some(it) => {
+                    while it.peek().is_some_and(|&n| u64::from(n) < sample) {
+                        it.next();
+                    }
+                    it.peek().is_some_and(|&n| u64::from(n) == sample)
+                }
+            };
+            if is_sync {
+                out.push(time as f64 / f64::from(t.timescale));
+            }
+            sample += 1;
+            time += u64::from(delta);
+        }
+    }
+    Ok(out)
+}
+
+fn kf_walk<R: Read + Seek>(
+    r: &mut R,
+    mut pos: u64,
+    end: u64,
+    tracks: &mut Vec<KfTrack>,
+    depth: u32,
+    boxes: &mut u32,
+) -> Result<(), ProbeError> {
+    if depth > 8 {
+        return Err(ProbeError::NotMp4("boxes nested too deep"));
+    }
+    while pos + 8 <= end {
+        let (kind, start, box_end) = header(r, pos, end)?;
+        *boxes += 1;
+        if *boxes > MAX_BOXES {
+            return Err(ProbeError::NotMp4("too many boxes"));
+        }
+        match &kind {
+            b"trak" => {
+                if tracks.len() >= MAX_TRACKS {
+                    return Err(ProbeError::NotMp4("too many tracks"));
+                }
+                tracks.push(KfTrack::default());
+                kf_walk(r, start, box_end, tracks, depth + 1, boxes)?;
+            }
+            b"mdia" | b"minf" | b"stbl" => kf_walk(r, start, box_end, tracks, depth + 1, boxes)?,
+            b"hdlr" => {
+                let b = read_payload(r, start, box_end, 12, 12)?;
+                if let Some(t) = tracks.last_mut() {
+                    t.handler.copy_from_slice(&b[8..12]);
+                }
+            }
+            b"mdhd" => {
+                let b = read_payload(r, start, box_end, 16, 24)?;
+                let ts = if b[0] == 1 {
+                    if b.len() < 24 {
+                        return Err(ProbeError::NotMp4("box too short"));
+                    }
+                    be32(&b[20..])
+                } else {
+                    be32(&b[12..])
+                };
+                if let Some(t) = tracks.last_mut() {
+                    t.timescale = ts;
+                }
+            }
+            b"stts" | b"stss" => {
+                if box_end - start > MAX_TABLE {
+                    return Err(ProbeError::NotMp4("sample table too large"));
+                }
+                let b = read_payload(r, start, box_end, 8, (box_end - start) as usize)?;
+                let n = be32(&b[4..]) as usize;
+                let per = if &kind == b"stts" { 8 } else { 4 };
+                if b.len() < 8 + n.saturating_mul(per) {
+                    return Err(ProbeError::NotMp4("sample table cut off"));
+                }
+                let body = &b[8..8 + n * per];
+                if let Some(t) = tracks.last_mut() {
+                    if &kind == b"stts" {
+                        t.stts = body
+                            .as_chunks::<8>()
+                            .0
+                            .iter()
+                            .map(|c| (be32(c), be32(&c[4..])))
+                            .collect();
+                    } else {
+                        t.stss = Some(body.as_chunks::<4>().0.iter().map(|c| be32(c)).collect());
+                    }
+                }
+            }
+            _ => {}
+        }
+        pos = box_end;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- MP4 headers
@@ -775,6 +1016,150 @@ pub(crate) mod tests {
         assert_eq!(p("DayZ 2026-11-04 14-35-41 (two).mp4"), None);
         assert_eq!(p("ø.mp4"), None); // shorter than a stamp, multi-byte: no panic
         assert_eq!(p("ææææææææææææææææææææ.mp4"), None);
+    }
+
+    #[test]
+    fn edit_names_keep_the_recording_time_and_never_collide() {
+        assert_eq!(
+            parse_name("DayZ 2026-11-04 14-35-41 edit.mp4").unwrap().1,
+            "2026-11-04 14:35:41"
+        );
+        assert_eq!(
+            parse_name("DayZ 2026-11-04 14-35-41 (2) edit 3.mp4")
+                .unwrap()
+                .0,
+            "DayZ"
+        );
+        assert_eq!(split_edit("X edit"), ("X", Some(1)));
+        assert_eq!(split_edit("X edit 12"), ("X", Some(12)));
+        assert_eq!(split_edit("X edit 1"), ("X edit 1", None));
+        assert_eq!(split_edit("X edited"), ("X edited", None));
+        assert_eq!(split_edit("credit 2"), ("credit 2", None));
+
+        let t = TempDir::new("editname");
+        let orig = t.0.join("DayZ 2026-11-04 14-35-41.mp4");
+        std::fs::write(&orig, b"x").unwrap();
+        let first = edit_path(&orig);
+        assert_eq!(
+            first.file_name().unwrap(),
+            "DayZ 2026-11-04 14-35-41 edit.mp4"
+        );
+        std::fs::write(&first, b"x").unwrap();
+        let second = edit_path(&orig);
+        assert_eq!(
+            second.file_name().unwrap(),
+            "DayZ 2026-11-04 14-35-41 edit 2.mp4"
+        );
+        // An export in progress reserves its name too.
+        std::fs::write(second.with_extension("mp4.partial"), b"x").unwrap();
+        assert_eq!(
+            edit_path(&orig).file_name().unwrap(),
+            "DayZ 2026-11-04 14-35-41 edit 3.mp4"
+        );
+        // Editing an edit numbers from the original.
+        assert_eq!(
+            edit_path(&first).file_name().unwrap(),
+            "DayZ 2026-11-04 14-35-41 edit 3.mp4"
+        );
+    }
+
+    fn stbl_with(stts: &[(u32, u32)], stss: Option<&[u32]>) -> Vec<u8> {
+        let mut t = (stts.len() as u32).to_be_bytes().to_vec();
+        for (c, d) in stts {
+            t.extend(c.to_be_bytes());
+            t.extend(d.to_be_bytes());
+        }
+        let mut boxes = bx(b"stts", &full(0, &t));
+        if let Some(stss) = stss {
+            let mut v = (stss.len() as u32).to_be_bytes().to_vec();
+            for n in stss {
+                v.extend(n.to_be_bytes());
+            }
+            boxes.extend(bx(b"stss", &full(0, &v)));
+        }
+        bx(b"stbl", &boxes)
+    }
+
+    fn kf_file(stbl: Vec<u8>, timescale: u32) -> Vec<u8> {
+        let mut hd = vec![0u8; 4];
+        hd.extend_from_slice(b"vide");
+        hd.extend([0u8; 13]);
+        let mut md = vec![0u8; 8];
+        md.extend(timescale.to_be_bytes());
+        md.extend([0u8; 8]);
+        let mdia = bx(
+            b"mdia",
+            &[
+                bx(b"mdhd", &full(0, &md)),
+                bx(b"hdlr", &full(0, &hd)),
+                bx(b"minf", &stbl),
+            ]
+            .concat(),
+        );
+        let audio = trak(b"soun", b"mp4a", 0, 0);
+        let moov = bx(
+            b"moov",
+            &[mvhd_v0(1000, 1000), audio, bx(b"trak", &mdia)].concat(),
+        );
+        [bx(b"ftyp", b"isom"), bx(b"mdat", &[0; 64]), moov].concat()
+    }
+
+    #[test]
+    fn keyframe_times_come_from_the_sample_tables() {
+        // 60 fps in a 90 kHz time base, keyframe every 60 samples (1 s), 3 s.
+        let f = kf_file(stbl_with(&[(180, 1500)], Some(&[1, 61, 121])), 90_000);
+        let k = keyframes(&mut Cursor::new(&f), f.len() as u64).unwrap();
+        assert_eq!(k, vec![0.0, 1.0, 2.0]);
+        // Variable frame durations (VFR capture) are summed correctly.
+        let f = kf_file(
+            stbl_with(&[(2, 1500), (1, 3000), (2, 1500)], Some(&[1, 4])),
+            90_000,
+        );
+        let k = keyframes(&mut Cursor::new(&f), f.len() as u64).unwrap();
+        assert_eq!(k.len(), 2);
+        assert!((k[1] - 6000.0 / 90_000.0).abs() < 1e-9);
+        // No stss: every sample is a keyframe.
+        let f = kf_file(stbl_with(&[(3, 1500)], None), 90_000);
+        assert_eq!(
+            keyframes(&mut Cursor::new(&f), f.len() as u64)
+                .unwrap()
+                .len(),
+            3
+        );
+        // A table claiming more entries than it holds is refused, not trusted.
+        let mut bad = stbl_with(&[(3, 1500)], None);
+        let at = bad.windows(4).position(|w| w == b"stts").unwrap() + 8;
+        bad[at..at + 4].copy_from_slice(&1_000_000u32.to_be_bytes());
+        let f = kf_file(bad, 90_000);
+        assert!(keyframes(&mut Cursor::new(&f), f.len() as u64).is_err());
+    }
+
+    #[test]
+    fn only_editor_partials_count_as_stale() {
+        let t = TempDir::new("partials");
+        std::fs::create_dir_all(t.0.join("DayZ")).unwrap();
+        for n in [
+            "DayZ/DayZ 2026-11-04 14-35-41 edit.mp4.partial",
+            "DayZ/DayZ 2026-11-04 14-35-41 edit 2.mp4.partial",
+            "DayZ/DayZ 2026-11-04 14-35-41.mp4.partial", // the recorder's: never
+            "DayZ/DayZ 2026-11-04 14-35-41 edit.mp4",    // finished: never
+            "loose edit.mp4.partial",
+        ] {
+            std::fs::write(t.0.join(n), b"x").unwrap();
+        }
+        let mut found: Vec<_> = stale_edit_partials(&t.0)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                "DayZ 2026-11-04 14-35-41 edit 2.mp4.partial",
+                "DayZ 2026-11-04 14-35-41 edit.mp4.partial",
+                "loose edit.mp4.partial"
+            ]
+        );
     }
 
     #[test]

@@ -1695,6 +1695,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jondisclip-export"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "jondisclip-engine",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "windows",
+]
+
+[[package]]
 name = "jondisclip-ui"
 version = "0.1.0"
 dependencies = [

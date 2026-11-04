@@ -1,0 +1,25 @@
+[package]
+name = "jondisclip-export"
+description = "JondisClip clip exporter (trim, later Discord export): a child process of the library window"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "jondisclip-export"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+thiserror.workspace = true
+ffmpeg-next.workspace = true
+jondisclip-engine = { path = "../engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.windows]
+version = "0.62"
+features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"]

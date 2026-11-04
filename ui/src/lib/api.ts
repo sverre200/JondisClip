@@ -47,7 +47,15 @@ export interface Clip {
   probe: Probe | null;
   error: string | null;
   thumb: boolean;
+  /** Made by the editor (`… edit.mp4`) */
+  edit: boolean;
 }
+
+export type ExportEvent =
+  | { kind: "progress"; job: number; progress: number }
+  | { kind: "done"; job: number; path: string; size: number; start: number; duration: number; video: string; seconds: number }
+  | { kind: "error"; job: number; message: string }
+  | { kind: "cancelled"; job: number };
 
 export interface LibraryView {
   root: string;
@@ -139,6 +147,19 @@ export const api = {
   initialPage: () => call<"library" | "settings">("initial_page"),
   libraryScan: () => call<LibraryView>("library_scan"),
   showInFolder: (id: string) => call<void>("show_in_folder", { id }),
+  clipKeyframes: (id: string) => call<number[]>("clip_keyframes", { id }),
+  exportStart: (id: string, start: number, end: number, exact: boolean) =>
+    call<{ job: number; output: string }>("export_start", { id, start, end, exact }),
+  exportCancel: () => call<void>("export_cancel"),
+  /** Subscribes to export progress; returns the unsubscribe function. */
+  async onExport(fn: (e: ExportEvent) => void): Promise<() => void> {
+    if (!isDesktop) {
+      mockExportListeners.add(fn);
+      return () => mockExportListeners.delete(fn);
+    }
+    const { listen } = await import("@tauri-apps/api/event");
+    return listen<ExportEvent>("export", (e) => fn(e.payload));
+  },
   openExternal: (id: string) => call<void>("open_external", { id }),
   async thumbSave(id: string, jpeg: Uint8Array): Promise<void> {
     if (!isDesktop) {
@@ -180,6 +201,8 @@ export const api = {
 // ---------- browser-preview mock (never used in the desktop app) ----------
 
 const mockThumbs = new Map<string, string>();
+const mockExportListeners = new Set<(e: ExportEvent) => void>();
+let mockExport: ReturnType<typeof setInterval> | undefined;
 
 function mockClips(): Clip[] {
   const games = ["DayZ", "DayZ", "DayZ", "Escape From Tarkov", "DayZ", "Counter-Strike 2", "Escape From Tarkov", "DayZ"];
@@ -202,6 +225,7 @@ function mockClips(): Clip[] {
       probe: broken ? null : { duration, width: 1920, height: 1080, codec: "avc1", audio_tracks: 3 },
       error: broken ? "the file is cut off (incomplete recording?)" : null,
       thumb: false,
+      edit: i === 3,
     });
   }
   return out;
@@ -254,6 +278,34 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       return structuredClone(mockState);
     case "initial_page":
       return new URLSearchParams(location.search).get("page") === "settings" ? "settings" : "library";
+    case "clip_keyframes": {
+      const n = 301;
+      return Array.from({ length: n }, (_, i) => i);
+    }
+    case "export_start": {
+      const job = Date.now();
+      const exact = Boolean(args?.exact);
+      const start = Number(args?.start ?? 0);
+      const end = Number(args?.end ?? 1);
+      let p = 0;
+      clearInterval(mockExport);
+      mockExport = setInterval(() => {
+        p = Math.min(1, p + (exact ? 0.07 : 0.4));
+        mockExportListeners.forEach((f) => f({ kind: "progress", job, progress: p }));
+        if (p >= 1) {
+          clearInterval(mockExport);
+          const s = exact ? start : Math.floor(start);
+          mockExportListeners.forEach((f) =>
+            f({ kind: "done", job, path: "C:\Users\you\Videos\JondisClip\DayZ\DayZ 2026-11-04 17-47-11 edit.mp4", size: (end - s) * 2.9e6, start: s, duration: end - s, video: exact ? "h264_amf" : "copy", seconds: 1 }),
+          );
+        }
+      }, 200);
+      return { job, output: "C:\…\DayZ 2026-11-04 17-47-11 edit.mp4" };
+    }
+    case "export_cancel":
+      clearInterval(mockExport);
+      mockExportListeners.forEach((f) => f({ kind: "cancelled", job: 0 }));
+      return undefined;
     case "library_scan":
       await new Promise((r) => setTimeout(r, 300));
       if (new URLSearchParams(location.search).has("empty")) return { root: mockState.default_save_dir, clips: [] };
