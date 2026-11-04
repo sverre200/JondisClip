@@ -11,11 +11,17 @@
 ## Phase 2: Minimal working recorder (headless + tray)
 - [x] **Video pipeline** (2026-11-04, `crates/engine`): WGC monitor capture → GPU copy → D3D11 video processor BGRA→NV12 (BT.709 limited) → FFmpeg D3D11VA hwframes → `hevc_amf` (H.264 fallback) → 2 s MPEG-TS segments → ring retention → save as a stream-copy MP4 (faststart, `hvc1`). Verified on the RX 6800 XT at 1080p60: 0 late or dropped frames, about 0.3 % CPU, about 68 MB working set, about 0.25 s to save 10 s. The save cut lands at the save moment (forced IDR). Run it with `cargo run --release -p jondisclip-engine --example record`.
 - [x] Reviewed by `perf-reviewer`. Fixed: AMD `forced_idr`, the save/IDR ordering race, encoder EAGAIN under GPU saturation, the shutdown hang after a thread panic, a dead writer looping on IDRs, resolution change detection (ContentSize), monitor removal (`Closed`), leaked pins on save timeout, long stalls inflating segment duration (it now starts a new run), deletes under the ring lock, and the buffer location plus a stale-session sweep.
-- [ ] App crate: tray icon, single-instance check, settings TOML, global hotkey → `save_clip`.
+- [x] **Tray app** (2026-11-04, `crates/app`, ADR-0006):
+  - Tray icon and menu: save, pause, replay length, mic, open folder, edit settings, quit.
+  - Global hotkey (Alt+F10), settings TOML with live reload, clip naming by foreground app.
+  - Single instance, start with Windows (off by default), local log.
+  - Verified: hotkey save, second instance refused, live settings reload (replay length applied without restart, invalid hotkey rejected), clean quit with the buffer removed. Idle cost while buffering: 0.28 % CPU, 73 MB working set, one process.
+- [x] Supervisor: automatic restart after errors and display changes, stop/restart around sleep, pause below 2 GB free disk. *Not yet exercised on real sleep/resume, a resolution change or low disk. Those code paths are untested.*
+- [x] Fixed while testing:
+  - A clip including the session's first segment failed to save (negative AAC priming timestamps). The clip writer now also skips any non-advancing packet.
+  - The start-up sweep could delete another live session. Sessions are now locked.
 - [x] **Audio** (2026-11-04): WASAPI loopback of the default output (game/system audio) plus an optional mic (off by default), 48 kHz stereo, on the same QPC clock as video, mixed 100 ms behind real time into native AAC (160 kb/s per track). Track layout: Mix (default) / Game / Microphone, or a single track when only one source is on. The writer routes audio to segments by timestamp, so clips have no holes at either end. Verified: flash/beep A/V offset median +4 ms (−39 to +14 ms, 11 pairs, after the drift fix), 3-track mic run correct, CPU 0.2–0.7 %, devices reopened automatically.
 - [ ] Process loopback for the detected game only (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`), so Discord voice and music stay out of clips. This needs game detection. For now, "Game" means all system audio.
-- [ ] Supervisor: automatically restart the recorder after `DisplayChanged`, `SourceClosed`, device removal and `PBT_APMSUSPEND`/resume.
-- [ ] Low disk space: warn, and stop buffering at the threshold.
 - [ ] Crash recovery: offer "Recover last buffer" before the stale-session sweep deletes it.
 - [ ] Known gaps from review, still to do:
   - Segment files at background IO priority (`FileIoPriorityHintInfo`).

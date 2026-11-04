@@ -17,6 +17,13 @@ pub enum ClipError {
     Empty,
     #[error("segment has no video stream: {0}")]
     NoVideo(PathBuf),
+    #[error("writing stream {stream} packet pts {pts:?} dts {dts:?}: {source}")]
+    Write {
+        stream: usize,
+        pts: Option<i64>,
+        dts: Option<i64>,
+        source: ffmpeg::Error,
+    },
     #[error("FFmpeg: {0}")]
     Ffmpeg(#[from] ffmpeg::Error),
     #[error("file: {0}")]
@@ -116,6 +123,9 @@ fn write(
     octx.write_header_with(opts)?;
     let out_tbs: Vec<Rational> = octx.streams().map(|s| s.time_base()).collect();
 
+    // Last written dts per output stream. Segments must never overlap, but if a
+    // boundary packet ever appears twice, skip it instead of failing the save.
+    let mut last_dts: Vec<Option<i64>> = vec![None; out_tbs.len()];
     for path in inputs {
         let mut ictx = format::input(path)?;
         for (stream, mut pkt) in ictx.packets() {
@@ -134,9 +144,22 @@ fn write(
             pkt.set_pts(pts);
             pkt.set_dts(dts);
             pkt.rescale_ts(in_tb, out_tb);
+            if let (Some(d), Some(last)) = (pkt.dts(), last_dts[i])
+                && d <= last
+            {
+                continue;
+            }
+            last_dts[i] = pkt.dts();
             pkt.set_stream(i);
             pkt.set_position(-1);
-            pkt.write_interleaved(&mut octx)?;
+            let (p, d) = (pkt.pts(), pkt.dts());
+            pkt.write_interleaved(&mut octx)
+                .map_err(|source| ClipError::Write {
+                    stream: i,
+                    pts: p,
+                    dts: d,
+                    source,
+                })?;
         }
     }
     octx.write_trailer()?;

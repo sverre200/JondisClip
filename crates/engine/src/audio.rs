@@ -378,7 +378,10 @@ impl Mixer {
         while !stop.load(Ordering::Acquire) {
             thread::sleep(Duration::from_millis(10));
             let ready = self.clock.qpc_to_frames(Clock::now_qpc()) - MIX_LATENCY_FRAMES;
-            let k = next.get_or_insert(ready.max(0));
+            // Start at least one block in: the AAC encoder's first packet is
+            // stamped one block early (priming), and negative timestamps make the
+            // TS muxer shift the whole first segment.
+            let k = next.get_or_insert(ready.max(BLOCK as i64));
             if ready - *k > MAX_MIX_BACKLOG_FRAMES {
                 let skip = ready - BLOCK as i64 - *k;
                 self.counters

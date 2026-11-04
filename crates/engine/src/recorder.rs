@@ -44,6 +44,9 @@ pub struct RecorderConfig {
     pub codec: Codec,
     /// Bits per second, or `None` for the Balanced default.
     pub bitrate: Option<u64>,
+    /// Multiplier on the default bitrate (quality preset: Performance about 0.7,
+    /// Balanced 1.0, High about 1.5). Ignored when `bitrate` is set.
+    pub quality_scale: f64,
     /// How much history the buffer keeps.
     pub replay: Duration,
     pub segment_seconds: u32,
@@ -70,9 +73,50 @@ fn sweep_stale_sessions(buffer_dir: &Path) {
     };
     for e in entries.flatten() {
         let is_session = e.file_name().to_string_lossy().starts_with("session-");
-        if is_session && e.file_type().is_ok_and(|t| t.is_dir()) {
-            let _ = fs::remove_dir_all(e.path());
+        if !is_session || !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
         }
+        // A live session (this or another process, or a save still running)
+        // holds its lock file open exclusively, so the delete fails and it's skipped.
+        let lock = e.path().join(LOCK_FILE);
+        if lock.exists() && fs::remove_file(&lock).is_err() {
+            continue;
+        }
+        let _ = fs::remove_dir_all(e.path());
+    }
+}
+
+const LOCK_FILE: &str = "session.lock";
+
+/// Exclusive lock on a session directory, held until its last segment is gone
+/// (after stop, a running save may still be reading segments).
+struct SessionLock {
+    file: Mutex<Option<fs::File>>,
+    dir: PathBuf,
+}
+
+impl SessionLock {
+    fn acquire(dir: &Path) -> std::io::Result<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(0) // no sharing: nobody else can open or delete it
+            .open(dir.join(LOCK_FILE))?;
+        Ok(Self {
+            file: Mutex::new(Some(file)),
+            dir: dir.to_path_buf(),
+        })
+    }
+
+    /// Releases the lock and removes the (now empty) session directory.
+    fn release_and_remove(&self) {
+        if let Ok(mut f) = self.file.lock() {
+            f.take();
+        }
+        let _ = fs::remove_file(self.dir.join(LOCK_FILE));
+        let _ = fs::remove_dir(&self.dir);
     }
 }
 
@@ -83,6 +127,7 @@ impl Default for RecorderConfig {
             output_height: None,
             codec: Codec::Hevc,
             bitrate: None,
+            quality_scale: 1.0,
             replay: Duration::from_secs(300),
             segment_seconds: 2,
             buffer_dir: default_buffer_dir(),
@@ -182,6 +227,7 @@ pub struct Recorder {
     counters: Arc<Counters>,
     tx: SyncSender<WriterMsg>,
     ring: Arc<Mutex<Ring>>,
+    lock: Arc<SessionLock>,
     encode_thread: Option<JoinHandle<Result<(), RecorderError>>>,
     writer_thread: Option<JoinHandle<Result<(), WriterError>>>,
     audio: Option<AudioPipeline>,
@@ -212,9 +258,10 @@ impl Recorder {
                     .join("; "),
             )
         })?;
-        let bitrate = cfg
-            .bitrate
-            .unwrap_or_else(|| EncodeSettings::default_bitrate(id.codec, width, height, cfg.fps));
+        let bitrate = cfg.bitrate.unwrap_or_else(|| {
+            let base = EncodeSettings::default_bitrate(id.codec, width, height, cfg.fps);
+            (base as f64 * cfg.quality_scale.clamp(0.25, 4.0)) as u64
+        });
         let settings = EncodeSettings {
             id,
             width,
@@ -233,6 +280,7 @@ impl Recorder {
         sweep_stale_sessions(&cfg.buffer_dir);
         let session_dir = cfg.buffer_dir.join(format!("session-{stamp}"));
         fs::create_dir_all(&session_dir)?;
+        let lock = Arc::new(SessionLock::acquire(&session_dir)?);
 
         let ring = Arc::new(Mutex::new(Ring::new(cfg.replay.as_micros() as i64)?));
         let ctl = Arc::new(Control {
@@ -330,6 +378,7 @@ impl Recorder {
             counters,
             tx,
             ring,
+            lock,
             encode_thread: Some(encode_thread),
             writer_thread: Some(writer_thread),
             audio: audio_setup.pipeline,
@@ -338,6 +387,21 @@ impl Recorder {
 
     pub fn info(&self) -> &RecorderInfo {
         &self.info
+    }
+
+    /// Changes how much history is kept, without interrupting recording.
+    /// Shrinking deletes the now-expired segments, and growing fills up over time.
+    pub fn set_replay(&mut self, replay: Duration) -> Result<(), RecorderError> {
+        if replay.is_zero() {
+            return Err(RecorderError::Config("replay must be positive"));
+        }
+        let expired = self
+            .ring
+            .lock()
+            .map_err(|_| RecorderError::Panicked)?
+            .set_retention(replay.as_micros() as i64)?;
+        segment::delete_segments(&self.info.session_dir, &expired);
+        Ok(())
     }
 
     pub fn stats(&self) -> Stats {
@@ -398,6 +462,7 @@ impl Recorder {
     ) -> JoinHandle<Result<Vec<PathBuf>, RecorderError>> {
         let tx = self.tx.clone();
         let ring = self.ring.clone();
+        let lock = self.lock.clone();
         let ctl = self.ctl.clone();
         let dir = self.info.session_dir.clone();
         let names = self.info.audio_tracks.clone();
@@ -406,7 +471,7 @@ impl Recorder {
             .name("jc-save".into())
             .spawn(move || {
                 set_priority(THREAD_MODE_BACKGROUND_BEGIN);
-                save_job(tx, ring, &ctl, &dir, len_us, &out, &names)
+                save_job(tx, ring, &lock, &ctl, &dir, len_us, &out, &names)
             });
         match spawn {
             Ok(h) => h,
@@ -448,7 +513,7 @@ impl Recorder {
         };
         segment::delete_segments(&self.info.session_dir, &expired);
         if drained {
-            let _ = fs::remove_dir(&self.info.session_dir);
+            self.lock.release_and_remove();
         }
         // The writer's own error is the root cause when the encoder only saw it go away.
         match (enc_result, writer_result) {
@@ -467,9 +532,11 @@ impl Drop for Recorder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_job(
     tx: SyncSender<WriterMsg>,
     ring: Arc<Mutex<Ring>>,
+    lock: &SessionLock,
     ctl: &Control,
     dir: &Path,
     len_us: i64,
@@ -511,7 +578,7 @@ fn save_job(
     // File IO outside the lock, so stats() and the writer never wait on deletes.
     segment::delete_segments(dir, &expired);
     if drained {
-        let _ = fs::remove_dir(dir);
+        lock.release_and_remove();
     }
     result
 }
