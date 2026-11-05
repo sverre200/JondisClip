@@ -91,6 +91,12 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
   - **Context menus**: Open, Rename, Move to folder ▸, Show in folder, Copy file, Open in default player, Delete… (Recycle Bin, with confirmation).
   - Organisation is metadata in `library\organize.json` (atomic writes and a `.bak`), keyed by a content fingerprint, so it survives renames and moves. Recordings never move.
   - Verified on the real clips: everything persisted across a reload, the Edit badges stayed on all 6 edits, playback worked, and the recordings were byte-identical afterwards. 15 new Rust tests.
+- [x] **Folders, Drive, themes and ordering overhaul** (2026-11-05):
+  - **Real Windows folders** (ADR-0015): the app and Explorer match. Explorer changes are picked up. Moves never overwrite. Old metadata folders ask before moving anything.
+  - **Settings → Google Drive:** a folder check with a write test, Open in Explorer, "Keep my folders". Whole-clip copies are verified by size and fingerprint.
+  - **Six accent themes** (ADR-0016), with the Windows 11 title bar tinted. Status colours are fixed.
+  - **Name sort** and a sort remembered per view. Reordering works with a filter on (hidden clips keep their places). Alt+←/→ moves clips. Dragging under another sort is refused with a hint.
+  - All verified in a sandbox profile on sample clips; real Google Drive was not tested.
 - [ ] Later: export a folder as real files, and folder sharing. If the window is already open, "Settings…" should switch its page (today it only focuses the window).
 Tauri window with Library (grid, thumbnails, player, rename, delete to the Recycle Bin, open folder, copy path), Recording status and Settings. Trim with stream copy, and a share export.
 

@@ -27,7 +27,7 @@
     onerror: (msg: string) => void;
   } = $props();
 
-  type Sort = "custom" | "newest" | "oldest" | "longest" | "largest";
+  type Sort = "custom" | "newest" | "oldest" | "name" | "longest" | "largest";
   let view = $state<LibraryView | null>(null);
   // Folders are real directories (ADR-0015); this mirrors the last load.
   let org = $state<{ folders: Folder[]; pending: PendingFolder[] }>({ folders: [], pending: [] });
@@ -141,6 +141,7 @@
   // ---- derived views
 
   const clips = $derived(view?.clips ?? []);
+  const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
   /** clip id → the folder its file is in */
   const folderOf = $derived.by(() => {
     const byName = new Map(org.folders.map((f) => [f.name, f]));
@@ -156,7 +157,15 @@
   $effect(() => {
     if (folderView !== "all" && folderView !== "unsorted" && view && !currentFolder) folderView = "all";
   });
-  // Folders open in custom order; other views use dates.
+  // Each view remembers its sort (a UI preference). Folders start in custom
+  // order, the other views by date. Sorting never changes the custom order.
+  const sortMemory: Record<string, Sort> = (() => {
+    try {
+      return JSON.parse(localStorage.getItem("jc.library.sort") ?? "{}") as Record<string, Sort>;
+    } catch {
+      return {};
+    }
+  })();
   let lastView: View | null = null;
   $effect(() => {
     const v = folderView;
@@ -164,12 +173,21 @@
     lastView = v;
     untrack(() => {
       const isFolder = v !== "all" && v !== "unsorted";
-      if (isFolder) sort = "custom";
-      else if (sort === "custom") sort = "newest";
+      const kept = sortMemory[v];
+      sort = kept && (isFolder || kept !== "custom") ? kept : isFolder ? "custom" : "newest";
       selection = [];
       selectedId = null;
     });
   });
+  function setSort(v: Sort) {
+    sort = v;
+    sortMemory[folderView] = v;
+    try {
+      localStorage.setItem("jc.library.sort", JSON.stringify(sortMemory));
+    } catch {
+      // not remembered: fine
+    }
+  }
 
   const counts = $derived.by(() => {
     const out: Record<string, number> = {};
@@ -202,6 +220,7 @@
       const pos = new Map(currentFolder.clips.map((k, i) => [k, i]));
       list = [...list].sort((a, b) => (pos.get(a.key) ?? 1e9) - (pos.get(b.key) ?? 1e9));
     } else if (sort === "oldest") list = [...list].reverse();
+    else if (sort === "name") list = [...list].sort((a, b) => byName.compare(a.title ?? a.game, b.title ?? b.game) || b.recorded.localeCompare(a.recorded));
     else if (sort === "longest") list = [...list].sort((a, b) => dur(b) - dur(a));
     else if (sort === "largest") list = [...list].sort((a, b) => b.size - a.size);
     return list;
@@ -438,10 +457,12 @@
 
   // ---- drag and drop
 
+  // Arranging is only possible where the custom order is what's shown. With
+  // a search or game filter on, a drop goes next to the visible neighbour;
+  // hidden clips keep their places.
   const reorderBlocked = (): string | null => {
     if (!currentFolder) return "Open a folder to arrange clips in your own order";
-    if (sort !== "custom") return "Switch the sort to Custom order to arrange clips";
-    if (query.trim() || game) return "Clear the search and game filter to arrange clips";
+    if (sort !== "custom") return `Sorted by ${sorts.find((x) => x.value === sort)?.label.toLowerCase() ?? sort}. Choose Custom order to arrange`;
     return null;
   };
 
@@ -469,9 +490,7 @@
           const f = t.id ? (org.folders.find((x) => x.id === t.id) ?? null) : null;
           void moveTo(cs, f);
         } else if (t.type === "insert" && currentFolder) {
-          // Custom order is metadata: no file moves.
-          const present = inView.map((x) => x.key).filter(Boolean);
-          void orgDo(api.clipsArrange(currentFolder.name, present, p.keys, t.before));
+          void arrange(p.keys, t.before);
         }
       },
       {
@@ -485,6 +504,39 @@
   }
 
   const dragging = $derived(drag.payload?.kind === "clips" ? new Set(drag.payload.ids) : null);
+
+  /** Custom order inside the open folder: metadata only, no file moves.
+   *  `before` null means "after the last visible clip": with a filter on,
+   *  that's right after it, not after the hidden clips at the very end. */
+  async function arrange(keys: string[], before: string | null) {
+    if (!currentFolder) return;
+    const present = inView.map((x) => x.key).filter(Boolean);
+    if (before === null && shown.length < inView.length) {
+      const pos = new Map(currentFolder.clips.map((k, i) => [k, i]));
+      const full = [...present].sort((a, b) => (pos.get(a) ?? 1e9) - (pos.get(b) ?? 1e9));
+      const last = shown.filter((c) => !keys.includes(c.key)).at(-1)?.key;
+      if (last) before = full.slice(full.indexOf(last) + 1).find((k) => !keys.includes(k)) ?? null;
+    }
+    await orgDo(api.clipsArrange(currentFolder.name, present, keys, before));
+  }
+
+  /** Alt+←/→: move the selection one place in custom order (keyboard drag). */
+  async function nudge(dir: -1 | 1) {
+    const why = reorderBlocked();
+    if (why) return tell(why);
+    const keys = shown.filter((c) => selectedSet.has(c.id)).map((c) => c.key);
+    if (!keys.length || keys.some((k) => !k)) return;
+    const rest = shown.filter((c) => !keys.includes(c.key));
+    const firstAt = shown.findIndex((c) => c.key === keys[0]);
+    // Index in `rest` the selection currently sits before.
+    const at = shown.slice(0, firstAt).filter((c) => !keys.includes(c.key)).length;
+    const to = Math.max(0, Math.min(rest.length, at + dir));
+    if (to === at) return;
+    await arrange(keys, rest[to]?.key ?? null);
+    await tick();
+    if (selectedId) cardEls[selectedId]?.focus({ preventScroll: true });
+    if (selectedId) cardEls[selectedId]?.scrollIntoView({ block: "nearest" });
+  }
 
   // ---- keyboard
 
@@ -501,6 +553,10 @@
   async function onkey(e: KeyboardEvent) {
     if (!shown.length || fromWithin(e, "input, select") || renamingId) return;
     const i = Math.max(0, shown.findIndex((c) => c.id === selectedId));
+    if (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+      e.preventDefault();
+      return nudge(e.key === "ArrowLeft" ? -1 : 1);
+    }
     let next = -1;
     switch (e.key) {
       case "ArrowRight":
@@ -583,6 +639,7 @@
     ...(currentFolder ? [{ value: "custom", label: "Custom order" }] : []),
     { value: "newest", label: "Newest first" },
     { value: "oldest", label: "Oldest first" },
+    { value: "name", label: "Name (A–Z)" },
     { value: "longest", label: "Longest first" },
     { value: "largest", label: "Largest first" },
   ]);
@@ -636,7 +693,7 @@
         <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
         <input type="search" placeholder="Search clips" aria-label="Search clips" bind:value={query} spellcheck="false" />
       </label>
-      <Select label="Sort clips" value={sort} options={sorts} onchange={(v) => (sort = v as Sort)} />
+      <Select label="Sort clips" value={sort} options={sorts} onchange={(v) => setSort(v as Sort)} />
       <button type="button" class="icon-btn" title="Refresh" aria-label="Refresh library" onclick={refresh} disabled={refreshing}>
         <svg class:spin={refreshing} viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.5v2.8h-2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
       </button>
