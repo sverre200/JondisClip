@@ -96,14 +96,15 @@ pub struct PendingView {
 
 /// Scans, reconciles the metadata with the disk, and builds the view.
 /// drive: the Google Drive folder setting (empty = off).
-pub fn load(root: PathBuf, drive: &Path) -> Result<Library, String> {
+pub fn load(root: PathBuf, drive: &Path, keep: bool) -> Result<Library, String> {
     let root_ok = root.is_dir();
     let mut lv = library::scan(root.clone());
     let mut org = store().load()?;
     // Forget Drive copies that were deleted, but only under the current
     // Drive folder and only while it's reachable (Drive not running would
     // make every copy look gone).
-    if !drive.as_os_str().is_empty() && drive.is_dir() {
+    let drive_ok = !drive.as_os_str().is_empty() && drive.is_dir();
+    if drive_ok {
         let under = drive.to_string_lossy().to_lowercase();
         let gone =
             |p: &Path| p.to_string_lossy().to_lowercase().starts_with(&under) && !p.is_file();
@@ -174,6 +175,37 @@ pub fn load(root: PathBuf, drive: &Path) -> Result<Library, String> {
             }
         })
         .collect();
+    // Copies saved to Drive before marks were recorded (or by an older
+    // version): found where Save to Drive would have put them, then
+    // remembered like any other.
+    if drive_ok {
+        let mut found: Vec<(String, String)> = Vec::new();
+        for c in clips
+            .iter_mut()
+            .filter(|c| c.in_drive.is_none() && c.clip.error.is_none())
+        {
+            if let Some(copy) = crate::existing_drive_copy(
+                drive,
+                &root,
+                &c.clip.path,
+                keep,
+                c.title.as_deref(),
+                &org,
+            ) {
+                let copy = copy.display().to_string();
+                found.push((c.clip.key.clone(), copy.clone()));
+                c.in_drive = Some(copy);
+            }
+        }
+        if !found.is_empty() {
+            store().update(|o| {
+                for (k, p) in &found {
+                    o.mark_in_drive(k, p)?;
+                }
+                Ok(())
+            })?;
+        }
+    }
     clips.sort_by(|a, b| b.clip.recorded.cmp(&a.clip.recorded));
     let folders = org
         .folders
@@ -440,6 +472,7 @@ pub async fn library_load() -> Result<Library, String> {
     let s = settings();
     let root = s.save_dir_or(&paths::default_save_dir());
     let drive = s.drive_dir.clone();
+    let keep = s.drive_keep_folders;
     tauri::async_runtime::spawn_blocking(move || {
         library::in_background(|| {
             // Left over if the window closed mid-export (the exporter dies
@@ -450,7 +483,7 @@ pub async fn library_load() -> Result<Library, String> {
                 }
             }
             let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            load(root, &drive)
+            load(root, &drive, keep)
         })
     })
     .await

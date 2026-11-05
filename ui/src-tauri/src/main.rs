@@ -677,6 +677,58 @@ fn is_remote_drive(p: &std::path::Path) -> bool {
 }
 
 /// Size and modified time, for "already there".
+/// The folder under `<drive>\JondisClip` that Save to Drive uses for the
+/// clip at `path`: its user folder (`Edited\DayZ`) when "Keep my folders"
+/// is on and it's in one, else its game.
+pub(crate) fn drive_subfolder(
+    save: &std::path::Path,
+    path: &std::path::Path,
+    keep: bool,
+    org: &jondisclip_core::organize::Organize,
+) -> String {
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent = path
+        .parent()
+        .and_then(|p| p.strip_prefix(save).ok())
+        .map(|r| r.to_string_lossy().into_owned())
+        .filter(|r| !r.is_empty());
+    parent
+        .clone()
+        .filter(|d| keep && org.folder(d).is_some() && !org.is_game_dir(d))
+        .or_else(|| jondisclip_core::library::parse_name(&file_name).map(|p| p.0))
+        .or(parent)
+        .unwrap_or_else(|| "Clips".into())
+}
+
+/// A whole-clip copy of `path` that Save to Drive made earlier (same name,
+/// size and modified time), under its title's name or its own. Used to mark
+/// copies made before marks were recorded.
+pub(crate) fn existing_drive_copy(
+    drive: &std::path::Path,
+    save: &std::path::Path,
+    path: &std::path::Path,
+    keep: bool,
+    title: Option<&str>,
+    org: &jondisclip_core::organize::Organize,
+) -> Option<PathBuf> {
+    use jondisclip_core::drive::{Target, target};
+    let src = stamp(path)?;
+    let game = drive_subfolder(save, path, keep, org);
+    let own = path.file_name()?.to_string_lossy().into_owned();
+    let titled = title
+        .and_then(export::title_to_file_stem)
+        .map(|t| format!("{t}.mp4"));
+    titled.into_iter().chain([own]).find_map(|name| {
+        match target(drive, &game, &name, Some(src), &stamp) {
+            Target::AlreadyThere(p) => Some(p),
+            Target::Write(_) => None,
+        }
+    })
+}
+
 fn stamp(p: &std::path::Path) -> Option<jondisclip_core::drive::Stamp> {
     std::fs::metadata(p)
         .ok()
@@ -721,25 +773,12 @@ async fn drive_save(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        // Drive keeps the clip's folder: its user folder (path, e.g.
-        // `Edited\DayZ`) if it's in one, else its game.
-        let parent = path
-            .parent()
-            .and_then(|p| p.strip_prefix(&save).ok())
-            .map(|r| r.to_string_lossy().into_owned())
-            .filter(|r| !r.is_empty());
         let org = jondisclip_core::organize::Store::new(
             paths::local_dir().join("library").join("organize.json"),
         )
         .load()
         .unwrap_or_default();
-        let keep = settings.drive_keep_folders;
-        let game = parent
-            .clone()
-            .filter(|d| keep && org.folder(d).is_some() && !org.is_game_dir(d))
-            .or_else(|| jondisclip_core::library::parse_name(&file_name).map(|p| p.0))
-            .or(parent)
-            .unwrap_or_else(|| "Clips".into());
+        let game = drive_subfolder(&save, &path, settings.drive_keep_folders, &org);
         // A titled clip is saved under its title, like Share to Discord:
         // the Drive copy is what gets kept and shared.
         let titled = title.as_deref().and_then(export::title_to_file_stem);
