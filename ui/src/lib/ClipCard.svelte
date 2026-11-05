@@ -115,7 +115,7 @@
   class:lifted
   {tabindex}
   aria-pressed={selected}
-  aria-label="{clip.title ? `${clip.title}, ` : ''}{clip.game}, {timeOfDay(clip.recorded)}, {clip.probe ? clock(clip.probe.duration) : 'unreadable'}{clip.edit ? ', edit' : ''}"
+  aria-label="{clip.title ? `${clip.title}, ` : ''}{clip.game}, {timeOfDay(clip.recorded)}, {clip.probe ? clock(clip.probe.duration) : 'unreadable'}{clip.edit ? ', edit' : ''}{clip.in_drive ? ', in Google Drive' : ''}"
   onclick={(e) => !renaming && onselect(e)}
   ondblclick={() => !renaming && onopen()}
   oncontextmenu={(e) => {
@@ -141,6 +141,14 @@
     {/if}
     {#if clip.probe}<span class="dur">{clock(clip.probe.duration)}</span>{/if}
     {#if clip.edit}<span class="tag">Edit</span>{/if}
+    {#if clip.in_drive}
+      <span class="drive" title="In your Google Drive folder · {clip.in_drive}">
+        <svg viewBox="0 0 20 16" width="16" height="13" aria-hidden="true">
+          <path d="M5.5 14h9.2a4 4 0 0 0 .5-7.97A5.5 5.5 0 0 0 4.7 7.1 3.5 3.5 0 0 0 5.5 14Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+          <path d="m7.6 9.6 1.9 1.9 3.4-3.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </span>
+    {/if}
   </div>
   <div class="meta">
     <div class="l1">
@@ -297,6 +305,18 @@
     color: var(--on-danger);
     font-size: var(--fs-xs);
     font-weight: var(--fw-strong);
+  }
+  /* Like the duration chip, so it reads on any thumbnail in any theme. */
+  .drive {
+    position: absolute;
+    right: var(--s2);
+    top: var(--s2);
+    display: grid;
+    place-items: center;
+    padding: 2px 5px;
+    border-radius: var(--radius-sm);
+    background: rgb(0 0 0 / 0.72);
+    color: #fff;
   }
   .meta {
     padding: var(--s2) var(--s3) var(--s3);

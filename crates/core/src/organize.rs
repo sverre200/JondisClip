@@ -55,7 +55,14 @@ pub struct Organize {
     pub game_dirs: BTreeSet<String>,
     #[serde(default)]
     pub pending: Vec<Pending>,
+    /// Clip key → its copies in the Google Drive folder (ADR-0013), written
+    /// by Save to Drive. Shown as "In Google Drive" while a copy exists.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub drive: BTreeMap<String, Vec<String>>,
 }
+
+/// Most Drive copies remembered per clip (oldest dropped first).
+pub const MAX_DRIVE_COPIES: usize = 8;
 
 #[derive(Debug, PartialEq)]
 pub enum OrgError {
@@ -388,6 +395,42 @@ impl Organize {
         Ok(())
     }
 
+    /// Remembers that clip `key` has a copy at `path` in the Drive folder.
+    pub fn mark_in_drive(&mut self, key: &str, path: &str) -> Result<(), OrgError> {
+        if !is_key(key) || path.trim().is_empty() {
+            return Err(OrgError::Invalid("bad clip key or path".into()));
+        }
+        let copies = self.drive.entry(key.into()).or_default();
+        copies.retain(|p| !p.eq_ignore_ascii_case(path));
+        copies.push(path.into());
+        if copies.len() > MAX_DRIVE_COPIES {
+            copies.remove(0);
+        }
+        Ok(())
+    }
+
+    /// The first remembered Drive copy of `key` that `exists`.
+    pub fn drive_copy(&self, key: &str, exists: &dyn Fn(&Path) -> bool) -> Option<&str> {
+        self.drive
+            .get(key)?
+            .iter()
+            .rev()
+            .find(|p| exists(Path::new(p)))
+            .map(String::as_str)
+    }
+
+    /// Forgets Drive copies that are gone. Call it only while the Drive
+    /// folder is reachable: when Drive isn't running everything looks gone.
+    /// Returns true if anything changed.
+    pub fn prune_drive(&mut self, exists: &dyn Fn(&Path) -> bool) -> bool {
+        let before = self.drive.clone();
+        for copies in self.drive.values_mut() {
+            copies.retain(|p| exists(Path::new(p)));
+        }
+        self.drive.retain(|_, v| !v.is_empty());
+        before != self.drive
+    }
+
     /// Drops the pending move for `folder` (the user chose to leave the
     /// clips where they are, or they've been moved).
     pub fn resolve_pending(&mut self, folder: &str) {
@@ -506,6 +549,10 @@ impl Organize {
         }
         self.titles.retain(|k, v| is_key(k) && !clean(v).is_empty());
         self.pending.retain(|p| !p.keys.is_empty());
+        self.drive.retain(|k, v| {
+            v.retain(|p| !p.trim().is_empty());
+            is_key(k) && !v.is_empty()
+        });
         self
     }
 
@@ -929,6 +976,56 @@ mod tests {
         assert!(o.set_title(A, &"x".repeat(121)).is_err());
         o.set_title(A, "   ").unwrap();
         assert!(!o.titles.contains_key(A));
+    }
+
+    #[test]
+    fn drive_copies_are_remembered_shown_and_pruned() {
+        let mut o = Organize::new();
+        let a = r"G:\My Drive\JondisClip\DayZ\Sniper.mp4";
+        let b = r"G:\My Drive\JondisClip\DayZ\Sniper edit.mp4";
+        o.mark_in_drive(A, a).unwrap();
+        o.mark_in_drive(A, b).unwrap();
+        o.mark_in_drive(A, &a.to_uppercase()).unwrap(); // same file: no duplicate
+        assert_eq!(o.drive[A].len(), 2);
+        assert!(o.mark_in_drive("nope", a).is_err());
+        // Shown while a copy exists (newest first).
+        assert_eq!(o.drive_copy(A, &|_| true), Some(a.to_uppercase().as_str()));
+        assert_eq!(
+            o.drive_copy(A, &|p| p.ends_with("Sniper edit.mp4")),
+            Some(b)
+        );
+        assert_eq!(o.drive_copy(A, &|_| false), None);
+        assert_eq!(o.drive_copy(B, &|_| true), None);
+        // Pruning forgets the ones that are gone, and the clip once all are.
+        assert!(o.prune_drive(&|p| p.ends_with("Sniper edit.mp4")));
+        assert_eq!(o.drive[A], vec![b.to_string()]);
+        assert!(!o.prune_drive(&|_| true));
+        assert!(o.prune_drive(&|_| false));
+        assert!(o.drive.is_empty());
+        // Bounded per clip.
+        for i in 0..20 {
+            o.mark_in_drive(A, &format!(r"G:\d\{i}.mp4")).unwrap();
+        }
+        assert_eq!(o.drive[A].len(), MAX_DRIVE_COPIES);
+        assert_eq!(o.drive[A][0], r"G:\d\12.mp4");
+    }
+
+    #[test]
+    fn drive_copies_survive_a_save_and_load() {
+        let d = std::env::temp_dir().join(format!("jc-org-drive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let s = Store::new(d.join("organize.json"));
+        s.update(|o| o.mark_in_drive(A, r"G:\My Drive\JondisClip\DayZ\x.mp4"))
+            .unwrap();
+        let o = s.load().unwrap();
+        assert_eq!(
+            o.drive[A],
+            vec![r"G:\My Drive\JondisClip\DayZ\x.mp4".to_string()]
+        );
+        // A document without the field (older builds) loads with none.
+        std::fs::write(&s.path, br#"{"version":2,"folders":[]}"#).unwrap();
+        assert!(s.load().unwrap().drive.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

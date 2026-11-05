@@ -93,6 +93,8 @@ export interface Clip {
   folder?: string | null;
   /** Thumbnail cache key (content fingerprint: survives moves) */
   thumb_key: string;
+  /** Its copy in the Google Drive folder (Save to Drive), if still there. Not proof of upload. */
+  in_drive?: string | null;
 }
 
 export type FolderColor = "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "gray";
@@ -307,6 +309,8 @@ export const api = {
   clipsArrange: (folder: string, present: string[], keys: string[], before: string | null) =>
     call<void>("clips_arrange", { folder, present, keys, before }),
   clipTitle: (key: string, title: string) => call<void>("clip_title", { key, title }),
+  /** Records a Save to Drive copy, so the library marks the clip. */
+  clipDriveMark: (key: string, path: string) => call<void>("clip_drive_mark", { key, path }),
   pendingResolve: (folder: string, items: Item[], moveThem: boolean) => call<MoveResult>("pending_resolve", { folder, items, moveThem }),
   clipsDelete: (ids: string[]) => call<number>("clips_delete", { ids }),
   clipCopyFile: (id: string) => call<void>("clip_copy_file", { id }),
@@ -392,6 +396,9 @@ const mockFolders: { name: string; color: FolderColor; order: string[] }[] = [
 const mockTitles: Record<string, string> = {
   "000000000000a000": "Our Base Got Raided",
   "000000000000a001": "The Worst Grenade Ever, Thrown Straight Into Our Own Car",
+};
+const mockDrive: Record<string, string> = {
+  "000000000000a000": "G:\\My Drive\\JondisClip\\DayZ\\Our Base Got Raided.mp4",
 };
 let mockLib: Clip[] | null = null;
 const mockExportListeners = new Set<(e: ExportEvent) => void>();
@@ -570,7 +577,7 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       await new Promise((r) => setTimeout(r, 200));
       if (new URLSearchParams(location.search).has("empty")) return { root: mockState.default_save_dir, root_ok: true, clips: [], folders: [], pending: [] };
       mockLib ??= mockClips();
-      const clips = mockLib.map((c) => ({ ...c, title: mockTitles[c.key] ?? null }));
+      const clips = mockLib.map((c) => ({ ...c, title: mockTitles[c.key] ?? null, in_drive: mockDrive[c.key] ?? null }));
       return {
         root: mockState.default_save_dir,
         root_ok: true,
@@ -670,6 +677,9 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       else delete mockTitles[String(args?.key)];
       return undefined;
     }
+    case "clip_drive_mark":
+      mockDrive[String(args?.key)] = String(args?.path);
+      return undefined;
     case "pending_resolve":
       return { moved: 0, failed: [] };
     case "clips_delete":

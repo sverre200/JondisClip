@@ -66,11 +66,21 @@
     job = { state: "running", job: null, progress: 0, share: false, drive: true };
     try {
       const r = await api.driveSave(clip.id, trimStart, trimEnd, !trimmed, !plan.lossless, clip.title ?? null);
-      if (r.already || r.job === null) job = { state: "drive", path: r.output, size: clip.size, already: true };
-      else if (job.state === "running") job = { ...job, job: r.job };
+      if (r.already || r.job === null) {
+        job = { state: "drive", path: r.output, size: clip.size, already: true };
+        markInDrive(r.output);
+      } else if (job.state === "running") job = { ...job, job: r.job };
     } catch (e) {
       job = { state: "error", message: String(e) };
     }
+  }
+
+  /** Remembers the Drive copy so the library marks this clip, then refreshes it. */
+  function markInDrive(path: string) {
+    api
+      .clipDriveMark(clip.key, path)
+      .then(() => onsaved(path))
+      .catch(() => {}); // only the mark is lost; the copy itself is done
   }
 
   // What "Share to Discord" would make of the current selection.
@@ -226,6 +236,7 @@
       };
     } else if (e.kind === "done" && job.drive) {
       job = { state: "drive", path: e.path, size: e.size, already: false };
+      markInDrive(e.path);
     } else if (e.kind === "done") {
       job = { state: "done", path: e.path, size: e.size, duration: e.duration, lossless: e.video === "copy", seconds: e.seconds };
       onsaved(e.path);

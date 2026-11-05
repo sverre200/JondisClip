@@ -969,6 +969,7 @@ fn main() {
             organize::clips_arrange,
             organize::pending_resolve,
             organize::clip_title,
+            organize::clip_drive_mark,
             organize::clips_delete,
             organize::clip_copy_file
         ])

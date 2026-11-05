@@ -28,10 +28,13 @@ fn store() -> Store {
     Store::new(paths::local_dir().join("library").join("organize.json"))
 }
 
-fn root() -> PathBuf {
+fn settings() -> jondisclip_core::settings::Settings {
     let text = std::fs::read_to_string(paths::settings_file()).unwrap_or_default();
-    let (settings, _) = jondisclip_core::settings::Settings::from_toml(&text);
-    settings.save_dir_or(&paths::default_save_dir())
+    jondisclip_core::settings::Settings::from_toml(&text).0
+}
+
+fn root() -> PathBuf {
+    settings().save_dir_or(&paths::default_save_dir())
 }
 
 /// Runs `f` on a blocking thread with background IO priority, holding the lock.
@@ -68,6 +71,9 @@ pub struct ClipView {
     /// The user folder it's in (None: "Not in a folder").
     pub folder: Option<String>,
     pub title: Option<String>,
+    /// Its copy in the Google Drive folder, if Save to Drive made one that's
+    /// still there (ADR-0013). Says nothing about the upload.
+    pub in_drive: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -89,10 +95,27 @@ pub struct PendingView {
 }
 
 /// Scans, reconciles the metadata with the disk, and builds the view.
-pub fn load(root: PathBuf) -> Result<Library, String> {
+/// drive: the Google Drive folder setting (empty = off).
+pub fn load(root: PathBuf, drive: &Path) -> Result<Library, String> {
     let root_ok = root.is_dir();
     let mut lv = library::scan(root.clone());
     let mut org = store().load()?;
+    // Forget Drive copies that were deleted, but only under the current
+    // Drive folder and only while it's reachable (Drive not running would
+    // make every copy look gone).
+    if !drive.as_os_str().is_empty() && drive.is_dir() {
+        let under = drive.to_string_lossy().to_lowercase();
+        let gone =
+            |p: &Path| p.to_string_lossy().to_lowercase().starts_with(&under) && !p.is_file();
+        if org.prune_drive(&|p| !gone(p)) {
+            org = store()
+                .update(|o| {
+                    o.prune_drive(&|p| !gone(p));
+                    Ok(())
+                })?
+                .0;
+        }
+    }
     if root_ok {
         let mut by_dir: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for c in &lv.clips {
@@ -142,10 +165,12 @@ pub fn load(root: PathBuf) -> Result<Library, String> {
                     .unwrap_or_else(|| "Other".into());
             }
             let title = org.titles.get(&c.key).cloned();
+            let in_drive = org.drive_copy(&c.key, &|p| p.is_file()).map(str::to_string);
             ClipView {
                 clip: c,
                 folder,
                 title,
+                in_drive,
             }
         })
         .collect();
@@ -412,7 +437,9 @@ fn collect_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 
 #[tauri::command]
 pub async fn library_load() -> Result<Library, String> {
-    let root = root();
+    let s = settings();
+    let root = s.save_dir_or(&paths::default_save_dir());
+    let drive = s.drive_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
         library::in_background(|| {
             // Left over if the window closed mid-export (the exporter dies
@@ -423,7 +450,7 @@ pub async fn library_load() -> Result<Library, String> {
                 }
             }
             let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            load(root)
+            load(root, &drive)
         })
     })
     .await
@@ -819,6 +846,13 @@ pub async fn clips_arrange(
 #[tauri::command]
 pub async fn clip_title(key: String, title: String) -> Result<(), String> {
     blocking(move || meta(|o| o.set_title(&key, &title)).map(drop)).await
+}
+
+/// Save to Drive finished (or found the copy already there): remember it,
+/// so the library can mark the clip.
+#[tauri::command]
+pub async fn clip_drive_mark(key: String, path: String) -> Result<(), String> {
+    blocking(move || meta(|o| o.mark_in_drive(&key, &path)).map(drop)).await
 }
 
 /// The one-time question for v1 folders: move their clips in, or leave them.
