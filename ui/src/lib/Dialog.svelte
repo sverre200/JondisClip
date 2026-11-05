@@ -11,6 +11,7 @@
     input = null,
     error = null,
     children,
+    after,
     onconfirm,
     oncancel,
   }: {
@@ -21,6 +22,8 @@
     input?: { value: string; placeholder?: string; max?: number } | null;
     error?: string | null;
     children?: Snippet;
+    /** extra controls below the text field */
+    after?: Snippet;
     onconfirm: (value: string) => void;
     oncancel: () => void;
   } = $props();
@@ -80,6 +83,7 @@
         aria-invalid={!!error}
       />
     {/if}
+    {#if after}<div class="after">{@render after()}</div>{/if}
     {#if error}<p class="err" role="alert">{error}</p>{/if}
     <div class="buttons">
       <Button variant="ghost" onclick={oncancel}>Cancel</Button>
@@ -134,6 +138,9 @@
   }
   input[aria-invalid="true"] {
     border-color: var(--danger);
+  }
+  .after {
+    margin-top: var(--s3);
   }
   .err {
     margin: var(--s2) 0 0;

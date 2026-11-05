@@ -44,7 +44,7 @@
   let gridEl = $state<HTMLDivElement>();
   let menu = $state<{ x: number; y: number; items: MenuEntry[] } | null>(null);
   type DialogState =
-    | { kind: "new-folder"; moveIds: string[]; parent: string | null; error: string | null }
+    | { kind: "new-folder"; moveIds: string[]; parent: string | null; color: FolderColor; error: string | null }
     | { kind: "rename-folder"; folder: Folder; error: string | null }
     | { kind: "delete-folder"; folder: Folder; count: number; subs: number }
     | { kind: "delete-clips"; ids: string[]; label: string };
@@ -382,10 +382,16 @@
     return FOLDER_COLORS.find((c) => !used.has(c.value))?.value ?? "gray";
   }
 
-  async function createFolder(name: string, moveIds: string[], parent: string | null) {
+  /** Opens the New folder dialog; the colour starts as the parent's, or the next unused one. */
+  function newFolder(moveIds: string[], parent: string | null) {
+    const color = (parent && org.folders.find((x) => x.id === parent)?.color) || nextColor();
+    dialog = { kind: "new-folder", moveIds, parent, color, error: null };
+  }
+
+  async function createFolder(name: string, color: FolderColor, moveIds: string[], parent: string | null) {
     const before = new Set(org.folders.map((f) => f.id));
     try {
-      await api.folderCreate(name, parent ? (org.folders.find((x) => x.id === parent)?.color ?? nextColor()) : nextColor(), parent);
+      await api.folderCreate(name, color, parent);
     } catch (e) {
       if (dialog?.kind === "new-folder") dialog = { ...dialog, error: String(e) };
       return;
@@ -473,7 +479,7 @@
     const here = cs.length === 1 ? folderOf.get(cs[0]!.id)?.id : undefined;
     const items: MenuItem[] = tree.map((f) => ({ label: pathLabel(f.id), dot: f.color, checked: f.id === here, action: () => moveTo(cs, f) }));
     items.push({ label: "Not in a folder", checked: cs.length === 1 && !here, action: () => moveTo(cs, null) });
-    items.push({ label: "New folder…", action: () => (dialog = { kind: "new-folder", moveIds: cs.map((c) => c.id), parent: null, error: null }) });
+    items.push({ label: "New folder…", action: () => newFolder(cs.map((c) => c.id), null) });
     return items;
   }
 
@@ -519,7 +525,7 @@
         { label: "Open", action: () => (folderView = f.id) },
         { label: "Show in File Explorer", action: () => api.folderReveal(f.name).catch((err) => onerror(String(err))) },
         "separator",
-        { label: "New subfolder…", disabled: f.depth >= MAX_DEPTH, action: () => (dialog = { kind: "new-folder", moveIds: [], parent: f.id, error: null }) },
+        { label: "New subfolder…", disabled: f.depth >= MAX_DEPTH, action: () => newFolder([], f.id) },
         { label: "Rename…", action: () => (dialog = { kind: "rename-folder", folder: f, error: null }) },
         { label: "Move folder to", submenu: targets },
         {
@@ -734,7 +740,7 @@
     view={folderView}
     {collapsed}
     onview={(v) => (folderView = v)}
-    oncreate={() => (dialog = { kind: "new-folder", moveIds: [], parent: null, error: null })}
+    oncreate={() => newFolder([], null)}
     oncontext={folderMenu}
     onplace={placeFolder}
     ontoggle={() => (collapsed = !collapsed)}
@@ -913,9 +919,26 @@
     confirmLabel={d.moveIds.length ? "Create and move" : "Create"}
     input={{ value: "", placeholder: d.parent ? "e.g. DayZ" : "e.g. DayZ Raids", max: 60 }}
     error={d.error}
-    onconfirm={(v) => createFolder(v, d.moveIds, d.parent)}
+    onconfirm={(v) => createFolder(v, d.color, d.moveIds, d.parent)}
     oncancel={() => (dialog = null)}
-  />
+  >
+    {#snippet after()}
+      <div class="swatches" role="radiogroup" aria-label="Folder colour">
+        {#each FOLDER_COLORS as c (c.value)}
+          <button
+            type="button"
+            class="swatch"
+            role="radio"
+            aria-checked={d.color === c.value}
+            aria-label={c.label}
+            title={c.label}
+            style:--sw="var(--folder-{c.value})"
+            onclick={() => (dialog = { ...d, color: c.value })}
+          ></button>
+        {/each}
+      </div>
+    {/snippet}
+  </Dialog>
 {:else if dialog?.kind === "rename-folder"}
   {@const d = dialog}
   <Dialog title="Rename folder" confirmLabel="Rename" input={{ value: d.folder.leaf, max: 60 }} error={d.error} onconfirm={(v) => renameFolder(d.folder, v)} oncancel={() => (dialog = null)} />
@@ -1012,6 +1035,24 @@
   .ptext strong {
     color: var(--text);
     font-weight: var(--fw-strong);
+  }
+  .swatches {
+    display: flex;
+    gap: var(--s2);
+  }
+  .swatch {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: var(--sw);
+    cursor: pointer;
+  }
+  .swatch[aria-checked="true"] {
+    box-shadow:
+      0 0 0 2px var(--surface-raised),
+      0 0 0 4px var(--sw);
   }
   .notice {
     position: fixed;
