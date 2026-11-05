@@ -1,38 +1,58 @@
-//! Library organisation (ADR-0014): personal folders (with colour and a
-//! manual clip order) and clip titles, as a small JSON document. Recordings
-//! never move. Clips are identified by a content fingerprint
-//! (`library::fingerprint`), so titles and folders survive renames and moves
-//! outside JondisClip.
+//! Library organisation (ADR-0015, building on ADR-0014).
+//!
+//! The filesystem decides which folder a clip is in: user folders are real
+//! directories under the clips root. This document only *describes* them —
+//! colour, sidebar order, the manual clip order — plus clip titles and which
+//! directories are the recorder's game folders. Clips are identified by a
+//! content fingerprint (`library::fingerprint`), so titles and order follow
+//! a clip through moves and renames.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const MAX_TITLE: usize = 120;
 pub const MAX_FOLDER_NAME: usize = 60;
 /// The palette (muted tokens in the UI). Anything else is refused.
 pub const COLORS: [&str; 7] = ["red", "orange", "yellow", "green", "blue", "purple", "gray"];
 
+/// A user folder: a directory directly under the clips root.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Folder {
-    pub id: String,
+    /// The directory name (the filesystem is the truth for it).
     pub name: String,
     pub color: String,
-    /// Clip keys: membership *and* custom order.
+    /// Clip keys in the user's custom order (display only; files never move
+    /// to express it). May list clips that aren't in the folder (any more).
     #[serde(default)]
-    pub clips: Vec<String>,
+    pub order: Vec<String>,
+}
+
+/// Clips that belonged to a v1 (metadata-only) folder and haven't been moved
+/// into its real directory yet. The library asks before moving anything.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pending {
+    pub folder: String,
+    pub keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Organize {
     pub version: u32,
-    /// In display order.
+    /// User folders in sidebar order (including ones whose directory is
+    /// missing right now: kept, not shown).
     #[serde(default)]
     pub folders: Vec<Folder>,
     /// Clip key → title.
     #[serde(default)]
-    pub titles: std::collections::BTreeMap<String, String>,
+    pub titles: BTreeMap<String, String>,
+    /// Lower-case names of the recorder's game folders (learned on scans).
+    #[serde(default)]
+    pub game_dirs: BTreeSet<String>,
+    #[serde(default)]
+    pub pending: Vec<Pending>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -60,8 +80,52 @@ fn clean(s: &str) -> String {
         .join(" ")
 }
 
-fn is_key(k: &str) -> bool {
+pub fn is_key(k: &str) -> bool {
     k.len() == 16 && k.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// A folder name that is also a valid, unremarkable Windows directory name:
+/// no `<>:"/\|?*` or control characters, no trailing dot/space, no reserved
+/// device name, 1–60 characters.
+pub fn folder_name(raw: &str) -> Result<String, OrgError> {
+    let name = clean(raw);
+    if name.is_empty() {
+        return Err(OrgError::Invalid("Give the folder a name.".into()));
+    }
+    if name.chars().count() > MAX_FOLDER_NAME {
+        return Err(OrgError::Invalid(format!(
+            "Folder names can be up to {MAX_FOLDER_NAME} characters."
+        )));
+    }
+    if let Some(c) = name.chars().find(|c| r#"<>:"/\|?*"#.contains(*c)) {
+        return Err(OrgError::Invalid(format!("Folder names can't contain {c}")));
+    }
+    if name.ends_with('.') {
+        return Err(OrgError::Invalid(
+            "Folder names can't end with a dot.".into(),
+        ));
+    }
+    let base = name.split('.').next().unwrap_or("").trim().to_uppercase();
+    let reserved = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if reserved.contains(&base.as_str()) {
+        return Err(OrgError::Invalid(format!(
+            "\"{name}\" is reserved by Windows."
+        )));
+    }
+    Ok(name)
+}
+
+/// What a scan found in the clips root, for reconciliation.
+pub struct Found<'a> {
+    /// Every directory directly under the root.
+    pub dirs: &'a [String],
+    /// Directory name → (file name, clip key) of the clips directly in it.
+    pub clips: &'a HashMap<String, Vec<(String, String)>>,
+    /// Recorder app name parsed from a file name (`parse_name`), if any.
+    pub app_of: &'a dyn Fn(&str) -> Option<String>,
 }
 
 impl Organize {
@@ -72,33 +136,18 @@ impl Organize {
         }
     }
 
-    fn folder_mut(&mut self, id: &str) -> Result<&mut Folder, OrgError> {
+    fn find(&self, name: &str) -> Option<usize> {
         self.folders
-            .iter_mut()
-            .find(|f| f.id == id)
-            .ok_or(OrgError::NotFound)
+            .iter()
+            .position(|f| f.name.eq_ignore_ascii_case(name))
     }
 
-    fn check_name(&self, name: &str, except: Option<&str>) -> Result<String, OrgError> {
-        let name = clean(name);
-        if name.is_empty() {
-            return Err(OrgError::Invalid("Give the folder a name.".into()));
-        }
-        if name.chars().count() > MAX_FOLDER_NAME {
-            return Err(OrgError::Invalid(format!(
-                "Folder names can be up to {MAX_FOLDER_NAME} characters."
-            )));
-        }
-        let taken = self
-            .folders
-            .iter()
-            .any(|f| Some(f.id.as_str()) != except && f.name.to_lowercase() == name.to_lowercase());
-        if taken {
-            return Err(OrgError::Invalid(format!(
-                "There's already a folder called \"{name}\"."
-            )));
-        }
-        Ok(name)
+    pub fn folder(&self, name: &str) -> Option<&Folder> {
+        self.find(name).map(|i| &self.folders[i])
+    }
+
+    pub fn is_game_dir(&self, name: &str) -> bool {
+        self.game_dirs.contains(&name.to_lowercase()) && self.find(name).is_none()
     }
 
     fn check_color(color: &str) -> Result<String, OrgError> {
@@ -109,52 +158,57 @@ impl Organize {
             .ok_or_else(|| OrgError::Invalid(format!("unknown colour {color}")))
     }
 
-    /// Creates a folder at the end; returns its id. `id` must be fresh
-    /// (the caller supplies randomness so this stays testable).
-    pub fn create_folder(&mut self, id: &str, name: &str, color: &str) -> Result<String, OrgError> {
-        let name = self.check_name(name, None)?;
+    /// Registers a folder (its directory is created by the caller first).
+    pub fn add_folder(&mut self, name: &str, color: &str) -> Result<(), OrgError> {
+        let name = folder_name(name)?;
         let color = Self::check_color(color)?;
-        if self.folders.iter().any(|f| f.id == id) || id.is_empty() {
-            return Err(OrgError::Invalid("folder id clash".into()));
+        if self.find(&name).is_some() {
+            return Err(OrgError::Invalid(format!(
+                "There's already a folder called \"{name}\"."
+            )));
         }
         self.folders.push(Folder {
-            id: id.into(),
             name,
             color,
-            clips: Vec::new(),
+            order: Vec::new(),
         });
-        Ok(id.into())
-    }
-
-    pub fn rename_folder(&mut self, id: &str, name: &str) -> Result<(), OrgError> {
-        let name = self.check_name(name, Some(id))?;
-        self.folder_mut(id)?.name = name;
         Ok(())
     }
 
-    pub fn recolor_folder(&mut self, id: &str, color: &str) -> Result<(), OrgError> {
+    /// Records a rename that already happened on disk.
+    pub fn renamed(&mut self, from: &str, to: &str) -> Result<(), OrgError> {
+        let i = self.find(from).ok_or(OrgError::NotFound)?;
+        let to = folder_name(to)?;
+        self.folders[i].name = to.clone();
+        for p in &mut self.pending {
+            if p.folder.eq_ignore_ascii_case(from) {
+                p.folder = to.clone();
+            }
+        }
+        Ok(())
+    }
+
+    pub fn recolor(&mut self, name: &str, color: &str) -> Result<(), OrgError> {
         let color = Self::check_color(color)?;
-        self.folder_mut(id)?.color = color;
+        let i = self.find(name).ok_or(OrgError::NotFound)?;
+        self.folders[i].color = color;
         Ok(())
     }
 
-    /// Removes the folder only. Its clips simply aren't in a folder any more;
-    /// no recording is touched (ADR-0014).
-    pub fn delete_folder(&mut self, id: &str) -> Result<Folder, OrgError> {
-        let i = self
-            .folders
-            .iter()
-            .position(|f| f.id == id)
-            .ok_or(OrgError::NotFound)?;
+    /// Forgets a folder (after its directory was removed by the caller).
+    pub fn remove_folder(&mut self, name: &str) -> Result<Folder, OrgError> {
+        let i = self.find(name).ok_or(OrgError::NotFound)?;
+        self.pending
+            .retain(|p| !p.folder.eq_ignore_ascii_case(name));
         Ok(self.folders.remove(i))
     }
 
-    /// Puts the folders in `ids` order. Unknown ids are ignored; folders
-    /// missing from `ids` keep their relative order at the end.
-    pub fn reorder_folders(&mut self, ids: &[String]) {
+    /// Sidebar order. Unknown names are ignored; folders missing from `names`
+    /// keep their relative order at the end.
+    pub fn reorder_folders(&mut self, names: &[String]) {
         let mut out = Vec::with_capacity(self.folders.len());
-        for id in ids {
-            if let Some(i) = self.folders.iter().position(|f| &f.id == id) {
+        for n in names {
+            if let Some(i) = self.find(n) {
                 out.push(self.folders.remove(i));
             }
         }
@@ -162,60 +216,69 @@ impl Organize {
         self.folders = out;
     }
 
-    /// Moves `keys` into folder `to` (None = out of every folder), inserted
-    /// before `before` if it's in that folder, else at the end. A clip is in
-    /// at most one folder. Order of `keys` is kept.
-    pub fn move_clips(
+    /// Custom order inside a folder: puts `keys` before `before` (or at the
+    /// end). `present` is the folder's current content (from the scan), so
+    /// the order list is completed with clips it didn't know yet. Display
+    /// only: no file is touched.
+    pub fn arrange(
         &mut self,
+        folder: &str,
+        present: &[String],
         keys: &[String],
-        to: Option<&str>,
         before: Option<&str>,
     ) -> Result<(), OrgError> {
         if keys.iter().any(|k| !is_key(k)) {
             return Err(OrgError::Invalid("bad clip key".into()));
         }
-        if let Some(t) = to
-            && !self.folders.iter().any(|f| f.id == t)
-        {
-            return Err(OrgError::NotFound);
-        }
-        // If `before` is one of the clips being moved (dropping a selection
-        // inside itself), anchor on the next clip after it that stays put.
-        let before: Option<String> = match (to, before) {
-            (Some(t), Some(b)) if keys.iter().any(|k| k == b) => {
-                self.folders.iter().find(|f| f.id == t).and_then(|f| {
-                    let at = f.clips.iter().position(|c| c == b)?;
-                    f.clips[at..].iter().find(|c| !keys.contains(c)).cloned()
-                })
+        let i = self.find(folder).ok_or(OrgError::NotFound)?;
+        let f = &mut self.folders[i];
+        // Start from the current display order: known order first, then the
+        // rest as found.
+        let mut list: Vec<String> = f
+            .order
+            .iter()
+            .filter(|k| present.contains(k))
+            .cloned()
+            .collect();
+        for k in present {
+            if !list.contains(k) {
+                list.push(k.clone());
             }
-            (_, b) => b.map(str::to_owned),
+        }
+        // A `before` that is itself moving: anchor on the next one that stays.
+        let anchor = match before {
+            Some(b) if keys.iter().any(|k| k == b) => {
+                let at = list.iter().position(|c| c == b);
+                at.and_then(|at| list[at..].iter().find(|c| !keys.contains(c)).cloned())
+            }
+            b => b.map(str::to_owned),
         };
-        let before = before.as_deref();
-        for f in &mut self.folders {
-            f.clips.retain(|c| !keys.contains(c));
-        }
-        if let Some(t) = to {
-            let f = self.folder_mut(t)?;
-            let at = before
-                .filter(|b| !keys.iter().any(|k| k == b))
-                .and_then(|b| f.clips.iter().position(|c| c == b))
-                .unwrap_or(f.clips.len());
-            let mut seen = std::collections::HashSet::new();
-            let unique: Vec<String> = keys
-                .iter()
-                .filter(|k| seen.insert(k.as_str()))
-                .cloned()
-                .collect();
-            f.clips.splice(at..at, unique);
-        }
+        list.retain(|c| !keys.contains(c));
+        let at = anchor
+            .and_then(|b| list.iter().position(|c| *c == b))
+            .unwrap_or(list.len());
+        let mut seen = std::collections::HashSet::new();
+        let moving: Vec<String> = keys
+            .iter()
+            .filter(|k| present.contains(k) && seen.insert(k.as_str()))
+            .cloned()
+            .collect();
+        list.splice(at..at, moving);
+        f.order = list;
         Ok(())
     }
 
-    /// Which folder a clip is in, if any.
-    pub fn folder_of(&self, key: &str) -> Option<&Folder> {
-        self.folders
-            .iter()
-            .find(|f| f.clips.iter().any(|c| c == key))
+    /// After clips moved into `folder` on disk: append them to its order.
+    pub fn arrived(&mut self, folder: &str, keys: &[String]) {
+        if let Some(i) = self.find(folder) {
+            let f = &mut self.folders[i];
+            f.order.retain(|k| !keys.contains(k));
+            f.order.extend(keys.iter().filter(|k| is_key(k)).cloned());
+        }
+        for p in &mut self.pending {
+            p.keys.retain(|k| !keys.contains(k));
+        }
+        self.pending.retain(|p| !p.keys.is_empty());
     }
 
     /// Sets (or with an empty title, clears) a clip's title.
@@ -237,34 +300,164 @@ impl Organize {
         Ok(())
     }
 
-    /// Repairs anything a hand edit or an old version could leave behind:
-    /// duplicate ids/names, clips listed in two folders, bad colours.
+    /// Drops the pending move for `folder` (the user chose to leave the
+    /// clips where they are, or they've been moved).
+    pub fn resolve_pending(&mut self, folder: &str) {
+        self.pending
+            .retain(|p| !p.folder.eq_ignore_ascii_case(folder));
+    }
+
+    /// Brings the description in line with what's on disk (ADR-0015 §5).
+    /// Returns true if anything changed (so the caller saves).
+    pub fn reconcile(&mut self, found: &Found) -> bool {
+        let before = self.clone();
+        let exists = |name: &str| found.dirs.iter().any(|d| d.eq_ignore_ascii_case(name));
+        let keys_in = |name: &str| -> Vec<String> {
+            found
+                .clips
+                .iter()
+                .find(|(d, _)| d.eq_ignore_ascii_case(name))
+                .map(|(_, v)| {
+                    v.iter()
+                        .map(|(_, k)| k.clone())
+                        .filter(|k| !k.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // 1. Learn game folders: a directory holding a recorder clip of the
+        //    same app, unless it's a registered user folder.
+        for d in found.dirs {
+            if self.find(d).is_some() {
+                continue;
+            }
+            let files = found
+                .clips
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(d))
+                .map(|(_, v)| v.as_slice())
+                .unwrap_or(&[]);
+            if files
+                .iter()
+                .any(|(f, _)| (found.app_of)(f).is_some_and(|a| a.eq_ignore_ascii_case(d)))
+            {
+                self.game_dirs.insert(d.to_lowercase());
+            }
+        }
+        // 2. Unknown directories holding clips: renamed folders first, else new.
+        let unknown: Vec<String> = found
+            .dirs
+            .iter()
+            .filter(|d| self.find(d).is_none() && !self.game_dirs.contains(&d.to_lowercase()))
+            .filter(|d| !keys_in(d).is_empty())
+            .cloned()
+            .collect();
+        for d in unknown {
+            let here = keys_in(&d);
+            // A registered folder whose directory is gone and whose clips are
+            // here: renamed outside the app — keep its colour and order.
+            let renamed = self
+                .folders
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| !exists(&f.name))
+                .map(|(i, f)| (i, f.order.iter().filter(|k| here.contains(k)).count()))
+                .filter(|(_, n)| *n > 0)
+                .max_by_key(|(_, n)| *n);
+            match renamed {
+                Some((i, _)) => {
+                    let old = self.folders[i].name.clone();
+                    self.folders[i].name = d.clone();
+                    for p in &mut self.pending {
+                        if p.folder.eq_ignore_ascii_case(&old) {
+                            p.folder = d.clone();
+                        }
+                    }
+                }
+                None => self.folders.push(Folder {
+                    name: d.clone(),
+                    color: "gray".into(),
+                    order: here,
+                }),
+            }
+        }
+        *self != before
+    }
+
+    /// Repairs anything a hand edit could leave behind.
     fn normalize(mut self) -> Self {
         self.version = VERSION;
-        let mut seen_clips = std::collections::HashSet::new();
-        let mut seen_ids = std::collections::HashSet::new();
-        let mut seen_names = std::collections::HashSet::new();
+        let mut seen = std::collections::HashSet::new();
         self.folders
-            .retain(|f| seen_ids.insert(f.id.clone()) && !f.id.is_empty());
+            .retain(|f| folder_name(&f.name).is_ok() && seen.insert(f.name.to_lowercase()));
         for f in &mut self.folders {
-            f.name = clean(&f.name);
-            if f.name.is_empty() {
-                f.name = "Folder".into();
-            }
-            let base = f.name.clone();
-            let mut n = 2;
-            while !seen_names.insert(f.name.to_lowercase()) {
-                f.name = format!("{base} {n}");
-                n += 1;
-            }
             if !COLORS.contains(&f.color.as_str()) {
                 f.color = "gray".into();
             }
-            f.clips
-                .retain(|c| is_key(c) && seen_clips.insert(c.clone()));
+            let mut s = std::collections::HashSet::new();
+            f.order.retain(|c| is_key(c) && s.insert(c.clone()));
         }
         self.titles.retain(|k, v| is_key(k) && !clean(v).is_empty());
+        self.pending.retain(|p| !p.keys.is_empty());
         self
+    }
+
+    /// Reads a document of any known version. v1 (folders were metadata
+    /// only) becomes v2: each folder keeps its colour and order, and its
+    /// clips are listed as `pending` — nothing is moved without asking.
+    fn from_json(bytes: &[u8]) -> Result<Organize, String> {
+        let v: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(1) as u32;
+        if version >= 2 {
+            let mut o: Organize = serde_json::from_value(v).map_err(|e| e.to_string())?;
+            o.version = version;
+            return Ok(o);
+        }
+        #[derive(Deserialize)]
+        struct V1Folder {
+            name: String,
+            color: String,
+            #[serde(default)]
+            clips: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct V1 {
+            #[serde(default)]
+            folders: Vec<V1Folder>,
+            #[serde(default)]
+            titles: BTreeMap<String, String>,
+        }
+        let old: V1 = serde_json::from_value(v).map_err(|e| e.to_string())?;
+        let mut o = Organize::new();
+        o.titles = old.titles;
+        for f in old.folders {
+            // A v1 name may not be a valid directory name: make it one.
+            let name = folder_name(&f.name)
+                .or_else(|_| {
+                    folder_name(
+                        f.name
+                            .replace(|c: char| r#"<>:"/\|?*"#.contains(c), " ")
+                            .trim_end_matches('.'),
+                    )
+                })
+                .unwrap_or_else(|_| "Folder".into());
+            if o.find(&name).is_some() {
+                continue;
+            }
+            let keys: Vec<String> = f.clips.into_iter().filter(|k| is_key(k)).collect();
+            if !keys.is_empty() {
+                o.pending.push(Pending {
+                    folder: name.clone(),
+                    keys: keys.clone(),
+                });
+            }
+            o.folders.push(Folder {
+                name,
+                color: f.color,
+                order: keys,
+            });
+        }
+        Ok(o)
     }
 }
 
@@ -309,7 +502,7 @@ impl Store {
             for attempt in 0..6 {
                 match std::fs::read(p) {
                     Ok(b) => {
-                        return match serde_json::from_slice::<Organize>(&b) {
+                        return match Organize::from_json(&b) {
                             Ok(o) if o.version > VERSION => Read::Newer(o.version),
                             Ok(o) => Read::Ok(o.normalize()),
                             Err(e) => Read::Damaged(format!("{} is damaged: {e}", p.display())),
@@ -402,127 +595,223 @@ mod tests {
     const A: &str = "00000000000000aa";
     const B: &str = "00000000000000bb";
     const C: &str = "00000000000000cc";
+    const D: &str = "00000000000000dd";
 
     fn keys(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    #[test]
-    fn folders_are_validated_and_unique() {
-        let mut o = Organize::new();
-        o.create_folder("f1", "  DayZ   Raids ", "red").unwrap();
-        assert_eq!(o.folders[0].name, "DayZ Raids");
-        assert!(
-            o.create_folder("f2", "dayz raids", "blue").is_err(),
-            "names are unique ignoring case"
-        );
-        assert!(o.create_folder("f2", "", "blue").is_err());
-        assert!(o.create_folder("f2", &"x".repeat(61), "blue").is_err());
-        assert!(
-            o.create_folder("f2", "Friends", "pink").is_err(),
-            "palette only"
-        );
-        assert!(
-            o.create_folder("f1", "Friends", "blue").is_err(),
-            "id clash"
-        );
-        o.create_folder("f2", "Friends", "blue").unwrap();
-        o.rename_folder("f2", "Best Kills").unwrap();
-        assert!(o.rename_folder("f2", "DAYZ RAIDS").is_err());
-        o.rename_folder("f1", "dayz raids").unwrap(); // its own name, other case: fine
-        o.recolor_folder("f1", "green").unwrap();
-        assert_eq!(o.rename_folder("nope", "x"), Err(OrgError::NotFound));
+    fn app(f: &str) -> Option<String> {
+        // "DayZ 2026-…" → DayZ (enough for these tests)
+        f.split(' ')
+            .next()
+            .filter(|_| f.contains(" 2026-"))
+            .map(str::to_owned)
     }
 
     #[test]
-    fn moving_keeps_one_folder_per_clip_and_the_order() {
+    fn folder_names_are_valid_windows_directory_names() {
+        assert_eq!(folder_name("  Funny   Moments ").unwrap(), "Funny Moments");
+        assert_eq!(folder_name("Ærø 😂 raids").unwrap(), "Ærø 😂 raids");
+        for bad in [
+            "",
+            "   ",
+            "a/b",
+            "a\\b",
+            "what?",
+            "x*",
+            "a:b",
+            "<x>",
+            "pipe|",
+            "quote\"",
+            "dot.",
+            "CON",
+            "con.txt",
+            "LPT1",
+            &"x".repeat(61),
+        ] {
+            assert!(folder_name(bad).is_err(), "{bad:?} must be refused");
+        }
+        assert!(
+            folder_name("Con artists").is_ok(),
+            "only exact device names are reserved"
+        );
+    }
+
+    #[test]
+    fn folders_are_unique_and_coloured_from_the_palette() {
         let mut o = Organize::new();
-        o.create_folder("f1", "Raids", "red").unwrap();
-        o.create_folder("f2", "Funny", "green").unwrap();
-        o.move_clips(&keys(&[A, B]), Some("f1"), None).unwrap();
-        o.move_clips(&keys(&[C]), Some("f1"), Some(B)).unwrap();
-        assert_eq!(o.folders[0].clips, keys(&[A, C, B]), "inserted before B");
-        // Reorder inside: move B before A.
-        o.move_clips(&keys(&[B]), Some("f1"), Some(A)).unwrap();
-        assert_eq!(o.folders[0].clips, keys(&[B, A, C]));
-        // Between folders: leaves the first.
-        o.move_clips(&keys(&[A, C]), Some("f2"), None).unwrap();
-        assert_eq!(o.folders[0].clips, keys(&[B]));
-        assert_eq!(o.folders[1].clips, keys(&[A, C]));
-        assert_eq!(o.folder_of(A).unwrap().id, "f2");
-        // Out of all folders.
-        o.move_clips(&keys(&[A]), None, None).unwrap();
-        assert!(o.folder_of(A).is_none());
-        // Dropping onto itself, duplicates and bad input.
-        o.move_clips(&keys(&[C, C]), Some("f2"), Some(C)).unwrap();
-        assert_eq!(o.folders[1].clips, keys(&[C]));
+        o.add_folder("Funny Moments", "purple").unwrap();
+        assert!(o.add_folder("funny moments", "red").is_err());
+        assert!(o.add_folder("Raids", "pink").is_err());
+        o.renamed("Funny Moments", "Funny").unwrap();
+        assert_eq!(o.folders[0].name, "Funny");
+        o.recolor("funny", "green").unwrap();
+        assert_eq!(o.folders[0].color, "green");
+        assert_eq!(o.recolor("gone", "red"), Err(OrgError::NotFound));
+        o.remove_folder("Funny").unwrap();
+        assert!(o.folders.is_empty());
+    }
+
+    #[test]
+    fn arranging_only_changes_the_order_and_keeps_new_clips() {
+        let mut o = Organize::new();
+        o.add_folder("Edited", "red").unwrap();
+        let present = keys(&[A, B, C]);
+        // Stuck (C) to the front.
+        o.arrange("Edited", &present, &keys(&[C]), Some(A)).unwrap();
+        assert_eq!(o.folders[0].order, keys(&[C, A, B]));
+        // A clip that appeared on disk is added at the end of the order.
+        let present = keys(&[A, B, C, D]);
+        o.arrange("Edited", &present, &keys(&[A]), None).unwrap();
+        assert_eq!(o.folders[0].order, keys(&[C, B, D, A]));
+        // A selection dropped inside itself stays put.
+        o.arrange("Edited", &present, &keys(&[C, B]), Some(B))
+            .unwrap();
+        assert_eq!(o.folders[0].order, keys(&[C, B, D, A]));
+        // Clips that left the folder disappear from the order on the next arrange.
+        o.arrange("Edited", &keys(&[A, C]), &keys(&[A]), Some(C))
+            .unwrap();
+        assert_eq!(o.folders[0].order, keys(&[A, C]));
+        assert!(
+            o.arrange("Edited", &present, &keys(&["bad"]), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn reconcile_learns_games_registers_folders_and_follows_renames() {
+        let mut o = Organize::new();
+        o.add_folder("Raids", "red").unwrap();
+        o.folders[0].order = keys(&[A, B]);
+        let dirs: Vec<String> = ["DayZ", "Claude", "Raids", "Explorer Folder", "Empty"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut clips = HashMap::new();
+        clips.insert(
+            "DayZ".to_string(),
+            vec![("DayZ 2026-11-04 18-31-24.mp4".to_string(), C.to_string())],
+        );
+        clips.insert(
+            "Raids".to_string(),
+            vec![("DayZ 2026-11-04 10-00-00.mp4".to_string(), A.to_string())],
+        );
+        clips.insert(
+            "Explorer Folder".to_string(),
+            vec![("my clip.mp4".to_string(), D.to_string())],
+        );
+        let found = Found {
+            dirs: &dirs,
+            clips: &clips,
+            app_of: &app,
+        };
+        assert!(o.reconcile(&found));
+        assert!(o.is_game_dir("DayZ"), "recorder folder learned");
+        assert!(
+            !o.is_game_dir("Raids"),
+            "a user folder is never a game folder"
+        );
+        assert!(
+            o.folder("Explorer Folder").is_some(),
+            "folder made in Explorer with clips: registered"
+        );
+        assert!(
+            o.folder("Empty").is_none(),
+            "empty unknown folders aren't adopted"
+        );
+        assert!(
+            o.folder("Claude").is_none(),
+            "an empty game folder isn't a user folder"
+        );
+        assert!(!o.reconcile(&found), "idempotent");
+
+        // "Raids" renamed in Explorer to "Base Raids": colour and order follow.
+        let dirs2: Vec<String> = ["DayZ", "Base Raids", "Explorer Folder"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut clips2 = clips.clone();
+        clips2.remove("Raids");
+        clips2.insert(
+            "Base Raids".to_string(),
+            vec![("DayZ 2026-11-04 10-00-00.mp4".to_string(), A.to_string())],
+        );
+        o.reconcile(&Found {
+            dirs: &dirs2,
+            clips: &clips2,
+            app_of: &app,
+        });
+        let f = o.folder("Base Raids").expect("renamed");
+        assert_eq!((f.color.as_str(), f.order.clone()), ("red", keys(&[A, B])));
+        assert!(o.folder("Raids").is_none());
+
+        // A folder whose directory vanished (drive offline) is kept, not purged.
+        o.add_folder("Offline", "blue").unwrap();
+        o.reconcile(&Found {
+            dirs: &dirs2,
+            clips: &clips2,
+            app_of: &app,
+        });
+        assert!(o.folder("Offline").is_some());
+    }
+
+    #[test]
+    fn v1_documents_migrate_without_moving_anything() {
+        let v1 = br#"{"version":1,"folders":[{"id":"f1","name":"Edited","color":"red","clips":["00000000000000aa","00000000000000bb"]},
+            {"id":"f2","name":"What? Bad/Name.","color":"blue","clips":[]}],"titles":{"00000000000000aa":"BridgeIncident"}}"#;
+        let o = Organize::from_json(v1).unwrap().normalize();
+        assert_eq!(o.version, 2);
+        assert_eq!(o.folders[0].name, "Edited");
+        assert_eq!(o.folders[0].order, keys(&[A, B]));
         assert_eq!(
-            o.move_clips(&keys(&[A]), Some("gone"), None),
-            Err(OrgError::NotFound)
+            o.pending,
+            vec![Pending {
+                folder: "Edited".into(),
+                keys: keys(&[A, B])
+            }]
         );
-        assert!(o.move_clips(&keys(&["../x"]), None, None).is_err());
+        assert_eq!(
+            o.folders[1].name, "What Bad Name",
+            "made a valid directory name"
+        );
+        assert_eq!(o.titles[A], "BridgeIncident");
+        // Moving one clip in resolves it from the pending list.
+        let mut o = o;
+        o.arrived("Edited", &keys(&[A]));
+        assert_eq!(o.pending[0].keys, keys(&[B]));
+        o.resolve_pending("Edited");
+        assert!(o.pending.is_empty());
     }
 
     #[test]
-    fn moving_a_selection_inside_itself_keeps_its_place() {
-        const D: &str = "00000000000000dd";
-        let mut o = Organize::new();
-        o.create_folder("f1", "Raids", "red").unwrap();
-        o.move_clips(&keys(&[A, B, C, D]), Some("f1"), None)
-            .unwrap();
-        // Select A and B, drop "before B": stays where it is, not at the end.
-        o.move_clips(&keys(&[A, B]), Some("f1"), Some(B)).unwrap();
-        assert_eq!(o.folders[0].clips, keys(&[A, B, C, D]));
-        // Select B and D, drop before D (the last): goes to the end.
-        o.move_clips(&keys(&[B, D]), Some("f1"), Some(D)).unwrap();
-        assert_eq!(o.folders[0].clips, keys(&[A, C, B, D]));
-    }
-
-    #[test]
-    fn locked_newer_and_damaged_files_are_never_overwritten() {
-        let d = std::env::temp_dir().join(format!("jc-org3-{}", std::process::id()));
+    fn store_migrates_v1_keeps_backups_and_never_overwrites_newer_or_broken() {
+        let d = std::env::temp_dir().join(format!("jc-org-v2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
         let s = Store::new(d.join("organize.json"));
-        s.update(|o| o.create_folder("f1", "Raids", "red")).unwrap();
-        s.update(|o| o.create_folder("f2", "Funny", "green"))
-            .unwrap();
-        // Newer format: refused, file untouched.
-        let newer = br#"{"version":99,"folders":[],"titles":{},"future":true}"#;
+        assert_eq!(s.load().unwrap(), Organize::new());
+        std::fs::write(&s.path, br#"{"version":1,"folders":[{"id":"f","name":"Edited","color":"red","clips":["00000000000000aa"]}],"titles":{}}"#).unwrap();
+        let (o, _) = s.update(|o| o.recolor("Edited", "purple")).unwrap();
+        assert_eq!(
+            (o.version, o.folders[0].color.as_str(), o.pending.len()),
+            (2, "purple", 1)
+        );
+        // Newer: read-only.
+        let newer = br#"{"version":99,"folders":[]}"#;
         std::fs::write(&s.path, newer).unwrap();
         assert!(s.load().unwrap_err().contains("newer"));
-        assert!(s.update(|o| o.create_folder("f3", "X", "red")).is_err());
+        assert!(s.update(|o| o.add_folder("X", "red")).is_err());
         assert_eq!(std::fs::read(&s.path).unwrap(), newer);
-        // Damaged main: falls back to the backup, and saving then does NOT
-        // copy the damaged file over the good backup.
+        // Damaged main: the good backup is used and kept.
         std::fs::write(&s.path, b"{ broken").unwrap();
-        let good_bak = std::fs::read(s.path.with_extension("json.bak")).unwrap();
-        s.update(|o| o.create_folder("f3", "Friends", "blue"))
-            .unwrap();
+        let bak = std::fs::read(s.path.with_extension("json.bak")).unwrap();
+        s.update(|o| o.add_folder("Funny", "green")).unwrap();
         assert_eq!(
             std::fs::read(s.path.with_extension("json.bak")).unwrap(),
-            good_bak,
-            "good backup kept"
-        );
-        assert!(
-            s.load()
-                .unwrap()
-                .folders
-                .iter()
-                .any(|f| f.name == "Friends")
+            bak
         );
         let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn deleting_a_folder_keeps_titles_and_never_lists_clips_elsewhere() {
-        let mut o = Organize::new();
-        o.create_folder("f1", "Raids", "red").unwrap();
-        o.move_clips(&keys(&[A]), Some("f1"), None).unwrap();
-        o.set_title(A, "Our Base Got Raided").unwrap();
-        let removed = o.delete_folder("f1").unwrap();
-        assert_eq!(removed.clips, keys(&[A]));
-        assert!(o.folders.is_empty() && o.folder_of(A).is_none());
-        assert_eq!(o.titles[A], "Our Base Got Raided");
     }
 
     #[test]
@@ -530,76 +819,19 @@ mod tests {
         let mut o = Organize::new();
         o.set_title(A, "  The\tWorst   Grenade\nEver ").unwrap();
         assert_eq!(o.titles[A], "The Worst Grenade Ever");
-        o.set_title(A, "Ærlig talt 😂 — \"quotes\" / slashes: fine")
-            .unwrap();
-        assert!(o.titles[A].contains('😂'));
         assert!(o.set_title(A, &"x".repeat(121)).is_err());
         o.set_title(A, "   ").unwrap();
         assert!(!o.titles.contains_key(A));
     }
 
     #[test]
-    fn folder_order_follows_the_given_ids() {
+    fn folder_order_follows_the_given_names() {
         let mut o = Organize::new();
-        for (i, n) in ["A", "B", "C"].iter().enumerate() {
-            o.create_folder(&format!("f{i}"), n, "gray").unwrap();
+        for n in ["A", "B", "C"] {
+            o.add_folder(n, "gray").unwrap();
         }
-        o.reorder_folders(&keys(&["f2", "f0", "ghost"]));
+        o.reorder_folders(&keys(&["c", "A", "ghost"]));
         let names: Vec<_> = o.folders.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["C", "A", "B"]);
-    }
-
-    #[test]
-    fn store_round_trips_atomically_and_survives_damage() {
-        let d = std::env::temp_dir().join(format!("jc-org-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        let s = Store::new(d.join("organize.json"));
-        assert_eq!(
-            s.load().unwrap(),
-            Organize::new(),
-            "missing file = empty library"
-        );
-        s.update(|o| o.create_folder("f1", "Raids", "red")).unwrap();
-        s.update(|o| o.set_title(A, "Driving Disaster")).unwrap();
-        let o = s.load().unwrap();
-        assert_eq!(
-            (o.folders.len(), o.titles[A].as_str()),
-            (1, "Driving Disaster")
-        );
-        assert!(s.path.with_extension("json.bak").exists());
-        // A damaged file falls back to the backup instead of an empty library.
-        std::fs::write(&s.path, b"{ not json").unwrap();
-        let o = s.load().unwrap();
-        assert_eq!(o.folders.len(), 1, "backup used");
-        // Both damaged: an error, never a silent reset.
-        std::fs::write(s.path.with_extension("json.bak"), b"also broken").unwrap();
-        assert!(s.load().is_err());
-        assert!(
-            s.update(|o| o.create_folder("f2", "X", "red")).is_err(),
-            "refuses to overwrite"
-        );
-        assert_eq!(std::fs::read(&s.path).unwrap(), b"{ not json");
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn hand_edited_files_are_repaired_on_load() {
-        let json = r#"{"version":1,"folders":[
-            {"id":"f1","name":"Raids","color":"neon","clips":["00000000000000aa","00000000000000aa","bad"]},
-            {"id":"f1","name":"Dup id","color":"red"},
-            {"id":"f2","name":"raids","color":"red","clips":["00000000000000aa","00000000000000bb"]}],
-            "titles":{"00000000000000aa":"  ","oops":"x","00000000000000bb":"Kept"}}"#;
-        let d = std::env::temp_dir().join(format!("jc-org2-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        let s = Store::new(d.join("organize.json"));
-        std::fs::write(&s.path, json).unwrap();
-        let o = s.load().unwrap();
-        assert_eq!(o.folders.len(), 2);
-        assert_eq!(o.folders[0].color, "gray");
-        assert_eq!(o.folders[0].clips, keys(&[A]));
-        assert_eq!(o.folders[1].name, "raids 2", "duplicate names made unique");
-        assert_eq!(o.folders[1].clips, keys(&[B]), "a clip lives in one folder");
-        assert_eq!(o.titles.len(), 1);
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

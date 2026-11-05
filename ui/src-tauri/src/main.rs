@@ -236,27 +236,6 @@ fn initial_page() -> &'static str {
     }
 }
 
-/// Lists the clips in the save folder (reads headers only for new or changed files).
-#[tauri::command]
-async fn library_scan() -> Result<library::LibraryView, String> {
-    let (settings, _) = read_settings();
-    let root = settings.save_dir_or(&paths::default_save_dir());
-    tauri::async_runtime::spawn_blocking(move || {
-        library::in_background(|| {
-            // Left over if the window closed mid-export (the exporter dies
-            // with it). Only one window runs, so none of these is in use.
-            if !export::busy() {
-                for p in jondisclip_core::library::stale_edit_partials(&root) {
-                    let _ = std::fs::remove_file(p);
-                }
-            }
-            library::scan(root)
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())
-}
-
 /// Stores a thumbnail the page drew. Body: JPEG bytes; header `x-clip-id`.
 #[tauri::command]
 fn thumb_save(request: tauri::ipc::Request<'_>) -> Result<(), String> {
@@ -524,13 +503,22 @@ async fn drive_save(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let game = jondisclip_core::library::parse_name(&file_name)
-            .map(|p| p.0)
-            .or_else(|| {
-                path.parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-            })
+        // Drive keeps the clip's folder: its user folder if it's in one
+        // (the directory it's in), else its game.
+        let parent = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        let org = jondisclip_core::organize::Store::new(
+            paths::local_dir().join("library").join("organize.json"),
+        )
+        .load()
+        .unwrap_or_default();
+        let game = parent
+            .clone()
+            .filter(|d| org.folder(d).is_some() && !org.is_game_dir(d))
+            .or_else(|| jondisclip_core::library::parse_name(&file_name).map(|p| p.0))
+            .or(parent)
             .unwrap_or_else(|| "Clips".into());
         if whole {
             return match target(&settings.drive_dir, &game, &file_name, stamp(&path), &stamp) {
@@ -719,7 +707,7 @@ fn main() {
             open_folder,
             start_tray,
             initial_page,
-            library_scan,
+            organize::library_load,
             thumb_save,
             show_in_folder,
             open_external,
@@ -733,13 +721,14 @@ fn main() {
             drive_status,
             drive_save,
             drive_reveal,
-            organize::organize_get,
             organize::folder_create,
             organize::folder_rename,
             organize::folder_color,
             organize::folder_delete,
             organize::folders_reorder,
             organize::clips_move,
+            organize::clips_arrange,
+            organize::pending_resolve,
             organize::clip_title,
             organize::clips_delete,
             organize::clip_copy_file

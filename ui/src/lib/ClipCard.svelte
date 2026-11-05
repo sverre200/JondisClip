@@ -131,7 +131,7 @@
         <span>Can't read this clip</span>
       </div>
     {:else if ready}
-      <img src={thumbUrl(clip.id)} alt="" decoding="async" loading="lazy" draggable="false" />
+      <img src={thumbUrl(clip.thumb_key)} alt="" decoding="async" loading="lazy" draggable="false" />
     {:else}
       <div class="ph" class:loading={!failed}>
         {#if failed}

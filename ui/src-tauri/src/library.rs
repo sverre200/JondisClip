@@ -38,6 +38,15 @@ pub fn path_of(id: &str) -> Result<PathBuf, String> {
 pub struct LibraryView {
     pub root: String,
     pub clips: Vec<Clip>,
+    /// Every directory directly under the root (for folder reconciliation).
+    #[serde(skip)]
+    pub dirs: Vec<String>,
+}
+
+/// Thumbnail keys of the latest scan (content keys): the only ones saved.
+fn known_thumbs() -> &'static Mutex<std::collections::HashSet<String>> {
+    static K: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    K.get_or_init(Default::default)
 }
 
 pub fn scan(root: PathBuf) -> LibraryView {
@@ -45,15 +54,24 @@ pub fn scan(root: PathBuf) -> LibraryView {
     let mut k = known().lock().unwrap_or_else(|e| e.into_inner());
     k.clear();
     k.extend(s.clips.iter().map(|c| (c.id.clone(), c.path.clone())));
+    let mut t = known_thumbs().lock().unwrap_or_else(|e| e.into_inner());
+    t.clear();
+    t.extend(s.clips.iter().map(|c| c.thumb_key.clone()));
     LibraryView {
         root: root.display().to_string(),
         clips: s.clips,
+        dirs: s.dirs,
     }
 }
 
-/// Saves a thumbnail JPEG the page drew for clip `id`.
+/// Saves a thumbnail JPEG the page drew, under the clip's thumbnail key
+/// (its content fingerprint, so it survives moves).
 pub fn save_thumb(id: &str, jpeg: &[u8]) -> Result<(), String> {
-    if !library::is_clip_id(id) || path_of(id).is_err() {
+    let known = known_thumbs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(id);
+    if !library::is_clip_id(id) || !known {
         return Err("unknown clip".into());
     }
     // A JPEG starts with FF D8 and a thumbnail is small: refuse anything else.

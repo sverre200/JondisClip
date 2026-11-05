@@ -122,7 +122,7 @@ async function render(clip: Clip): Promise<boolean> {
     }
     const blob = await new Promise<Blob | null>((r) => c.toBlob(r, "image/jpeg", 0.82));
     if (!blob) return false;
-    await api.thumbSave(clip.id, new Uint8Array(await blob.arrayBuffer()));
+    await api.thumbSave(clip.thumb_key, new Uint8Array(await blob.arrayBuffer()));
     return true;
   } finally {
     // Release the decoder at once.

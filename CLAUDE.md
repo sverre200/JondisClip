@@ -8,6 +8,11 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
 - `crates/core`: shared settings, hotkey, paths and status.
 - `ui/` + `ui/src-tauri`: `jondisclip-ui.exe`, the clip library and settings window (Tauri 2 + Svelte 5, separate process, ADR-0008/0010). Library stage 1 (browse, thumbnails, player), stage 2 (trim editor, `crates/export` = `jondisclip-export.exe`, ADR-0011) stage 3 (Share to Discord: size-targeted file on the clipboard, ADR-0012) stage 4 (Save to Drive into the Drive for desktop folder, ADR-0013) and organisation (folders, colours, titles, drag-and-drop order, ADR-0014) are done. Next: a DayZ perf run with the library open, then Phase 3 perf benchmarks and Phase 6 hardening.
 - To drive the real window in tests, launch it with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333` and use the DevTools protocol. Synthetic mouse input doesn't reach it from the agent shell.
+- **Agent-launched processes are MSIX-virtualised.** Anything started from the Claude desktop app's shell (the tray, the window, scripts) has its `%APPDATA%`/`%LOCALAPPDATA%` writes and HKCU registry writes redirected to `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\…` and a private hive. The owner's normally started app never sees them. This happened on 2026-11-04: the "Start with Windows" Run key, the mic choice and the library folders all landed there. So:
+  - Never use an agent-launched app to change the owner's real settings or library.
+  - Treat real-window tests as writing to a sandbox copy.
+  - Hand the owner a command to run in their own PowerShell when real data must change.
+  - D:\ and C:\dev are not redirected.
 
 ## Read first
 - `docs/ARCHITECTURE.md`: components, processes, threads and data flow

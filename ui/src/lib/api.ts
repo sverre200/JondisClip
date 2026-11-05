@@ -77,8 +77,12 @@ export interface Clip {
   edit: boolean;
   /** Content fingerprint: identity for titles and folders (ADR-0014) */
   key: string;
-  /** Custom title (filled in by the library from the organize document) */
+  /** Custom title (metadata; the file name never changes for it) */
   title?: string;
+  /** The user folder it's in on disk (null: "Not in a folder") */
+  folder?: string | null;
+  /** Thumbnail cache key (content fingerprint: survives moves) */
+  thumb_key: string;
 }
 
 export type FolderColor = "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "gray";
@@ -92,18 +96,39 @@ export const FOLDER_COLORS: { value: FolderColor; label: string }[] = [
   { value: "gray", label: "Gray" },
 ];
 
+/** A user folder: a real directory under the clips root (ADR-0015). */
 export interface Folder {
+  /** = name (the directory name is the identity) */
   id: string;
   name: string;
   color: FolderColor;
-  /** clip keys, in custom order */
+  /** clip keys in custom order (complete for the folder's clips) */
   clips: string[];
+  count: number;
 }
 
-export interface Organize {
-  version: number;
+/** v1 folders whose clips haven't been moved into the real folder yet. */
+export interface PendingFolder {
+  folder: string;
+  color: FolderColor;
+  ids: string[];
+}
+
+export interface LibraryLoad {
+  view: LibraryView;
   folders: Folder[];
-  titles: Record<string, string>;
+  pending: PendingFolder[];
+  rootOk: boolean;
+}
+
+export interface MoveResult {
+  moved: number;
+  failed: string[];
+}
+
+export interface Item {
+  id: string;
+  key: string;
 }
 
 export type ExportEvent =
@@ -213,17 +238,36 @@ export const thumbUrl = (id: string) => (isDesktop ? `${CLIP_BASE}/t/${id}.jpg` 
 
 export const api = {
   initialPage: () => call<"library" | "settings">("initial_page"),
-  organizeGet: () => call<Organize>("organize_get"),
-  folderCreate: (name: string, color: FolderColor) => call<Organize>("folder_create", { name, color }),
-  folderRename: (id: string, name: string) => call<Organize>("folder_rename", { id, name }),
-  folderColor: (id: string, color: FolderColor) => call<Organize>("folder_color", { id, color }),
-  folderDelete: (id: string) => call<Organize>("folder_delete", { id }),
-  foldersReorder: (ids: string[]) => call<Organize>("folders_reorder", { ids }),
-  clipsMove: (keys: string[], to: string | null, before: string | null) => call<Organize>("clips_move", { keys, to, before }),
-  clipTitle: (key: string, title: string) => call<Organize>("clip_title", { key, title }),
+  /** Scans the clips root, reconciles folders with the disk, returns all. */
+  async libraryLoad(): Promise<LibraryLoad> {
+    const r = await call<{
+      root: string;
+      root_ok: boolean;
+      clips: Clip[];
+      folders: { name: string; color: FolderColor; count: number; order: string[] }[];
+      pending: PendingFolder[];
+    }>("library_load");
+    return {
+      view: { root: r.root, clips: r.clips.map((c) => ({ ...c, title: c.title ?? undefined })) },
+      folders: r.folders.map((f) => ({ id: f.name, name: f.name, color: f.color, clips: f.order, count: f.count })),
+      pending: r.pending,
+      rootOk: r.root_ok,
+    };
+  },
+  folderCreate: (name: string, color: FolderColor) => call<void>("folder_create", { name, color }),
+  folderRename: (name: string, to: string) => call<void>("folder_rename", { name, to }),
+  folderColor: (name: string, color: FolderColor) => call<void>("folder_color", { name, color }),
+  folderDelete: (name: string) => call<{ moved: number; failed: string[]; kept_dir: boolean }>("folder_delete", { name }),
+  foldersReorder: (names: string[]) => call<void>("folders_reorder", { names }),
+  /** Moves the files into folder `to` (null: back to their game folders). */
+  clipsMove: (items: Item[], to: string | null) => call<MoveResult>("clips_move", { items, to }),
+  /** Custom order inside a folder: metadata only, no file moves. */
+  clipsArrange: (folder: string, present: string[], keys: string[], before: string | null) =>
+    call<void>("clips_arrange", { folder, present, keys, before }),
+  clipTitle: (key: string, title: string) => call<void>("clip_title", { key, title }),
+  pendingResolve: (folder: string, items: Item[], moveThem: boolean) => call<MoveResult>("pending_resolve", { folder, items, moveThem }),
   clipsDelete: (ids: string[]) => call<number>("clips_delete", { ids }),
   clipCopyFile: (id: string) => call<void>("clip_copy_file", { id }),
-  libraryScan: () => call<LibraryView>("library_scan"),
   showInFolder: (id: string) => call<void>("show_in_folder", { id }),
   clipKeyframes: (id: string) => call<number[]>("clip_keyframes", { id }),
   exportStart: (id: string, start: number, end: number, exact: boolean) =>
@@ -294,15 +338,16 @@ export const api = {
 // ---------- browser-preview mock (never used in the desktop app) ----------
 
 const mockThumbs = new Map<string, string>();
-const mockOrg: Organize = {
-  version: 1,
-  folders: [
-    { id: "f1", name: "DayZ Raids", color: "red", clips: ["000000000000a000", "000000000000a004"] },
-    { id: "f2", name: "Funny Moments", color: "green", clips: ["000000000000a001"] },
-    { id: "f3", name: "Friends", color: "blue", clips: [] },
-  ],
-  titles: { "000000000000a000": "Our Base Got Raided", "000000000000a001": "The Worst Grenade Ever, Thrown Straight Into Our Own Car" },
+const mockFolders: { name: string; color: FolderColor; order: string[] }[] = [
+  { name: "DayZ Raids", color: "red", order: [] },
+  { name: "Funny Moments", color: "green", order: [] },
+  { name: "Friends", color: "blue", order: [] },
+];
+const mockTitles: Record<string, string> = {
+  "000000000000a000": "Our Base Got Raided",
+  "000000000000a001": "The Worst Grenade Ever, Thrown Straight Into Our Own Car",
 };
+let mockLib: Clip[] | null = null;
 const mockExportListeners = new Set<(e: ExportEvent) => void>();
 let mockExport: ReturnType<typeof setInterval> | undefined;
 
@@ -329,6 +374,8 @@ function mockClips(): Clip[] {
       thumb: false,
       edit: i === 3,
       key: (0xa000 + i).toString(16).padStart(16, "0"),
+      thumb_key: (0xa000 + i).toString(16).padStart(16, "0"),
+      folder: i === 0 || i === 4 ? "DayZ Raids" : i === 1 ? "Funny Moments" : null,
     });
   }
   return out;
@@ -459,61 +506,95 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       clearInterval(mockExport);
       mockExportListeners.forEach((f) => f({ kind: "cancelled", job: 0 }));
       return undefined;
-    case "organize_get":
-      return structuredClone(mockOrg);
+    case "library_load": {
+      await new Promise((r) => setTimeout(r, 200));
+      if (new URLSearchParams(location.search).has("empty")) return { root: mockState.default_save_dir, root_ok: true, clips: [], folders: [], pending: [] };
+      mockLib ??= mockClips();
+      const clips = mockLib.map((c) => ({ ...c, title: mockTitles[c.key] ?? null }));
+      return {
+        root: mockState.default_save_dir,
+        root_ok: true,
+        clips,
+        folders: mockFolders.map((f) => {
+          const keys = clips.filter((c) => c.folder === f.name).map((c) => c.key);
+          const order = [...f.order.filter((k) => keys.includes(k)), ...keys.filter((k) => !f.order.includes(k))];
+          return { name: f.name, color: f.color, count: keys.length, order };
+        }),
+        pending: [],
+      };
+    }
     case "folder_create": {
       const name = String(args?.name ?? "").trim();
       if (!name) throw "Give the folder a name.";
-      if (mockOrg.folders.some((f) => f.name.toLowerCase() === name.toLowerCase())) throw `There's already a folder called "${name}".`;
-      mockOrg.folders.push({ id: `f${Date.now().toString(16)}`, name, color: args?.color as FolderColor, clips: [] });
-      return structuredClone(mockOrg);
+      if (/[<>:"/\\|?*]/.test(name)) throw `Folder names can't contain ${name.match(/[<>:"/\\|?*]/)![0]}`;
+      if (mockFolders.some((f) => f.name.toLowerCase() === name.toLowerCase())) throw `There's already something called "${name}".`;
+      mockFolders.push({ name, color: args?.color as FolderColor, order: [] });
+      return undefined;
     }
     case "folder_rename": {
-      const f = mockOrg.folders.find((x) => x.id === args?.id);
-      const name = String(args?.name ?? "").trim();
-      if (!name) throw "Give the folder a name.";
-      if (f) f.name = name;
-      return structuredClone(mockOrg);
+      const f = mockFolders.find((x) => x.name === args?.name);
+      const to = String(args?.to ?? "").trim();
+      if (!to) throw "Give the folder a name.";
+      if (f) {
+        for (const c of mockLib ?? []) if (c.folder === f.name) c.folder = to;
+        f.name = to;
+      }
+      return undefined;
     }
     case "folder_color": {
-      const f = mockOrg.folders.find((x) => x.id === args?.id);
+      const f = mockFolders.find((x) => x.name === args?.name);
       if (f) f.color = args?.color as FolderColor;
-      return structuredClone(mockOrg);
+      return undefined;
     }
-    case "folder_delete":
-      mockOrg.folders = mockOrg.folders.filter((x) => x.id !== args?.id);
-      return structuredClone(mockOrg);
+    case "folder_delete": {
+      let moved = 0;
+      for (const c of mockLib ?? []) if (c.folder === args?.name) ((c.folder = null), moved++);
+      const at = mockFolders.findIndex((x) => x.name === args?.name);
+      if (at >= 0) mockFolders.splice(at, 1);
+      return { moved, failed: [], kept_dir: false };
+    }
     case "folders_reorder": {
-      const ids = args?.ids as string[];
-      mockOrg.folders.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
-      return structuredClone(mockOrg);
+      const names = args?.names as string[];
+      mockFolders.sort((a, b) => names.indexOf(a.name) - names.indexOf(b.name));
+      return undefined;
     }
     case "clips_move": {
-      const keys = args?.keys as string[];
-      for (const f of mockOrg.folders) f.clips = f.clips.filter((k) => !keys.includes(k));
-      const to = mockOrg.folders.find((x) => x.id === args?.to);
-      if (to) {
-        const before = args?.before as string | null;
-        let at = before ? to.clips.indexOf(before) : -1;
-        if (at < 0) at = to.clips.length;
-        to.clips.splice(at, 0, ...keys);
+      const items = args?.items as Item[];
+      for (const it of items) {
+        const c = mockLib?.find((x) => x.id === it.id);
+        if (c) c.folder = (args?.to as string | null) ?? null;
       }
-      return structuredClone(mockOrg);
+      const f = mockFolders.find((x) => x.name === args?.to);
+      if (f) f.order = [...f.order.filter((k) => !items.some((i) => i.key === k)), ...items.map((i) => i.key)];
+      return { moved: items.length, failed: [] };
+    }
+    case "clips_arrange": {
+      const f = mockFolders.find((x) => x.name === args?.folder);
+      if (!f) return undefined;
+      const present = args?.present as string[];
+      const keys = args?.keys as string[];
+      let list = [...f.order.filter((k) => present.includes(k)), ...present.filter((k) => !f.order.includes(k))];
+      let before = args?.before as string | null;
+      if (before && keys.includes(before)) before = list.slice(list.indexOf(before)).find((k) => !keys.includes(k)) ?? null;
+      list = list.filter((k) => !keys.includes(k));
+      const at = before ? list.indexOf(before) : list.length;
+      list.splice(at < 0 ? list.length : at, 0, ...keys);
+      f.order = list;
+      return undefined;
     }
     case "clip_title": {
       const t = String(args?.title ?? "").trim();
-      if (t) mockOrg.titles[String(args?.key)] = t;
-      else delete mockOrg.titles[String(args?.key)];
-      return structuredClone(mockOrg);
+      if (t) mockTitles[String(args?.key)] = t;
+      else delete mockTitles[String(args?.key)];
+      return undefined;
     }
+    case "pending_resolve":
+      return { moved: 0, failed: [] };
     case "clips_delete":
       return (args?.ids as string[]).length;
     case "clip_copy_file":
       return undefined;
-    case "library_scan":
-      await new Promise((r) => setTimeout(r, 300));
-      if (new URLSearchParams(location.search).has("empty")) return { root: mockState.default_save_dir, clips: [] };
-      return { root: mockState.default_save_dir, clips: mockClips() };
+
     case "tray_status":
       return structuredClone(mockState.tray);
     case "update":

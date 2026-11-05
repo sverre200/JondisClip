@@ -46,6 +46,11 @@ pub struct Clip {
     /// Content fingerprint (ADR-0014): identifies the clip for titles and
     /// folders even if it's renamed or moved outside JondisClip.
     pub key: String,
+    /// The directory directly under the clips root it's in (None: the root).
+    pub dir: Option<String>,
+    /// Thumbnail cache key: the fingerprint, so a moved clip keeps its
+    /// thumbnail (ADR-0015); the path id while the file couldn't be read.
+    pub thumb_key: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -90,6 +95,8 @@ impl Cache {
 /// Result of a scan plus how much work it did (for tests and logs).
 pub struct Scan {
     pub clips: Vec<Clip>,
+    /// Every directory directly under the root (including empty ones).
+    pub dirs: Vec<String>,
     /// Files whose headers had to be read (new or changed).
     pub probed: usize,
     pub pruned_thumbs: usize,
@@ -111,15 +118,18 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
         .unwrap_or_default();
 
     let mut files = Vec::new();
+    let mut dirs = Vec::new();
     collect(root, None, &mut files);
-    if let Ok(dirs) = std::fs::read_dir(root) {
-        for d in dirs.flatten() {
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for d in rd.flatten() {
             if d.file_type().is_ok_and(|t| t.is_dir()) {
-                let game = d.file_name().to_string_lossy().into_owned();
-                collect(&d.path(), Some(&game), &mut files);
+                let name = d.file_name().to_string_lossy().into_owned();
+                collect(&d.path(), Some(&name), &mut files);
+                dirs.push(name);
             }
         }
     }
+    dirs.sort_by_key(|d| d.to_lowercase());
 
     // Cached thumbnails, listed once (used for the flag and for pruning).
     let thumbs: HashSet<String> = std::fs::read_dir(cache.thumbs_dir())
@@ -165,6 +175,7 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let parsed = parse_name(&file_name);
+        let dir = folder_game.clone();
         let game = folder_game
             .or_else(|| parsed.as_ref().map(|p| p.0.clone()))
             .unwrap_or_else(|| "Other".into());
@@ -172,8 +183,9 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
             .map(|p| p.1)
             .unwrap_or_else(|| local_time(mtime / 1_000_000_000));
         let id = clip_id(&key, size, mtime);
-        let thumb = thumbs.contains(&format!("{id}.jpg"));
-        let edit = split_edit(file_stem(&file_name)).1.is_some();
+        let thumb_key = entry.key.clone().unwrap_or_else(|| id.clone());
+        let thumb = thumbs.contains(&format!("{thumb_key}.jpg"));
+        let edit = is_edit_name(&file_name);
         // No fingerprint (file busy): an empty key, which organising refuses
         // until a later scan can read the file.
         let clip_key = entry.key.clone().unwrap_or_default();
@@ -189,6 +201,8 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
             thumb,
             edit,
             key: clip_key,
+            dir,
+            thumb_key,
         });
         if !transient {
             fresh.insert(key, entry);
@@ -226,6 +240,7 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
     });
     Scan {
         clips,
+        dirs,
         probed,
         pruned_thumbs,
     }
@@ -260,7 +275,7 @@ fn collect(dir: &Path, game: Option<&str>, out: &mut Vec<Found>) {
 /// `<id>.jpg.tmp` files. Only touches our own cache folder, and only files
 /// named after a clip id.
 fn prune_thumbs(cache: &Cache, clips: &[Clip], thumbs: &HashSet<String>) -> usize {
-    let live: HashSet<&str> = clips.iter().map(|c| c.id.as_str()).collect();
+    let live: HashSet<&str> = clips.iter().map(|c| c.thumb_key.as_str()).collect();
     let mut n = 0;
     for name in thumbs {
         let (id, stale_tmp) = match name.strip_suffix(".jpg.tmp") {
@@ -342,19 +357,9 @@ pub fn parse_name(file_name: &str) -> Option<(String, String)> {
             .eq_ignore_ascii_case(".mp4")
             .then(|| &file_name[..n])
     })?;
-    // Edits keep the original's name plus " edit[ N]".
-    let stem = split_edit(stem).0;
-    // Drop a " (n)" duplicate suffix.
-    let stem = match stem.rsplit_once(" (") {
-        Some((s, n))
-            if n.ends_with(')')
-                && n.len() > 1
-                && n[..n.len() - 1].bytes().all(|b| b.is_ascii_digit()) =>
-        {
-            s
-        }
-        _ => stem,
-    };
+    // " (n)" from a name clash (recorder or a move), then " edit[ N]", then
+    // possibly another " (n)" from the recorder.
+    let stem = strip_dup(split_edit(strip_dup(stem)).0);
     // The stamp is the last 19 bytes: "YYYY-MM-DD HH-MM-SS" (ASCII).
     let n = stem.len().checked_sub(19)?;
     let (app, stamp) = (stem.get(..n)?, stem.get(n..)?);
@@ -393,6 +398,49 @@ fn file_stem(file_name: &str) -> &str {
             &file_name[..n]
         }
         _ => file_name,
+    }
+}
+
+/// Drops one " (n)" duplicate suffix: `"X (2)"` → `"X"`.
+pub fn strip_dup(stem: &str) -> &str {
+    match stem.rsplit_once(" (") {
+        Some((s, n))
+            if n.ends_with(')')
+                && n.len() > 1
+                && n[..n.len() - 1].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            s
+        }
+        _ => stem,
+    }
+}
+
+/// Made by the editor? (`… edit.mp4`, `… edit 2.mp4`, also after a clash
+/// rename: `… edit (2).mp4`.) The Edit badge depends only on the file name,
+/// so it survives moves and folders.
+pub fn is_edit_name(file_name: &str) -> bool {
+    split_edit(strip_dup(file_stem(file_name))).1.is_some()
+}
+
+/// `dir\file_name`, or `dir\stem (2).ext`, `(3)`… if that's taken
+/// (`taken` decides; the caller passes a filesystem check). Never returns a
+/// name that `taken` reports as used.
+pub fn free_path(dir: &Path, file_name: &str, taken: &dyn Fn(&Path) -> bool) -> PathBuf {
+    let first = dir.join(file_name);
+    if !taken(&first) {
+        return first;
+    }
+    let (stem, ext) = match file_name.rsplit_once('.') {
+        Some((s, e)) => (strip_dup(s).to_string(), format!(".{e}")),
+        None => (strip_dup(file_name).to_string(), String::new()),
+    };
+    let mut n = 2;
+    loop {
+        let p = dir.join(format!("{stem} ({n}){ext}"));
+        if !taken(&p) {
+            return p;
+        }
+        n += 1;
     }
 }
 
@@ -1077,6 +1125,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn clash_suffixes_keep_the_edit_badge_and_recording_time() {
+        assert!(is_edit_name("DayZ 2026-11-04 18-31-24 edit (2).mp4"));
+        assert!(is_edit_name("DayZ 2026-11-04 18-31-24 edit 2 (3).mp4"));
+        assert!(!is_edit_name("DayZ 2026-11-04 18-31-24 (2).mp4"));
+        assert_eq!(
+            parse_name("DayZ 2026-11-04 18-31-24 edit (2).mp4").unwrap(),
+            ("DayZ".into(), "2026-11-04 18:31:24".into())
+        );
+        assert_eq!(
+            parse_name("DayZ 2026-11-04 18-31-24 (2) edit (3).mp4")
+                .unwrap()
+                .1,
+            "2026-11-04 18:31:24"
+        );
+        let taken = |p: &Path| {
+            let n = p.file_name().unwrap().to_string_lossy().into_owned();
+            n == "a edit.mp4" || n == "a edit (2).mp4"
+        };
+        assert_eq!(
+            free_path(Path::new("D"), "b.mp4", &taken),
+            Path::new("D").join("b.mp4")
+        );
+        assert_eq!(
+            free_path(Path::new("D"), "a edit.mp4", &taken),
+            Path::new("D").join("a edit (3).mp4")
+        );
+        assert_eq!(
+            free_path(Path::new("D"), "a edit (2).mp4", &taken),
+            Path::new("D").join("a edit (3).mp4")
+        );
+    }
+
+    #[test]
     fn edit_names_keep_the_recording_time_and_never_collide() {
         assert_eq!(
             parse_name("DayZ 2026-11-04 14-35-41 edit.mp4").unwrap().1,
@@ -1377,7 +1458,7 @@ pub(crate) mod tests {
         let clip = root.join("DayZ").join("DayZ 2026-11-04 14-35-41.mp4");
         std::fs::write(&clip, sample_mp4(30, true)).unwrap();
         let s = scan(&root, &cache, &|_| String::new());
-        let id = s.clips[0].id.clone();
+        let id = s.clips[0].thumb_key.clone();
         assert!(!s.clips[0].thumb);
 
         std::fs::create_dir_all(cache.thumbs_dir()).unwrap();

@@ -127,8 +127,10 @@
   <div class="content">
     <!-- The library stays mounted behind the player, so filters, selection and
          scroll position survive opening a clip. -->
-    {#if page === "library"}
-      <div class="fill" hidden={!!playing}>
+    <!-- The library stays mounted while Settings is shown too, so switching
+         pages never rebuilds the grid or rescans (no flash or jump). -->
+    {#if page}
+      <div class="fill" hidden={!!playing || page !== "library"}>
         <Library
           hotkey={tray?.status?.hotkey ?? null}
           {refreshToken}
@@ -137,7 +139,8 @@
           onerror={error}
         />
       </div>
-    {:else if page === "settings"}
+    {/if}
+    {#if page === "settings"}
       <div class="scroll"><Settings {tray} /></div>
     {/if}
     {#if playing}

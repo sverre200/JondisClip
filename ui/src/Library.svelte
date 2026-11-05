@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
-  import { api, FOLDER_COLORS, thumbUrl, type Clip, type Folder, type FolderColor, type LibraryView, type Organize } from "./lib/api";
+  import { api, FOLDER_COLORS, thumbUrl, type Clip, type Folder, type FolderColor, type Item, type LibraryView, type MoveResult, type PendingFolder } from "./lib/api";
   import { bytes, clock, dayLabel, fromWithin, whenShort } from "./lib/format";
   import Banner from "./lib/Banner.svelte";
   import Button from "./lib/Button.svelte";
@@ -29,7 +29,8 @@
 
   type Sort = "custom" | "newest" | "oldest" | "longest" | "largest";
   let view = $state<LibraryView | null>(null);
-  let org = $state<Organize>({ version: 1, folders: [], titles: {} });
+  // Folders are real directories (ADR-0015); this mirrors the last load.
+  let org = $state<{ folders: Folder[]; pending: PendingFolder[] }>({ folders: [], pending: [] });
   let loadError = $state<string | null>(null);
   let refreshing = $state(false);
   let game = $state(""); // "" = all games
@@ -43,7 +44,7 @@
   let gridEl = $state<HTMLDivElement>();
   let menu = $state<{ x: number; y: number; items: MenuEntry[] } | null>(null);
   type DialogState =
-    | { kind: "new-folder"; moveKeys: string[]; error: string | null }
+    | { kind: "new-folder"; moveIds: string[]; error: string | null }
     | { kind: "rename-folder"; folder: Folder; error: string | null }
     | { kind: "delete-folder"; folder: Folder; count: number }
     | { kind: "delete-clips"; ids: string[]; label: string };
@@ -65,20 +66,29 @@
     noticeTimer = setTimeout(() => (notice = null), 2400);
   }
 
-  /** Applies an organisation change from the backend (or shows why not). */
-  async function orgDo(p: Promise<Organize>, ok?: string) {
+  /** Runs an organisation change, then reloads from disk (or shows why not). */
+  async function orgDo(p: Promise<unknown>, ok?: string) {
     try {
-      org = await p;
+      await p;
       if (ok) tell(ok);
       return true;
     } catch (e) {
       onerror(String(e));
       return false;
+    } finally {
+      await refresh();
     }
+  }
+
+  /** Reports a file move: what moved, and what couldn't (nothing is lost). */
+  function moved(r: MoveResult, where: string) {
+    if (r.failed.length) onerror(`${r.moved ? `Moved ${r.moved}, but ` : ""}${r.failed.length === 1 ? "1 clip" : `${r.failed.length} clips`} couldn't be moved: ${r.failed[0]}`);
+    else if (r.moved) tell(r.moved === 1 ? `Moved to ${where}` : `Moved ${r.moved} clips to ${where}`);
   }
 
   // One scan at a time; a request during a scan runs once after it.
   let again = false;
+  let afterLoad: (() => void) | null = null;
   async function refresh() {
     if (refreshing) {
       again = true;
@@ -86,14 +96,21 @@
     }
     refreshing = true;
     try {
-      const [v, o] = await Promise.all([api.libraryScan(), api.organizeGet().catch((e) => (onerror(`Your folders couldn't be loaded: ${e}`), null))]);
-      view = v;
-      if (o) org = o;
-      loadError = null;
+      // A move changes a clip's path (its id): keep the selection by content key.
+      const keyOf = new Map((view?.clips ?? []).map((c) => [c.id, c.key]));
+      const r = await api.libraryLoad();
+      view = r.view;
+      org = { folders: r.folders, pending: r.pending };
+      afterLoad?.();
+      afterLoad = null;
+      loadError = r.rootOk ? null : `The clips folder ${r.view.root} can't be reached. Is the drive connected?`;
       onscanned?.(clips);
-      const ids = new Set(v.clips.map((c) => c.id));
-      selection = selection.filter((id) => ids.has(id));
-      if (selectedId && !ids.has(selectedId)) selectedId = null;
+      const byKey = new Map(r.view.clips.filter((c) => c.key).map((c) => [c.key, c.id]));
+      const ids = new Set(r.view.clips.map((c) => c.id));
+      const follow = (id: string) => (ids.has(id) ? id : (byKey.get(keyOf.get(id) ?? "") ?? null));
+      selection = selection.map(follow).filter((id): id is string => !!id);
+      selectedId = selectedId ? follow(selectedId) : null;
+      if (renamingId) renamingId = follow(renamingId);
     } catch (e) {
       loadError = String(e);
     } finally {
@@ -123,11 +140,15 @@
 
   // ---- derived views
 
-  /** Clips with their titles. */
-  const clips = $derived((view?.clips ?? []).map((c) => (org.titles[c.key] ? { ...c, title: org.titles[c.key] } : c)));
+  const clips = $derived(view?.clips ?? []);
+  /** clip id → the folder its file is in */
   const folderOf = $derived.by(() => {
+    const byName = new Map(org.folders.map((f) => [f.name, f]));
     const m = new Map<string, Folder>();
-    for (const f of org.folders) for (const k of f.clips) m.set(k, f);
+    for (const c of clips) {
+      const f = c.folder ? byName.get(c.folder) : undefined;
+      if (f) m.set(c.id, f);
+    }
     return m;
   });
   const currentFolder = $derived(org.folders.find((f) => f.id === folderView) ?? null);
@@ -151,17 +172,16 @@
   });
 
   const counts = $derived.by(() => {
-    const present = new Set(clips.map((c) => c.key));
     const out: Record<string, number> = {};
-    for (const f of org.folders) out[f.id] = f.clips.filter((k) => present.has(k)).length;
+    for (const f of folderOf.values()) out[f.id] = (out[f.id] ?? 0) + 1;
     return out;
   });
-  const unsortedCount = $derived(clips.filter((c) => !folderOf.has(c.key)).length);
+  const unsortedCount = $derived(clips.filter((c) => !folderOf.has(c.id)).length);
 
   const inView = $derived.by(() => {
     if (folderView === "all") return clips;
-    if (folderView === "unsorted") return clips.filter((c) => !folderOf.has(c.key));
-    return clips.filter((c) => folderOf.get(c.key)?.id === folderView);
+    if (folderView === "unsorted") return clips.filter((c) => !folderOf.has(c.id));
+    return clips.filter((c) => folderOf.get(c.id)?.id === folderView);
   });
 
   const games = $derived.by(() => {
@@ -241,11 +261,19 @@
   /** A clip whose file couldn't be read yet has no key: can't be organised. */
   const busyMsg = "That clip couldn't be read just now (in use?). Refresh and try again.";
 
+  const items = (cs: Clip[]): Item[] => cs.map((c) => ({ id: c.id, key: c.key }));
+
+  /** Moves the files into `folder` (null: back to their game folders). */
   async function moveTo(cs: Clip[], folder: Folder | null) {
     if (cs.some((c) => !c.key)) return onerror(busyMsg);
-    const keys = cs.map((c) => c.key);
-    const what = cs.length === 1 ? `“${cs[0]!.title ?? cs[0]!.game}”` : `${cs.length} clips`;
-    await orgDo(api.clipsMove(keys, folder?.id ?? null, null), folder ? `Moved ${what} to ${folder.name}` : `Took ${what} out of its folder`);
+    const todo = cs.filter((c) => (folderOf.get(c.id)?.id ?? null) !== (folder?.id ?? null));
+    if (!todo.length) return;
+    try {
+      moved(await api.clipsMove(items(todo), folder?.name ?? null), folder?.name ?? "its game folder");
+    } catch (e) {
+      onerror(String(e));
+    }
+    await refresh();
   }
 
   async function saveTitle(c: Clip, title: string | null) {
@@ -295,42 +323,75 @@
     return FOLDER_COLORS.find((c) => !used.has(c.value))?.value ?? "gray";
   }
 
-  async function createFolder(name: string, moveKeys: string[]) {
+  async function createFolder(name: string, moveIds: string[]) {
     const before = new Set(org.folders.map((f) => f.id));
     try {
-      org = await api.folderCreate(name, nextColor());
+      await api.folderCreate(name, nextColor());
     } catch (e) {
       if (dialog?.kind === "new-folder") dialog = { ...dialog, error: String(e) };
       return;
     }
     dialog = null;
+    await refresh();
     const f = org.folders.find((x) => !before.has(x.id));
-    if (f && moveKeys.length) await orgDo(api.clipsMove(moveKeys, f.id, null), `Moved to ${f.name}`);
+    const cs = clips.filter((c) => moveIds.includes(c.id));
+    if (f && cs.length) await moveTo(cs, f);
     else if (f) tell(`Created ${f.name}: drag clips onto it`);
   }
 
   async function renameFolder(f: Folder, name: string) {
     try {
-      org = await api.folderRename(f.id, name);
+      await api.folderRename(f.name, name);
       dialog = null;
     } catch (e) {
       if (dialog?.kind === "rename-folder") dialog = { ...dialog, error: String(e) };
+      return;
     }
+    if (folderView === f.id) {
+      // Keep the renamed folder open: switch in the same step as the reload,
+      // before the "folder gone" fallback can see it.
+      const before = new Set(org.folders.map((x) => x.id));
+      afterLoad = () => {
+        const renamed = org.folders.find((x) => !before.has(x.id));
+        if (renamed) folderView = renamed.id;
+      };
+    }
+    await refresh();
   }
 
   async function deleteFolder(f: Folder) {
     dialog = null;
     if (folderView === f.id) folderView = "all";
-    await orgDo(api.folderDelete(f.id), `Deleted the folder ${f.name}. Its clips are still in All clips.`);
+    try {
+      const r = await api.folderDelete(f.name);
+      if (r.failed.length) onerror(`${r.failed.length === 1 ? "1 clip" : `${r.failed.length} clips`} couldn't be moved out, so the folder ${f.name} was kept: ${r.failed[0]}`);
+      else if (r.kept_dir) tell(`${f.name} isn't shown anymore. Its Windows folder still has other files, so it was kept.`);
+      else tell(r.moved ? `Deleted ${f.name}. Its ${r.moved === 1 ? "clip is" : `${r.moved} clips are`} back in their game folders.` : `Deleted ${f.name}`);
+    } catch (e) {
+      onerror(String(e));
+    }
+    await refresh();
+  }
+
+  /** Clips of a folder from before real folders (ADR-0015): move them in, or leave them. */
+  async function resolvePending(p: PendingFolder, moveThem: boolean) {
+    const cs = clips.filter((c) => p.ids.includes(c.id));
+    try {
+      const r = await api.pendingResolve(p.folder, items(cs), moveThem);
+      if (moveThem) moved(r, p.folder);
+    } catch (e) {
+      onerror(String(e));
+    }
+    await refresh();
   }
 
   // ---- menus
 
   function moveMenu(cs: Clip[]): MenuItem[] {
-    const here = cs.length === 1 ? folderOf.get(cs[0]!.key)?.id : undefined;
+    const here = cs.length === 1 ? folderOf.get(cs[0]!.id)?.id : undefined;
     const items: MenuItem[] = org.folders.map((f) => ({ label: f.name, dot: f.color, checked: f.id === here, action: () => moveTo(cs, f) }));
     items.push({ label: "Not in a folder", checked: cs.length === 1 && !here, action: () => moveTo(cs, null) });
-    items.push({ label: "New folder…", action: () => (dialog = { kind: "new-folder", moveKeys: cs.map((c) => c.key), error: null }) });
+    items.push({ label: "New folder…", action: () => (dialog = { kind: "new-folder", moveIds: cs.map((c) => c.id), error: null }) });
     return items;
   }
 
@@ -367,7 +428,7 @@
         { label: "Rename…", action: () => (dialog = { kind: "rename-folder", folder: f, error: null }) },
         {
           label: "Color",
-          submenu: FOLDER_COLORS.map((c) => ({ label: c.label, dot: c.value, checked: f.color === c.value, action: () => orgDo(api.folderColor(f.id, c.value)) })),
+          submenu: FOLDER_COLORS.map((c) => ({ label: c.label, dot: c.value, checked: f.color === c.value, action: () => orgDo(api.folderColor(f.name, c.value)) })),
         },
         "separator",
         { label: "Delete folder…", danger: true, action: () => (dialog = { kind: "delete-folder", folder: f, count: counts[f.id] ?? 0 }) },
@@ -398,7 +459,7 @@
           ids: cs.map((x) => x.id),
           keys: cs.map((x) => x.key),
           label: cs.length > 1 ? `${cs.length} clips` : (c.title ?? c.game),
-          thumb: c.error ? null : thumbUrl(c.id),
+          thumb: c.error ? null : thumbUrl(c.thumb_key),
         };
       },
       (t: Target, p: Payload) => {
@@ -406,10 +467,11 @@
         const cs = clips.filter((x) => p.ids.includes(x.id));
         if (t.type === "folder") {
           const f = t.id ? (org.folders.find((x) => x.id === t.id) ?? null) : null;
-          if (cs.every((x) => (folderOf.get(x.key)?.id ?? null) === (f?.id ?? null))) return;
           void moveTo(cs, f);
         } else if (t.type === "insert" && currentFolder) {
-          void orgDo(api.clipsMove(p.keys, currentFolder.id, t.before));
+          // Custom order is metadata: no file moves.
+          const present = inView.map((x) => x.key).filter(Boolean);
+          void orgDo(api.clipsArrange(currentFolder.name, present, p.keys, t.before));
         }
       },
       {
@@ -537,13 +599,23 @@
     view={folderView}
     {collapsed}
     onview={(v) => (folderView = v)}
-    oncreate={() => (dialog = { kind: "new-folder", moveKeys: [], error: null })}
+    oncreate={() => (dialog = { kind: "new-folder", moveIds: [], error: null })}
     oncontext={folderMenu}
-    onreorder={(ids) => orgDo(api.foldersReorder(ids))}
+    onreorder={(names) => orgDo(api.foldersReorder(names))}
     ontoggle={() => (collapsed = !collapsed)}
   />
 
   <div class="main">
+  {#each org.pending as p (p.folder)}
+    {#if p.ids.length}
+      <div class="pending" role="region" aria-label="Folder update">
+        <span class="fdot" style:background="var(--folder-{p.color})"></span>
+        <span class="ptext">Folders are now real Windows folders. Move the {p.ids.length === 1 ? "clip" : `${p.ids.length} clips`} in <strong>{p.folder}</strong> into one?</span>
+        <Button variant="ghost" onclick={() => resolvePending(p, false)}>Leave them</Button>
+        <Button variant="primary" onclick={() => resolvePending(p, true)}>Move {p.ids.length === 1 ? "clip" : `${p.ids.length} clips`}</Button>
+      </div>
+    {/if}
+  {/each}
   {#if !view || view.clips.length || loadError}
   <div class="toolbar">
     <div class="chips" role="group" aria-label="Filter by game">
@@ -622,7 +694,7 @@
                 clip={c}
                 selected={selectedSet.has(c.id)}
                 tabindex={c.id === tabStop ? 0 : -1}
-                folderColor={folderView === "all" ? (folderOf.get(c.key)?.color ?? null) : null}
+                folderColor={folderView === "all" ? (folderOf.get(c.id)?.color ?? null) : null}
                 renaming={renamingId === c.id}
                 lifted={dragging?.has(c.id) ?? false}
                 onselect={(e) => click(c, e)}
@@ -664,11 +736,11 @@
     {@const selected = primary}
     <div class="selbar" role="region" aria-label="Selected clip">
       <div class="sel-thumb">
-        {#if !selected.error}<img src={thumbUrl(selected.id)} alt="" onerror={(e) => ((e.currentTarget as HTMLImageElement).style.visibility = "hidden")} />{/if}
+        {#if !selected.error}<img src={thumbUrl(selected.thumb_key)} alt="" onerror={(e) => ((e.currentTarget as HTMLImageElement).style.visibility = "hidden")} />{/if}
       </div>
       <div class="sel-meta">
         <strong title={selected.title ?? selected.game}>{selected.title ?? selected.game}</strong>
-        <span>{#if selected.title}{selected.game} · {/if}{whenShort(selected.recorded)} · {selected.probe ? clock(selected.probe.duration) : "unreadable"} · {bytes(selected.size)}{#if folderOf.get(selected.key)} · {folderOf.get(selected.key)?.name}{/if}</span>
+        <span>{#if selected.title}{selected.game} · {/if}{whenShort(selected.recorded)} · {selected.probe ? clock(selected.probe.duration) : "unreadable"} · {bytes(selected.size)}{#if folderOf.get(selected.id)} · {folderOf.get(selected.id)?.name}{/if}</span>
       </div>
       <div class="sel-actions">
         <Button variant="ghost" onclick={() => rename(selected)} title="Rename (F2)">Rename</Button>
@@ -693,10 +765,10 @@
   {@const d = dialog}
   <Dialog
     title="New folder"
-    confirmLabel={d.moveKeys.length ? "Create and move" : "Create"}
+    confirmLabel={d.moveIds.length ? "Create and move" : "Create"}
     input={{ value: "", placeholder: "e.g. DayZ Raids", max: 60 }}
     error={d.error}
-    onconfirm={(v) => createFolder(v, d.moveKeys)}
+    onconfirm={(v) => createFolder(v, d.moveIds)}
     oncancel={() => (dialog = null)}
   />
 {:else if dialog?.kind === "rename-folder"}
@@ -705,7 +777,7 @@
 {:else if dialog?.kind === "delete-folder"}
   {@const d = dialog}
   <Dialog title="Delete “{d.folder.name}”?" confirmLabel="Delete folder" danger onconfirm={() => deleteFolder(d.folder)} oncancel={() => (dialog = null)}>
-    <p>Only the folder is removed. {#if d.count}Its {d.count === 1 ? "clip stays" : `${d.count} clips stay`} in your library under All clips.{:else}It's empty.{/if} No recordings are deleted.</p>
+    <p>{#if d.count}Its {d.count === 1 ? "clip is" : `${d.count} clips are`} moved back to {d.count === 1 ? "its game folder" : "their game folders"} first.{:else}It's empty.{/if} No recordings are deleted.</p>
   </Dialog>
 {:else if dialog?.kind === "delete-clips"}
   {@const d = dialog}
@@ -748,6 +820,32 @@
   }
   .group.flat {
     padding-top: var(--s4);
+  }
+  .pending {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    margin: var(--s3) var(--s5) 0;
+    padding: var(--s2) var(--s2) var(--s2) var(--s4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    font-size: var(--fs-sm);
+  }
+  .pending .fdot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .ptext {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-muted);
+  }
+  .ptext strong {
+    color: var(--text);
+    font-weight: var(--fw-strong);
   }
   .notice {
     position: fixed;
