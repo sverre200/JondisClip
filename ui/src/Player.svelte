@@ -529,7 +529,7 @@
         {@const dv = job}
         <span class="done" role="status" title={dv.path}>
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          {dv.already ? "Already in your Google Drive folder" : "Copied to your Google Drive folder. Google Drive uploads it."}
+          {dv.already ? "Already in your Google Drive folder" : "Saved in your Google Drive folder"}<span class="sub">· uploads when Google Drive for desktop syncs</span>
         </span>
         <Button variant="ghost" onclick={() => api.driveReveal(dv.path).catch((e) => onerror(String(e)))}>Show file</Button>
         <Button variant="ghost" onclick={() => (job = { state: "idle" })}>Done</Button>
@@ -557,8 +557,8 @@
             onclick={saveToDrive}
             disabled={!!failed}
             title={trimmed
-              ? "Save the selection into your Google Drive folder. Google Drive for desktop uploads it."
-              : "Copy this clip into your Google Drive folder. Google Drive for desktop uploads it."}
+              ? "Save the selection into your Google Drive folder. Google Drive for desktop uploads it from there."
+              : "Copy this clip into your Google Drive folder (checked after copying). Google Drive for desktop uploads it from there."}
           >
             Save to Drive
           </Button>
@@ -804,6 +804,9 @@
     color: var(--success);
     font-size: var(--fs-sm);
     white-space: nowrap;
+  }
+  .done .sub {
+    color: var(--text-muted);
   }
   .err {
     color: var(--danger);

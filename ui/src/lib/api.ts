@@ -28,6 +28,14 @@ export interface Settings {
   discord_limit_mb: number;
   /** Google Drive for desktop folder for Save to Drive ("" = off) */
   drive_dir: string;
+  /** Save to Drive keeps the clip's library folder name (else its game) */
+  drive_keep_folders: boolean;
+}
+
+export interface DriveCheck {
+  dir: string;
+  state: "off" | "ok" | "problem";
+  message: string | null;
 }
 
 export interface DriveStatus {
@@ -282,6 +290,9 @@ export const api = {
   driveSave: (id: string, start: number, end: number, whole: boolean, exact: boolean) =>
     call<{ job: number | null; output: string; already: boolean }>("drive_save", { id, start, end, whole, exact }),
   driveReveal: (path: string) => call<void>("drive_reveal", { path }),
+  /** Exists, isn't inside the clips folder, and a test file can be written and removed. */
+  driveCheck: (dir?: string) => call<DriveCheck>("drive_check", { dir: dir ?? null }),
+  driveOpen: () => call<void>("drive_open"),
   async pickDriveFolder(current: string): Promise<string | null> {
     if (!isDesktop) return "G:\\My Drive";
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -399,6 +410,7 @@ const mockState: Snapshot = {
     start_with_windows: false,
     discord_limit_mb: 19,
     drive_dir: "",
+    drive_keep_folders: true,
   },
   default_save_dir: "C:\\Users\\you\\Videos\\JondisClip",
   replay_presets: [30, 60, 120, 180, 300, 600, 900],
@@ -498,6 +510,16 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       }, 200);
       return { job, output: "G:\\My Drive\\JondisClip\\DayZ\\DayZ edit.mp4", already: false };
     }
+    case "drive_check": {
+      await new Promise((r) => setTimeout(r, 400));
+      const dir = (args?.dir as string | null) ?? mockState.settings.drive_dir;
+      if (!dir) return { dir, state: "off", message: null };
+      if (new URLSearchParams(location.search).has("driveoff"))
+        return { dir, state: "problem", message: `Google Drive isn't available (${dir} not found). Is Google Drive for desktop running and signed in?` };
+      return { dir, state: "ok", message: null };
+    }
+    case "drive_open":
+      return undefined;
     case "drive_reveal":
     case "share_copy_again":
     case "share_reveal":

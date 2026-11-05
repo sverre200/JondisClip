@@ -147,6 +147,34 @@ pub fn stale_partials(drive: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Tries writing, reading back and deleting a small file in `dir`
+/// (`.jondisclip-write-test-<pid>.tmp`). Ok(()) if all of that worked.
+pub fn write_test(dir: &Path) -> Result<(), String> {
+    let p = dir.join(format!(".jondisclip-write-test-{}.tmp", std::process::id()));
+    let data = b"JondisClip write test";
+    let res = (|| {
+        std::fs::write(&p, data)?;
+        let back = std::fs::read(&p)?;
+        if back != data {
+            return Err(std::io::Error::other("the file read back differently"));
+        }
+        Ok(())
+    })();
+    let removed = std::fs::remove_file(&p);
+    match (res, removed) {
+        (Err(e), _) => Err(match e.kind() {
+            std::io::ErrorKind::PermissionDenied => {
+                "JondisClip isn't allowed to write there.".into()
+            }
+            _ => format!("Writing there failed: {e}"),
+        }),
+        (Ok(()), Err(e)) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("A test file couldn't be removed again: {e}"))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Why a Drive folder can't be used, if it can't. It must not overlap the
 /// clips folder (copies would be taken for recordings) or JondisClip's own
 /// folders (`own_dir`: buffer, library cache, share).
@@ -157,7 +185,7 @@ pub fn check_folder(
     is_dir: &dyn Fn(&Path) -> bool,
 ) -> Result<(), String> {
     if drive.as_os_str().is_empty() {
-        return Err("Choose your Google Drive folder in Settings → Sharing first.".into());
+        return Err("Choose your Google Drive folder in Settings → Google Drive first.".into());
     }
     if !is_dir(drive) {
         return Err(format!(
@@ -181,6 +209,16 @@ pub fn check_folder(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn write_test_leaves_nothing_behind() {
+        let d = std::env::temp_dir().join(format!("jc-drive-wt-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        write_test(&d).unwrap();
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0);
+        assert!(write_test(&d.join("missing")).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn suggests_drive_for_desktop_folders_that_exist() {

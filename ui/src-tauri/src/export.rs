@@ -628,6 +628,29 @@ pub fn copy_file(
             .sync_all()
             .map_err(|e| fail("couldn't finish the file", e))?;
         drop(output);
+        // Verify the copy (size, then content fingerprint read back from
+        // disk) before it gets its real name.
+        let size = std::fs::metadata(src)
+            .map_err(|e| fail("couldn't read the clip", e))?
+            .len();
+        let copied = std::fs::metadata(&tmp)
+            .map_err(|e| fail("couldn't check the copy", e))?
+            .len();
+        if copied != size || done != size {
+            return Err(CopyError::Failed(format!(
+                "The copy came out the wrong size ({copied} of {size} bytes). Nothing was saved; try again."
+            )));
+        }
+        let fp = |p: &Path| jondisclip_core::library::fingerprint(p, size);
+        match (fp(src), fp(&tmp)) {
+            (Ok(a), Ok(b)) if a == b => {}
+            (Ok(_), Ok(_)) => {
+                return Err(CopyError::Failed(
+                    "The copy didn't match the clip. Nothing was saved; try again.".into(),
+                ));
+            }
+            (Err(e), _) | (_, Err(e)) => return Err(fail("couldn't check the copy", e)),
+        }
         // Never overwrite: a hard link fails if the name exists.
         match std::fs::hard_link(&tmp, dst) {
             Ok(()) => {

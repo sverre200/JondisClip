@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, isDesktop, type Codec, type InputDevice, type Quality, type Resolution, type Settings, type Snapshot, type TrayView } from "./lib/api";
+  import { api, isDesktop, type Codec, type DriveCheck, type InputDevice, type Quality, type Resolution, type Settings, type Snapshot, type TrayView } from "./lib/api";
   import { bytes, estimateBitrate, outputSize, replayLabel, replayShort } from "./lib/format";
   import Banner from "./lib/Banner.svelte";
   import Button from "./lib/Button.svelte";
@@ -160,10 +160,28 @@
       .then((d) => (driveSuggestion = d.suggestions[0] ?? null))
       .catch(() => {});
   });
+  // Drive folder health: checked when Settings opens, after a change, and on demand.
+  let driveCheck = $state<DriveCheck | null>(null);
+  let driveChecking = $state(false);
+  async function checkDrive() {
+    driveChecking = true;
+    try {
+      driveCheck = await api.driveCheck();
+    } catch (e) {
+      driveCheck = { dir: settings?.drive_dir ?? "", state: "problem", message: String(e) };
+    } finally {
+      driveChecking = false;
+    }
+  }
+  onMount(() => void checkDrive());
+  async function setDrive(dir: string) {
+    await change({ drive_dir: dir });
+    if (settings?.drive_dir === dir) await checkDrive();
+  }
   async function pickDrive() {
     if (!settings) return;
     const picked = await api.pickDriveFolder(settings.drive_dir || driveSuggestion || "");
-    if (picked) await change({ drive_dir: picked });
+    if (picked) await setDrive(picked);
   }
 
   function discordLimits(current: number) {
@@ -340,27 +358,60 @@
           onchange={(v) => change({ discord_limit_mb: Number(v) })}
         />
       </Row>
+    </section>
+
+    <section aria-labelledby="h-drive">
+      <h2 id="h-drive">Google Drive</h2>
       <Row
-        label="Google Drive folder"
+        label="Drive folder"
         hint={settings.drive_dir
-          ? "Save to Drive copies clips into JondisClip\\<Game> here. Google Drive for desktop uploads them; nothing is uploaded by JondisClip."
+          ? "Save to Drive copies clips into a JondisClip folder here. Google Drive for desktop uploads them from there; JondisClip never uploads anything itself."
           : driveSuggestion
             ? `Found Google Drive for desktop at ${driveSuggestion}. Use it to turn on Save to Drive.`
             : "Optional. Choose the folder Google Drive for desktop syncs (usually G:\\My Drive) to turn on Save to Drive."}
       >
         <div class="drive">
           {#if settings.drive_dir}
-            <span class="path" title={settings.drive_dir}>{settings.drive_dir}</span>
             <Button variant="ghost" onclick={pickDrive}>Change…</Button>
-            <Button variant="ghost" onclick={() => change({ drive_dir: "" })}>Turn off</Button>
+            <Button variant="ghost" onclick={() => setDrive("")}>Turn off</Button>
           {:else}
             {#if driveSuggestion}
-              <Button onclick={() => change({ drive_dir: driveSuggestion ?? "" })}>Use {driveSuggestion}</Button>
+              <Button onclick={() => setDrive(driveSuggestion ?? "")}>Use {driveSuggestion}</Button>
             {/if}
             <Button variant="ghost" onclick={pickDrive}>Choose…</Button>
           {/if}
         </div>
+        {#snippet below()}
+          {#if settings?.drive_dir}
+            <div class="dcard" class:bad={!driveChecking && driveCheck?.state === "problem"}>
+              <span class="dicon" aria-hidden="true">
+                {#if driveChecking}<span class="spin"></span>
+                {:else if driveCheck?.state === "ok"}<svg viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7" /></svg>
+                {:else}<svg viewBox="0 0 16 16"><path d="M8 4.5v4.5M8 11.5v.01" /></svg>{/if}
+              </span>
+              <div class="dtext" role="status">
+                <span class="dpath" title={settings.drive_dir}>{settings.drive_dir}</span>
+                <span class="dmsg">
+                  {#if driveChecking}Checking the folder…
+                  {:else if driveCheck?.state === "ok"}Found and writable. Google Drive for desktop uploads what you save here.
+                  {:else}{driveCheck?.message ?? "Not checked yet."}{/if}
+                </span>
+              </div>
+              <Button variant="ghost" disabled={driveChecking} onclick={checkDrive}>Check again</Button>
+              <Button variant="ghost" disabled={driveCheck?.state !== "ok"} onclick={() => api.driveOpen().catch((e) => showToast(String(e), "error"))}>Open in Explorer</Button>
+            </div>
+          {/if}
+        {/snippet}
       </Row>
+      {#if settings.drive_dir}
+        <Row
+          label="Keep my folders"
+          hint="Clips in a library folder go into a Drive folder with the same name. Off: sorted by game."
+          id="t-drive-folders"
+        >
+          <Toggle id="t-drive-folders" label="Keep my folders" checked={settings.drive_keep_folders} onchange={(v) => change({ drive_keep_folders: v })} />
+        </Row>
+      {/if}
     </section>
 
     <section aria-labelledby="h-general">
@@ -430,6 +481,72 @@
     display: flex;
     align-items: center;
     gap: var(--s1);
+  }
+  .dcard {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s2) var(--s2) var(--s2) var(--s3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+  }
+  .dicon {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--success-soft);
+    color: var(--success);
+  }
+  .dcard.bad .dicon {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+  .dicon svg {
+    width: 14px;
+    height: 14px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .spin {
+    width: 12px;
+    height: 12px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .dtext {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .dpath {
+    font-size: var(--fs-sm);
+    font-weight: var(--fw-strong);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dmsg {
+    font-size: var(--fs-sm);
+    color: var(--text-muted);
+  }
+  .dcard.bad .dmsg {
+    color: var(--warning);
   }
   .below-right {
     display: flex;

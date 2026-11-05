@@ -108,6 +108,9 @@ pub struct Settings {
     pub discord_limit_mb: u32,
     /// Google Drive for desktop folder for "Save to Drive". Empty = off.
     pub drive_dir: PathBuf,
+    /// Save to Drive keeps the clip's library folder name
+    /// (`JondisClip\<Folder>`); off: always `JondisClip\<Game>`.
+    pub drive_keep_folders: bool,
 }
 
 impl Default for Settings {
@@ -129,6 +132,7 @@ impl Default for Settings {
             start_with_windows: false,
             discord_limit_mb: DISCORD_LIMIT_DEFAULT,
             drive_dir: PathBuf::new(),
+            drive_keep_folders: true,
         }
     }
 }

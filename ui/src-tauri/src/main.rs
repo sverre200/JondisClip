@@ -449,6 +449,76 @@ async fn drive_status() -> DriveStatus {
     })
 }
 
+#[derive(Serialize)]
+struct DriveCheck {
+    dir: String,
+    /// "off" (no folder set), "ok", or "problem" (see `message`).
+    state: &'static str,
+    message: Option<String>,
+}
+
+/// Checks the Drive folder (`dir`, or the configured one): it exists, isn't
+/// inside the clips or JondisClip's folders, and a small test file can be
+/// written, read back and removed. Says nothing about the cloud upload.
+#[tauri::command]
+async fn drive_check(dir: Option<String>) -> DriveCheck {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (settings, _) = read_settings();
+        let dir = dir.map(PathBuf::from).unwrap_or(settings.drive_dir.clone());
+        let shown = dir.display().to_string();
+        if dir.as_os_str().is_empty() {
+            return DriveCheck {
+                dir: shown,
+                state: "off",
+                message: None,
+            };
+        }
+        let save = settings.save_dir_or(&paths::default_save_dir());
+        let res =
+            jondisclip_core::drive::check_folder(&dir, &save, &paths::local_dir(), &|p| p.is_dir())
+                .and_then(|()| jondisclip_core::drive::write_test(&dir));
+        match res {
+            Ok(()) => DriveCheck {
+                dir: shown,
+                state: "ok",
+                message: None,
+            },
+            Err(m) => DriveCheck {
+                dir: shown,
+                state: "problem",
+                message: Some(m),
+            },
+        }
+    })
+    .await
+    .unwrap_or(DriveCheck {
+        dir: String::new(),
+        state: "problem",
+        message: Some("The check didn't finish.".into()),
+    })
+}
+
+/// Opens the Drive folder (its `JondisClip` subfolder once it exists) in Explorer.
+#[tauri::command]
+async fn drive_open() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let (settings, _) = read_settings();
+        let dir = settings.drive_dir;
+        if dir.as_os_str().is_empty() || !dir.is_dir() {
+            return Err("The Google Drive folder isn't available right now.".to_string());
+        }
+        let ours = dir.join("JondisClip");
+        let open = if ours.is_dir() { ours } else { dir };
+        std::process::Command::new("explorer")
+            .arg(&open)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn is_remote_drive(p: &std::path::Path) -> bool {
     use windows::Win32::Storage::FileSystem::GetDriveTypeW;
     let s = p.to_string_lossy();
@@ -514,9 +584,10 @@ async fn drive_save(
         )
         .load()
         .unwrap_or_default();
+        let keep = settings.drive_keep_folders;
         let game = parent
             .clone()
-            .filter(|d| org.folder(d).is_some() && !org.is_game_dir(d))
+            .filter(|d| keep && org.folder(d).is_some() && !org.is_game_dir(d))
             .or_else(|| jondisclip_core::library::parse_name(&file_name).map(|p| p.0))
             .or(parent)
             .unwrap_or_else(|| "Clips".into());
@@ -721,6 +792,8 @@ fn main() {
             drive_status,
             drive_save,
             drive_reveal,
+            drive_check,
+            drive_open,
             organize::folder_create,
             organize::folder_rename,
             organize::folder_color,

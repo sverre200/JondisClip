@@ -33,3 +33,19 @@ The owner wants long-term storage of chosen clips in Google Drive, initiated by 
 - Zero network code, credentials or background work. Uploads, retries and conflict handling stay Drive's job.
 - If Drive is set to "stream" files, `G:` is a virtual drive, and the free space it reports is the Drive quota as Windows sees it. A full quota shows up as a write error, which is reported.
 - **Not verified on this PC:** Google Drive for desktop isn't installed here. Everything was tested against ordinary folders and a missing drive letter.
+
+## Update 2026-11-05: Google Drive settings section and verified copies
+- Settings has its own **Google Drive** section:
+  - Choose, change or turn off the folder.
+  - A check, run when Settings opens and on demand: the folder exists, doesn't overlap the clips folder or JondisClip's own folders, and a small `.jondisclip-write-test-<pid>.tmp` can be written, read back and removed.
+  - Open in Explorer.
+  - A "Keep my folders" option (on by default). It names the Drive subfolder after the clip's library folder (ADR-0015); off, it uses the game.
+- **Whole-clip copies are verified before they get their real name.** The size and the content fingerprint (read back from disk) must match the source. Otherwise nothing is saved and an error is shown. Trims are new encodes and aren't compared with the source.
+- **The wording never claims an upload.** It says "Saved in your Google Drive folder · uploads when Google Drive for desktop syncs".
+- **Verified on 2026-11-05** in a sandbox profile, with a plain folder standing in for Drive:
+  - check ok / missing / overlapping clips / inside JondisClip's folders
+  - no test file left behind
+  - copy byte-identical (SHA-1)
+  - "already there" on repeat
+  - Keep my folders on (Edited) and off (DayZ)
+- **Still not verified:** real Google Drive for desktop and the cloud upload. The write test does briefly create a file in the synced folder; Drive may see it before it's removed.
