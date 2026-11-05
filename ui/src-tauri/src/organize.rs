@@ -656,8 +656,20 @@ pub struct DeleteFolderResult {
 }
 
 /// Removes an empty directory, retrying briefly: a File Explorer window
-/// showing it can hold it open for a moment.
+/// showing it can hold it open for a moment. Windows refuses to remove a
+/// read-only directory (Explorer and Drive for desktop set that attribute
+/// on folders), so an empty one has it cleared first. A directory that
+/// still has entries is left exactly as it was.
 fn remove_empty_dir(d: &Path) -> bool {
+    let empty = std::fs::read_dir(d).is_ok_and(|mut rd| rd.next().is_none());
+    if empty
+        && let Ok(mut p) = std::fs::metadata(d).map(|m| m.permissions())
+        && p.readonly()
+    {
+        #[allow(clippy::permissions_set_readonly_false)]
+        p.set_readonly(false);
+        let _ = std::fs::set_permissions(d, p);
+    }
     for i in 0..4 {
         if std::fs::remove_dir(d).is_ok() || !d.exists() {
             return true;
@@ -944,6 +956,37 @@ mod tests {
         drop(held);
         assert!(remove_empty_dir(&d));
         assert!(!d.exists());
+    }
+
+    fn set_readonly(d: &Path, on: bool) {
+        let mut p = std::fs::metadata(d).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        p.set_readonly(on);
+        std::fs::set_permissions(d, p).unwrap();
+    }
+
+    #[test]
+    fn an_empty_read_only_folder_is_removed() {
+        // Explorer and Drive for desktop mark folders read-only; Windows then
+        // refuses RemoveDirectory with "Access is denied".
+        let t = tmp("ro");
+        let d = t.0.join("Dota");
+        std::fs::create_dir(&d).unwrap();
+        set_readonly(&d, true);
+        assert!(remove_empty_dir(&d));
+        assert!(!d.exists());
+    }
+
+    #[test]
+    fn a_read_only_folder_with_files_keeps_its_attribute() {
+        let t = tmp("ro-full");
+        let d = t.0.join("Dota");
+        std::fs::create_dir(&d).unwrap();
+        std::fs::write(d.join("notes.txt"), b"x").unwrap();
+        set_readonly(&d, true);
+        assert!(!remove_empty_dir(&d));
+        assert!(std::fs::metadata(&d).unwrap().permissions().readonly());
+        set_readonly(&d, false);
     }
 
     struct Tmp(PathBuf);
