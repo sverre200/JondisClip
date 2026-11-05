@@ -143,10 +143,11 @@
     {#if clip.edit}<span class="tag">Edit</span>{/if}
     {#if clip.in_drive}
       <span class="drive" title="In your Google Drive folder · {clip.in_drive}">
-        <svg viewBox="0 0 20 16" width="16" height="13" aria-hidden="true">
-          <path d="M5.5 14h9.2a4 4 0 0 0 .5-7.97A5.5 5.5 0 0 0 4.7 7.1 3.5 3.5 0 0 0 5.5 14Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
-          <path d="m7.6 9.6 1.9 1.9 3.4-3.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+        <svg viewBox="0 0 20 16" width="15" height="12" aria-hidden="true">
+          <path d="M5.5 14h9.2a4 4 0 0 0 .5-7.97A5.5 5.5 0 0 0 4.7 7.1 3.5 3.5 0 0 0 5.5 14Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+          <path d="m7.6 9.6 1.9 1.9 3.4-3.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
+        Drive
       </span>
     {/if}
   </div>
@@ -306,17 +307,21 @@
     font-size: var(--fs-xs);
     font-weight: var(--fw-strong);
   }
-  /* Like the duration chip, so it reads on any thumbnail in any theme. */
+  /* A solid badge like Edit (same size and type), in a fixed blue. */
   .drive {
     position: absolute;
     right: var(--s2);
     top: var(--s2);
-    display: grid;
-    place-items: center;
-    padding: 2px 5px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 6px 1px 5px;
     border-radius: var(--radius-sm);
-    background: rgb(0 0 0 / 0.72);
-    color: #fff;
+    background: var(--drive);
+    color: var(--on-drive);
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-strong);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.4);
   }
   .meta {
     padding: var(--s2) var(--s3) var(--s3);

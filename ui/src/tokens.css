@@ -37,6 +37,9 @@
   --recording: #e5484d;
   --recording-soft: rgb(229 72 77 / 0.14);
   --recording-glow: rgb(229 72 77 / 0.25);
+  /* The "in Google Drive" badge: the same in every theme, like Edit's red. */
+  --drive: #2f7bf6;
+  --on-drive: #ffffff;
 
   /* Folder colours: muted, for small dots and icons only (never fills) */
   --folder-red: #d4625f;
