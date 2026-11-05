@@ -14,8 +14,6 @@
   let startingTray = $state(false);
   // The clip open in the player, and the list it was opened from (for prev/next).
   let playing = $state<{ clip: Clip; list: Clip[] } | null>(null);
-  // Fades the content in once the window is on screen (a smooth opening).
-  let opened = $state(false);
   // Latest scan, so a saved edit can be opened as soon as the library sees it.
   let clips = $state<Clip[]>([]);
   let refreshToken = $state(0);
@@ -77,13 +75,7 @@
       // This deliberately doesn't wait for requestAnimationFrame, which a
       // hidden window may never get. The Rust side also has a fallback.
       await tick();
-      // Fade in after the window is shown; never leave it invisible.
-      const fallback = setTimeout(() => (opened = true), 600);
-      void api.reveal().finally(() => {
-        clearTimeout(fallback);
-        requestAnimationFrame(() => (opened = true));
-        setTimeout(() => (opened = true), 50);
-      });
+      void api.reveal();
       poll = setInterval(pollTray, 1500);
     })();
     return () => clearInterval(poll);
@@ -101,7 +93,7 @@
   const playIndex = $derived(playing ? playing.list.findIndex((c) => c.id === playing!.clip.id) : -1);
 </script>
 
-<div class="shell" class:opened>
+<div class="shell">
   {#if !playing}
     <header>
       <div class="brand">
@@ -177,15 +169,6 @@
     display: flex;
     flex-direction: column;
     height: 100vh;
-    opacity: 0;
-    transform: translateY(6px);
-    transition:
-      opacity 220ms var(--ease),
-      transform 260ms var(--ease);
-  }
-  .shell.opened {
-    opacity: 1;
-    transform: none;
   }
   header {
     display: grid;

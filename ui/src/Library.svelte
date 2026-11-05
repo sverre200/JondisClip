@@ -514,6 +514,8 @@
       y: e.clientY,
       items: [
         { label: "Open", action: () => (folderView = f.id) },
+        { label: "Show in File Explorer", action: () => api.folderReveal(f.name).catch((err) => onerror(String(err))) },
+        "separator",
         { label: "New subfolder…", disabled: f.depth >= MAX_DEPTH, action: () => (dialog = { kind: "new-folder", moveIds: [], parent: f.id, error: null }) },
         { label: "Rename…", action: () => (dialog = { kind: "rename-folder", folder: f, error: null }) },
         { label: "Move folder to", submenu: targets },
@@ -834,7 +836,7 @@
                 clip={c}
                 selected={selectedSet.has(c.id)}
                 tabindex={c.id === tabStop ? 0 : -1}
-                folderColor={folderView === "all" ? (folderOf.get(c.id)?.color ?? null) : null}
+                folderColor={folderOf.get(c.id)?.color ?? null}
                 renaming={renamingId === c.id}
                 lifted={dragging?.has(c.id) ?? false}
                 onselect={(e) => click(c, e)}

@@ -292,6 +292,8 @@ export const api = {
   folderCreate: (name: string, color: FolderColor, parent: string | null = null) => call<void>("folder_create", { name, color, parent }),
   /** Moves a folder (and what's in it) into `parent`, or to the top level. */
   folderMove: (name: string, parent: string | null) => call<void>("folder_move", { name, parent }),
+  /** Opens the folder's directory in File Explorer. */
+  folderReveal: (name: string) => call<void>("folder_reveal", { name }),
   folderRename: (name: string, to: string) => call<void>("folder_rename", { name, to }),
   folderColor: (name: string, color: FolderColor) => call<void>("folder_color", { name, color }),
   folderDelete: (name: string) => call<{ moved: number; failed: string[]; kept_dir: boolean }>("folder_delete", { name }),
@@ -612,6 +614,8 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       for (const c of mockLib ?? []) if (c.folder) c.folder = re(c.folder);
       return undefined;
     }
+    case "folder_reveal":
+      return undefined;
     case "folder_color": {
       const f = mockFolders.find((x) => x.name === args?.name);
       if (f) f.color = args?.color as FolderColor;

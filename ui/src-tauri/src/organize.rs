@@ -616,6 +616,27 @@ pub async fn folder_move(name: String, parent: Option<String>) -> Result<(), Str
     .await
 }
 
+/// Opens a folder's directory in File Explorer (registered folders only).
+#[tauri::command]
+pub async fn folder_reveal(name: String) -> Result<(), String> {
+    blocking(move || {
+        let root = root();
+        let org = store().load()?;
+        let f = org.folder(&name).ok_or("That folder no longer exists.")?;
+        let dir = inside(&root, &root.join(&f.name))?;
+        let plain = dir
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_string();
+        std::process::Command::new("explorer")
+            .arg(plain)
+            .spawn()
+            .map(drop)
+            .map_err(|e| format!("couldn't open File Explorer: {e}"))
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn folder_color(name: String, color: String) -> Result<(), String> {
     blocking(move || meta(|o| o.recolor(&name, &color)).map(drop)).await

@@ -141,8 +141,27 @@
     trimEnd = Math.min(duration, end);
     if (job.state === "done" || job.state === "shared" || job.state === "drive" || job.state === "error") job = { state: "idle" };
     // Show the frame at the handle being dragged.
-    video?.pause();
-    seek(edge === "start" ? trimStart : Math.max(trimStart, trimEnd - 1 / 60), true);
+    if (video && !video.paused) video.pause();
+    previewSeek(edge === "start" ? trimStart : Math.max(trimStart, trimEnd - 1 / 60));
+  }
+
+  // While dragging, seeks would queue up (each one reads from disk and
+  // decodes) and the picture would trail behind the pointer. Latest wins:
+  // during a seek only the newest position is kept, applied when it's done.
+  let nextSeek: number | null = null;
+  function previewSeek(t: number) {
+    if (video?.seeking) {
+      nextSeek = t;
+      time = t;
+      return;
+    }
+    seek(t, true);
+  }
+  function seeked() {
+    if (nextSeek === null) return;
+    const t = nextSeek;
+    nextSeek = null;
+    seek(t, true);
   }
   function markIn() {
     setTrim(Math.min(time, trimEnd - 0.25), trimEnd, "start");
@@ -439,7 +458,8 @@
         preload="auto"
         bind:paused
         bind:muted
-        ontimeupdate={() => video && (time = video.currentTime)}
+        ontimeupdate={() => video && nextSeek === null && (time = video.currentTime)}
+        onseeked={seeked}
         ondurationchange={durationChanged}
         onprogress={progress}
         oncanplay={() => (loading = false)}

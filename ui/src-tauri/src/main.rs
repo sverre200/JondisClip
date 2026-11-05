@@ -927,6 +927,7 @@ fn main() {
             organize::folder_create,
             organize::folder_rename,
             organize::folder_move,
+            organize::folder_reveal,
             organize::folder_color,
             organize::folder_delete,
             organize::folders_reorder,
