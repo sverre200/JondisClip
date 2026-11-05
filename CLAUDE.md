@@ -13,6 +13,7 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
   - Treat real-window tests as writing to a sandbox copy.
   - Hand the owner a command to run in their own PowerShell when real data must change.
   - D:\ and C:\dev are not redirected.
+  - **Safe real-window tests:** every path comes from `%APPDATA%`/`%LOCALAPPDATA%` (`crates/core/src/paths.rs`), so set both to folders under `D:\JondisClip-Test` with a `settings.toml` whose `save_dir` is a test folder. The window then has its own library, cache and settings, and never sees the owner's. Make real recorder clips for it with `--example record` under the same variables (its buffer moves too, so it can run beside the owner's tray). The tray itself can't be tested this way while the owner's is running: it's single-instance and owns Alt+F10.
 - The project lives in `D:\Claude-Projects\JondisClip` (moved from `C:\dev\JondisClip` on 2026-11-05). Build output (`target\`) wasn't copied, so the first build there is a full one.
 
 ## Read first

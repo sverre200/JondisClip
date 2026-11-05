@@ -49,3 +49,9 @@ The owner wants long-term storage of chosen clips in Google Drive, initiated by 
   - "already there" on repeat
   - Keep my folders on (Edited) and off (DayZ)
 - **Still not verified:** real Google Drive for desktop and the cloud upload. The write test does briefly create a file in the synced folder; Drive may see it before it's removed.
+
+## Update 2026-11-05 (later): titled clips keep their title in Drive
+- A clip with a custom title (ADR-0014) is saved to Drive as `<title>.mp4`, for the whole clip and for a selection, the same way Share to Discord names its file (`title_to_file_stem`: unsafe characters removed, at most 80 characters). An untitled clip keeps its recording name (`… edit.mp4` for a selection). The Drive copy is what gets kept and shared, so a recognisable name matters more there than in the clips folder, where file names never change.
+- "Already there" and ` (2)` work as before, on the titled name.
+- Verified in the real window on a stand-in folder: `Sniper from the tower.mp4`, byte-identical to the source, then "Already in your Google Drive folder" on repeat.
+- Google Drive for desktop is now installed on the dev PC (`G:\My Drive`, detected by the suggestion). The upload itself is still unverified: testing it would put test clips in the owner's Google account.

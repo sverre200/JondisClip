@@ -65,7 +65,7 @@
     if (job.state === "running" || !drive?.dir) return;
     job = { state: "running", job: null, progress: 0, share: false, drive: true };
     try {
-      const r = await api.driveSave(clip.id, trimStart, trimEnd, !trimmed, !plan.lossless);
+      const r = await api.driveSave(clip.id, trimStart, trimEnd, !trimmed, !plan.lossless, clip.title ?? null);
       if (r.already || r.job === null) job = { state: "drive", path: r.output, size: clip.size, already: true };
       else if (job.state === "running") job = { ...job, job: r.job };
     } catch (e) {
@@ -507,7 +507,7 @@
         <span>{clockPrecise(trimEnd - plan.start)} · ≈ {bytes(estimate)}{shareHint ? ` · ${shareHint}` : ""}</span>
       {:else}
         <strong>Trim</strong>
-        <span>Drag the red handles, or press I and O at the playhead{shareHint ? ` · ${shareHint}` : ""}</span>
+        <span>Drag the handles at each end, or press I and O at the playhead{shareHint ? ` · ${shareHint}` : ""}</span>
       {/if}
     </div>
 

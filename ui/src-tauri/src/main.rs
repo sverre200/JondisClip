@@ -364,6 +364,25 @@ fn initial_page() -> &'static str {
     }
 }
 
+/// Where a second launch leaves the page it was asked for, so the open
+/// window can switch to it (it reads this when it gets the focus).
+fn page_request_file() -> PathBuf {
+    paths::local_dir().join("ui-page-request")
+}
+
+/// The page a later launch asked for ("settings" / "library"), once.
+#[tauri::command]
+fn take_page_request() -> Option<&'static str> {
+    let f = page_request_file();
+    let text = std::fs::read_to_string(&f).ok()?;
+    let _ = std::fs::remove_file(&f);
+    match text.trim() {
+        "settings" => Some("settings"),
+        "library" => Some("library"),
+        _ => None,
+    }
+}
+
 /// Stores a thumbnail the page drew. Body: JPEG bytes; header `x-clip-id`.
 #[tauri::command]
 fn thumb_save(request: tauri::ipc::Request<'_>) -> Result<(), String> {
@@ -683,6 +702,7 @@ async fn drive_save(
     end: f64,
     whole: bool,
     exact: bool,
+    title: Option<String>,
 ) -> Result<DriveStarted, String> {
     use jondisclip_core::drive::{Target, check_folder, target};
     let path = library::path_of(&id)?;
@@ -720,8 +740,14 @@ async fn drive_save(
             .or_else(|| jondisclip_core::library::parse_name(&file_name).map(|p| p.0))
             .or(parent)
             .unwrap_or_else(|| "Clips".into());
+        // A titled clip is saved under its title, like Share to Discord:
+        // the Drive copy is what gets kept and shared.
+        let titled = title.as_deref().and_then(export::title_to_file_stem);
         if whole {
-            return match target(&settings.drive_dir, &game, &file_name, stamp(&path), &stamp) {
+            let name = titled
+                .as_ref()
+                .map_or_else(|| file_name.clone(), |t| format!("{t}.mp4"));
+            return match target(&settings.drive_dir, &game, &name, stamp(&path), &stamp) {
                 Target::AlreadyThere(p) => Ok(DriveStarted {
                     job: None,
                     output: p.display().to_string(),
@@ -738,7 +764,10 @@ async fn drive_save(
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let name = format!("{} edit.mp4", jondisclip_core::library::split_edit(&stem).0);
+        let name = match &titled {
+            Some(t) => format!("{t}.mp4"),
+            None => format!("{} edit.mp4", jondisclip_core::library::split_edit(&stem).0),
+        };
         let Target::Write(out) = target(&settings.drive_dir, &game, &name, None, &stamp) else {
             return Err("couldn't choose a file name in the Drive folder".into());
         };
@@ -863,6 +892,8 @@ fn main() {
     // One settings window: a second launch focuses the existing one.
     let mutex = unsafe { CreateMutexW(None, true, w!("Local\\JondisClip.Settings")) };
     if mutex.is_err() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        // Ask the open window for the page this launch was for.
+        let _ = std::fs::write(page_request_file(), initial_page());
         if let Ok(h) = unsafe { FindWindowW(None, &HSTRING::from(WINDOW_TITLE)) } {
             unsafe {
                 let _ = ShowWindow(h, SW_SHOW);
@@ -873,6 +904,8 @@ fn main() {
         return;
     }
     let _mutex = mutex;
+    // A request left from an earlier session must not switch pages later.
+    let _ = std::fs::remove_file(page_request_file());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -908,6 +941,7 @@ fn main() {
             open_folder,
             start_tray,
             initial_page,
+            take_page_request,
             organize::library_load,
             thumb_save,
             show_in_folder,

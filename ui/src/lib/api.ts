@@ -260,6 +260,8 @@ export const thumbUrl = (id: string) => (isDesktop ? `${CLIP_BASE}/t/${id}.jpg` 
 
 export const api = {
   initialPage: () => call<"library" | "settings">("initial_page"),
+  /** The page a later launch (tray "Settings…" / left-click) asked for, once. */
+  takePageRequest: () => call<"library" | "settings" | null>("take_page_request"),
   /** Scans the clips root, reconciles folders with the disk, returns all. */
   async libraryLoad(): Promise<LibraryLoad> {
     const r = await call<{
@@ -319,8 +321,9 @@ export const api = {
   shareCopyAgain: (path: string) => call<void>("share_copy_again", { path }),
   shareReveal: (path: string) => call<void>("share_reveal", { path }),
   driveStatus: () => call<DriveStatus>("drive_status"),
-  driveSave: (id: string, start: number, end: number, whole: boolean, exact: boolean) =>
-    call<{ job: number | null; output: string; already: boolean }>("drive_save", { id, start, end, whole, exact }),
+  /** `title`: the clip's custom title, used as the file name in Drive. */
+  driveSave: (id: string, start: number, end: number, whole: boolean, exact: boolean, title: string | null) =>
+    call<{ job: number | null; output: string; already: boolean }>("drive_save", { id, start, end, whole, exact, title }),
   driveReveal: (path: string) => call<void>("drive_reveal", { path }),
   /** Exists, isn't inside the clips folder, and a test file can be written and removed. */
   driveCheck: (dir?: string) => call<DriveCheck>("drive_check", { dir: dir ?? null }),
@@ -475,6 +478,8 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       return structuredClone(mockState);
     case "initial_page":
       return new URLSearchParams(location.search).get("page") === "settings" ? "settings" : "library";
+    case "take_page_request":
+      return null;
     case "clip_keyframes": {
       const n = 301;
       return Array.from({ length: n }, (_, i) => i);

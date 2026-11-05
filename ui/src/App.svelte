@@ -78,7 +78,17 @@
       void api.reveal();
       poll = setInterval(pollTray, 1500);
     })();
-    return () => clearInterval(poll);
+    // The tray's "Settings…" (or a left-click) on the open window: switch to
+    // the page it asked for. The player stays open; the page shows behind it.
+    const onFocus = async () => {
+      const want = await api.takePageRequest().catch(() => null);
+      if (want && page) page = want;
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(poll);
+      window.removeEventListener("focus", onFocus);
+    };
   });
 
   function step(dir: -1 | 1) {

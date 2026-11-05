@@ -51,6 +51,9 @@ pub const WINDOW_CLASS: PCWSTR = w!("JondisClipTray");
 const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_SAVED: u32 = WM_APP + 2;
 pub const WM_APP_SECOND_INSTANCE: u32 = WM_APP + 3;
+/// Posted to quit: the window must be destroyed outside `with_app`, or
+/// WM_DESTROY can't borrow the app and `shutdown` is skipped.
+const WM_APP_QUIT: u32 = WM_APP + 4;
 const HOTKEY_ID: i32 = 1;
 const TIMER_ID: usize = 1;
 const TRAY_UID: u32 = 1;
@@ -68,6 +71,9 @@ const ID_REPLAY_BASE: u32 = 200;
 const LOW_DISK_BYTES: u64 = 2 << 30;
 const RESUME_DISK_BYTES: u64 = 3 << 30;
 const RESTART_BACKOFF_S: [u64; 5] = [2, 5, 10, 30, 60];
+/// Longest Quit waits for clips still being written (a 5-minute clip took
+/// up to 41 s while DayZ was loading the disk).
+const QUIT_WAIT_MAX_S: u64 = 180;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Status {
@@ -100,6 +106,10 @@ struct App {
     saved_flash_until: Option<Instant>,
     last_save_at: Option<Instant>,
     saves: Arc<Mutex<Vec<SaveOutcome>>>,
+    /// Saves still writing (their outcome hasn't arrived yet).
+    pending_saves: usize,
+    /// Quit was chosen while saves were writing: quit once they finish.
+    quit_requested: Option<Instant>,
     failures: usize,
     tick: u64,
     taskbar_created: u32,
@@ -243,6 +253,8 @@ pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), Stri
         saved_flash_until: None,
         last_save_at: None,
         saves: Arc::new(Mutex::new(Vec::new())),
+        pending_saves: 0,
+        quit_requested: None,
         failures: 0,
         tick: 0,
         taskbar_created,
@@ -336,6 +348,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
             });
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_APP_QUIT => {
+            // Not inside with_app, so WM_DESTROY below can run shutdown.
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            LRESULT(0)
         }
         WM_DESTROY => {
             with_app(App::shutdown);
@@ -608,6 +627,21 @@ impl App {
 
     fn on_tick(&mut self) {
         self.tick += 1;
+        // A save that never reports back mustn't keep the app from quitting.
+        if self
+            .quit_requested
+            .is_some_and(|t| t.elapsed().as_secs() >= QUIT_WAIT_MAX_S)
+        {
+            warning!("quitting with {} save(s) unfinished", self.pending_saves);
+            self.post_quit();
+            return;
+        }
+        // Quitting: no restarts or checks, only collect finished saves (in
+        // case a WM_APP_SAVED went missing).
+        if self.quit_requested.is_some() {
+            self.on_saved();
+            return;
+        }
         // Recorder died on its own (device lost, display change, writer error).
         if self.recorder.as_ref().is_some_and(|r| !r.is_running())
             && let Some(r) = self.recorder.take()
@@ -732,6 +766,14 @@ impl App {
     // ---------- saving clips ----------
 
     fn save_clip(&mut self) {
+        if self.quit_requested.is_some() {
+            self.balloon(
+                "Clip not saved",
+                "JondisClip is quitting after the clip it's still saving.",
+                true,
+            );
+            return;
+        }
         if self
             .last_save_at
             .is_some_and(|t| t.elapsed().as_millis() < 1000)
@@ -792,13 +834,14 @@ impl App {
                     Ok(Err(e)) => Err(e.to_string()),
                     Err(_) => Err("save thread panicked".into()),
                 };
-                if let Ok(mut q) = saves.lock() {
-                    q.push(SaveOutcome {
+                saves
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(SaveOutcome {
                         result,
                         app,
                         seconds,
                     });
-                }
                 unsafe {
                     let _ = PostMessageW(
                         Some(HWND(hwnd_raw as *mut _)),
@@ -808,17 +851,42 @@ impl App {
                     );
                 }
             });
-        if let Err(e) = spawned {
-            error!("could not start save waiter: {e}");
+        match spawned {
+            Ok(_) => self.pending_saves += 1,
+            Err(e) => error!("could not start save waiter: {e}"),
         }
     }
 
+    /// Quits now, or once the clips still being written are finished: the
+    /// save threads die with the process, which would lose those clips.
+    fn request_quit(&mut self) {
+        // A second Quit while waiting means "now".
+        if self.pending_saves == 0 || self.quit_requested.is_some() {
+            self.post_quit();
+            return;
+        }
+        info!(
+            "quit requested: waiting for {} save(s) to finish",
+            self.pending_saves
+        );
+        self.quit_requested = Some(Instant::now());
+        // Stop recording now. Pinned segments stay until their save is done.
+        self.stop_recorder();
+        self.status = Status::Paused;
+        self.refresh();
+        self.balloon(
+            "Finishing your clip",
+            "JondisClip quits as soon as the clip is saved.",
+            false,
+        );
+    }
+
     fn on_saved(&mut self) {
-        let outcomes: Vec<SaveOutcome> = self
-            .saves
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default();
+        let outcomes: Vec<SaveOutcome> = self.saves.lock().map_or_else(
+            |e| std::mem::take(&mut *e.into_inner()),
+            |mut q| std::mem::take(&mut *q),
+        );
+        self.pending_saves = self.pending_saves.saturating_sub(outcomes.len());
         for o in outcomes {
             match o.result {
                 Ok(files) => {
@@ -846,7 +914,17 @@ impl App {
                 }
             }
         }
+        if self.quit_requested.is_some() && self.pending_saves == 0 {
+            self.post_quit();
+            return;
+        }
         self.refresh();
+    }
+
+    fn post_quit(&self) {
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd), WM_APP_QUIT, WPARAM(0), LPARAM(0));
+        }
     }
 
     // ---------- menu ----------
@@ -979,9 +1057,10 @@ impl App {
             }
             ID_EDIT_SETTINGS => self.open_ui(true),
             ID_LIBRARY => self.open_ui(false),
-            ID_QUIT => unsafe {
-                let _ = DestroyWindow(self.hwnd);
-            },
+            ID_QUIT => {
+                self.request_quit();
+                return;
+            }
             c if (ID_REPLAY_BASE..ID_REPLAY_BASE + REPLAY_PRESETS.len() as u32).contains(&c) => {
                 let secs = REPLAY_PRESETS[(c - ID_REPLAY_BASE) as usize];
                 let mut new = self.settings.clone();
