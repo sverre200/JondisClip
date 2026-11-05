@@ -114,6 +114,18 @@ fn theme_accent(theme: &str) -> u32 {
     }
 }
 
+/// The theme's window background (`--bg` in tokens.css) as 0xRRGGBB.
+fn theme_bg(theme: &str) -> u32 {
+    match theme {
+        "toxic" => 0x080d09,
+        "midnight" => 0x0f0f14,
+        "ocean" => 0x0a0f17,
+        "sunset" => 0x120c09,
+        "graphite" => 0x0e0e0f,
+        _ => 0x110a0c,
+    }
+}
+
 /// The window/taskbar icon in the theme's colour: the record mark
 /// (`icons/mark128.rgba`, drawn in #e5484d on #1a1c20) recoloured, keeping
 /// its anti-aliasing. The exe's own icon (Explorer, shortcuts) stays red.
@@ -193,25 +205,26 @@ fn big_icon(app: &tauri::AppHandle, rgba: &[u8], w: u32, h: u32) {
     }
 }
 
-/// Windows 11 title bar: caption in the window background, border in the
-/// theme's accent (DWM; Windows 10 ignores both and keeps the dark bar).
+/// Windows 11 title bar: caption in the theme's window background, so the
+/// bar and the page read as one surface, and no coloured border (DWM;
+/// Windows 10 ignores both and keeps the dark bar).
 fn title_bar(app: &tauri::AppHandle, theme: &str) {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{
         DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DwmSetWindowAttribute,
     };
-    let accent = theme_accent(theme);
+    /// DWMWA_COLOR_NONE: no border colour at all.
+    const NO_BORDER: u32 = 0xFFFF_FFFE;
     // 0xRRGGBB → COLORREF 0x00BBGGRR
     let colorref = |rgb: u32| ((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff);
     let Some(hwnd) = export::main_hwnd(app) else {
         return;
     };
     let hwnd = HWND(hwnd as *mut core::ffi::c_void);
-    for (attr, rgb) in [
-        (DWMWA_CAPTION_COLOR, 0x121316),
-        (DWMWA_BORDER_COLOR, accent),
+    for (attr, c) in [
+        (DWMWA_CAPTION_COLOR, colorref(theme_bg(theme))),
+        (DWMWA_BORDER_COLOR, NO_BORDER),
     ] {
-        let c = colorref(rgb);
         // Best effort: fails harmlessly before Windows 11.
         let _ = unsafe {
             DwmSetWindowAttribute(

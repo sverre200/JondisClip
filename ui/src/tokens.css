@@ -2,19 +2,18 @@
 :root {
   color-scheme: dark;
 
-  /* Surfaces */
-  --bg: #121316;
-  --surface: #18191d;
-  --surface-raised: #202227;
-  --surface-hover: #272a30;
-  --surface-press: #2d3037;
-  --border: #26282e;
-  --border-strong: #363941;
-
-  /* Text */
-  --text: #ecedef;
-  --text-muted: #a0a3ab;
-  --text-faint: #6f737c;
+  /* Surfaces and text: tinted towards the theme's hue (palettes from
+     JondisBoard). Crimson is the default; each [data-theme] below sets its own. */
+  --bg: #110a0c;
+  --surface: #23161a;
+  --surface-raised: #2e1d23;
+  --surface-hover: #36252b;
+  --surface-press: #3e2d33;
+  --border: #3a232a;
+  --border-strong: #513b41;
+  --text: #f7e8eb;
+  --text-muted: #a8868d;
+  --text-faint: #7b6166;
 
   /* Accent: the theme colour (Crimson, the original record-red, by
      default; see the [data-theme] blocks below). Buttons, toggles,
@@ -83,9 +82,21 @@
   --shadow-pop: 0 8px 24px rgb(0 0 0 / 0.45), 0 0 0 1px var(--border-strong);
 }
 
-/* Themes (all dark). Only the accent changes; surfaces, text and status
-   colours are shared. data-theme is set on <html> before first paint. */
+/* Themes (all dark). Each tints the surfaces, borders and text towards its
+   hue and sets its accent; status colours (success, warning, danger,
+   recording, Edit, Drive) are shared. data-theme is set on <html> before
+   first paint. */
 :root[data-theme="toxic"] {
+  --bg: #080d09;
+  --surface: #142018;
+  --surface-raised: #1b2b20;
+  --surface-hover: #233328;
+  --surface-press: #2b3b30;
+  --border: #22362a;
+  --border-strong: #3a4d41;
+  --text: #e6f5e9;
+  --text-muted: #7f9a86;
+  --text-faint: #5b7061;
   --accent: #45e33f;
   --accent-hover: #5be656;
   --accent-press: #3bc336;
@@ -93,6 +104,16 @@
   --on-accent: #0c0d0f;
 }
 :root[data-theme="midnight"] {
+  --bg: #0f0f14;
+  --surface: #1e1e29;
+  --surface-raised: #262634;
+  --surface-hover: #2e2e3c;
+  --surface-press: #363643;
+  --border: #2b2b3a;
+  --border-strong: #424250;
+  --text: #ececf3;
+  --text-muted: #8a8aa0;
+  --text-faint: #656576;
   --accent: #7c5cff;
   --accent-hover: #8c70ff;
   --accent-press: #6b4fdb;
@@ -100,6 +121,16 @@
   --on-accent: #ffffff;
 }
 :root[data-theme="ocean"] {
+  --bg: #0a0f17;
+  --surface: #16202f;
+  --surface-raised: #1d2a3d;
+  --surface-hover: #253245;
+  --surface-press: #2d3a4c;
+  --border: #22324a;
+  --border-strong: #3a495f;
+  --text: #e6eef9;
+  --text-muted: #7e91ab;
+  --text-faint: #5b6a7f;
   --accent: #3b8cff;
   --accent-hover: #539aff;
   --accent-press: #3378db;
@@ -107,6 +138,16 @@
   --on-accent: #ffffff;
 }
 :root[data-theme="sunset"] {
+  --bg: #120c09;
+  --surface: #241914;
+  --surface-raised: #30211a;
+  --surface-hover: #382922;
+  --surface-press: #40312a;
+  --border: #3a2a20;
+  --border-strong: #514138;
+  --text: #f8ece4;
+  --text-muted: #a8907f;
+  --text-faint: #7b685c;
   --accent: #ff8a2b;
   --accent-hover: #ff9844;
   --accent-press: #db7725;
@@ -114,6 +155,16 @@
   --on-accent: #0c0d0f;
 }
 :root[data-theme="graphite"] {
+  --bg: #0e0e0f;
+  --surface: #1d1d20;
+  --surface-raised: #26262a;
+  --surface-hover: #2e2e32;
+  --surface-press: #36363a;
+  --border: #2c2c31;
+  --border-strong: #434348;
+  --text: #ededef;
+  --text-muted: #8b8b93;
+  --text-faint: #66666b;
   --accent: #e6e6ea;
   --accent-hover: #f4f4f7;
   --accent-press: #c9c9cf;

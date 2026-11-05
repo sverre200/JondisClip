@@ -1,4 +1,5 @@
-// Window themes (all dark): only the accent changes. The choice is stored in
+// Window themes (all dark): each tints the surfaces, borders and text
+// towards its hue (palettes from JondisBoard) and sets its accent. The choice is stored in
 // settings.toml (`theme`); localStorage keeps a copy so the right colours are
 // on <html> before the first paint.
 export const THEMES = [

@@ -26,3 +26,11 @@ The owner wants colour themes like JondisBoard's, all dark, without losing the c
 - **The window and taskbar icon follow the theme.** The record mark (`icons/mark128.rgba`, drawn in `#e5484d` on `#1a1c20`) is recoloured at runtime, keeping its anti-aliasing. It's set as both the small icon (`set_icon`) and the big icon (`WM_SETICON`/`ICON_BIG`, which the taskbar and Alt+Tab use).
 - Verified by reading both icons back from the window handle: Ocean `#3b8cff`, and Toxic `#45e33f` after a change.
 - **Still red:** the exe's own icon (Explorer, shortcuts, a pinned taskbar button before the window opens) and the tray.
+
+## Update 2026-11-05: themes tint the whole window; no accent border
+- **Owner request:** drop the bright accent-coloured window border and make each theme read as its colour throughout, as JondisBoard does.
+- **Surfaces, borders and text now carry the theme's hue.** Each theme sets `--bg`, `--surface`, `--surface-raised/-hover/-press`, `--border`, `--border-strong` and `--text/-muted/-faint`. These come from JondisBoard's palettes (`rust/src/theme.rs`: bg, card, card hover, border, text, muted), with the in-between steps mixed the same way it mixes them. Crimson, the default, is a dark wine tint. The accents are unchanged.
+- **Unchanged:** status colours (success, warning, danger, recording), the red Edit badge, the blue Drive badge and the folder colours are the same in every theme.
+- **Title bar:** the caption takes the theme's `--bg` (`theme_bg` in `main.rs`), so the bar and the page are one surface. The border is `DWMWA_COLOR_NONE`, so there is no coloured outline.
+- **Contrast (WCAG):** text is 14.0–14.9:1 on cards in every theme. Muted text is 4.9–5.7:1 on cards and 5.7–6.4:1 on the background. Faint text is 3.3–3.7:1, used for hints only, as before.
+- Checked in the browser on the library, Settings, a dialog and the context menu across the themes.
