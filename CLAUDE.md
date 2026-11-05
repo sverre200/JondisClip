@@ -13,6 +13,7 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
   - Treat real-window tests as writing to a sandbox copy.
   - Hand the owner a command to run in their own PowerShell when real data must change.
   - D:\ and C:\dev are not redirected.
+- The project lives in `D:\Claude-Projects\JondisClip` (moved from `C:\dev\JondisClip` on 2026-11-05). Build output (`target\`) wasn't copied, so the first build there is a full one.
 
 ## Read first
 - `docs/ARCHITECTURE.md`: components, processes, threads and data flow

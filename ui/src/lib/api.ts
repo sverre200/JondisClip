@@ -296,7 +296,8 @@ export const api = {
   folderReveal: (name: string) => call<void>("folder_reveal", { name }),
   folderRename: (name: string, to: string) => call<void>("folder_rename", { name, to }),
   folderColor: (name: string, color: FolderColor) => call<void>("folder_color", { name, color }),
-  folderDelete: (name: string) => call<{ moved: number; failed: string[]; kept_dir: boolean }>("folder_delete", { name }),
+  folderDelete: (name: string) =>
+    call<{ moved: number; failed: string[]; kept_dir: boolean; kept_reason: "in-use" | "files" | null; kept_files: string[] }>("folder_delete", { name }),
   foldersReorder: (names: string[]) => call<void>("folders_reorder", { names }),
   /** Moves the files into folder `to` (null: back to their game folders). */
   clipsMove: (items: Item[], to: string | null) => call<MoveResult>("clips_move", { items, to }),
@@ -627,7 +628,7 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       let moved = 0;
       for (const c of mockLib ?? []) if (c.folder && gone(c.folder)) ((c.folder = null), moved++);
       for (let k = mockFolders.length - 1; k >= 0; k--) if (gone(mockFolders[k]!.name)) mockFolders.splice(k, 1);
-      return { moved, failed: [], kept_dir: false };
+      return { moved, failed: [], kept_dir: false, kept_reason: null, kept_files: [] };
     }
     case "folders_reorder": {
       const names = args?.names as string[];

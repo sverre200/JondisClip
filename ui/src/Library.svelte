@@ -444,7 +444,10 @@
     try {
       const r = await api.folderDelete(f.name);
       if (r.failed.length) onerror(`${r.failed.length === 1 ? "1 clip" : `${r.failed.length} clips`} couldn't be moved out, so the folder ${f.leaf} was kept: ${r.failed[0]}`);
-      else if (r.kept_dir) tell(`${f.leaf} isn't shown anymore. Its Windows folder still has other files, so it was kept.`);
+      else if (r.kept_dir && r.kept_reason === "in-use")
+        onerror(`${r.moved ? `Moved ${r.moved === 1 ? "its clip" : `its ${r.moved} clips`} out, but the` : "The"} empty folder ${f.leaf} couldn't be removed: another program has it open (a File Explorer window?). Close it and delete the folder again.`);
+      else if (r.kept_dir)
+        onerror(`${r.moved ? `Moved ${r.moved === 1 ? "its clip" : `its ${r.moved} clips`} out, but` : ""} ${f.leaf} still has other files (${r.kept_files.join(", ")}), so its Windows folder was kept.`.trim());
       else tell(r.moved ? `Deleted ${f.leaf}. Its ${r.moved === 1 ? "clip is" : `${r.moved} clips are`} back in their game folders.` : `Deleted ${f.leaf}`);
     } catch (e) {
       onerror(String(e));

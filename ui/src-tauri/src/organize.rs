@@ -646,8 +646,27 @@ pub async fn folder_color(name: String, color: String) -> Result<(), String> {
 pub struct DeleteFolderResult {
     pub moved: usize,
     pub failed: Vec<String>,
-    /// The directory was kept because it still holds other files.
+    /// The directory couldn't be removed (it stays a folder in the app).
     pub kept_dir: bool,
+    /// Why, when it was kept: "in-use" (empty, but open in another program,
+    /// e.g. File Explorer) or "files" (it still holds other files).
+    pub kept_reason: Option<&'static str>,
+    /// A few of the other files, for the message.
+    pub kept_files: Vec<String>,
+}
+
+/// Removes an empty directory, retrying briefly: a File Explorer window
+/// showing it can hold it open for a moment.
+fn remove_empty_dir(d: &Path) -> bool {
+    for i in 0..4 {
+        if std::fs::remove_dir(d).is_ok() || !d.exists() {
+            return true;
+        }
+        if i < 3 {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+    false
 }
 
 /// Deletes a folder safely: its clips go back to their game folders first;
@@ -697,19 +716,59 @@ pub async fn folder_delete(name: String) -> Result<DeleteFolderResult, String> {
                 moved,
                 failed,
                 kept_dir: true,
+                kept_reason: None,
+                kept_files: Vec::new(),
             });
         }
         // remove_dir only succeeds on an empty directory: deepest first.
         for d in dirs.iter().rev() {
-            let _ = std::fs::remove_dir(d);
+            remove_empty_dir(d);
         }
         let kept_dir = dir.is_dir();
-        let fname = f.name.clone();
-        meta(|o| o.remove_folder(&fname).map(drop))?;
+        // Forget only the folders whose directory is really gone (deepest
+        // first). One that's still there stays a folder in the app instead
+        // of coming back grey on the next scan.
+        let mut gone: Vec<String> = org
+            .subtree(&f.name)
+            .iter()
+            .map(|x| x.name.clone())
+            .filter(|n| !root.join(n).is_dir())
+            .collect();
+        gone.sort_by_key(|n| std::cmp::Reverse(depth_of(n)));
+        meta(|o| {
+            for n in &gone {
+                if o.folder(n).is_some() {
+                    o.remove_folder(n)?;
+                }
+            }
+            Ok(())
+        })?;
+        let (kept_reason, kept_files) = if kept_dir {
+            let mut left: Vec<String> = Vec::new();
+            for d in dirs.iter().filter(|d| d.is_dir()) {
+                if let Ok(rd) = std::fs::read_dir(d) {
+                    left.extend(
+                        rd.flatten()
+                            .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
+                            .map(|e| e.file_name().to_string_lossy().into_owned()),
+                    );
+                }
+            }
+            if left.is_empty() {
+                (Some("in-use"), left)
+            } else {
+                left.truncate(3);
+                (Some("files"), left)
+            }
+        } else {
+            (None, Vec::new())
+        };
         Ok(DeleteFolderResult {
             moved,
             failed,
             kept_dir,
+            kept_reason,
+            kept_files,
         })
     })
     .await
@@ -865,6 +924,27 @@ pub async fn clip_copy_file(app: tauri::AppHandle, id: String) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_folder_held_open_is_reported_not_removed() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = std::env::temp_dir().join(format!("jc-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // Like a File Explorer window on it: open, without delete sharing.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1 | 2)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&d)
+            .unwrap();
+        assert!(!remove_empty_dir(&d), "can't be removed while it's open");
+        assert!(d.is_dir());
+        drop(held);
+        assert!(remove_empty_dir(&d));
+        assert!(!d.exists());
+    }
 
     struct Tmp(PathBuf);
     impl Drop for Tmp {
