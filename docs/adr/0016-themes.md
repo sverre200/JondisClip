@@ -21,3 +21,8 @@ The owner wants colour themes like JondisBoard's, all dark, without losing the c
   - In the browser: all six themes.
   - In the release window (sandbox profile): a change is applied instantly and saved to `settings.toml`; after a restart the theme and the accent border come back; the Edit badge and the recording pill stay red; Delete stays red under Graphite.
 - **A small flash is possible** only if `settings.toml`'s theme is edited by hand while the window is closed. The cached theme shows until the file is read.
+
+## Update 2026-11-05: themed window icon
+- **The window and taskbar icon follow the theme.** The record mark (`icons/mark128.rgba`, drawn in `#e5484d` on `#1a1c20`) is recoloured at runtime, keeping its anti-aliasing. It's set as both the small icon (`set_icon`) and the big icon (`WM_SETICON`/`ICON_BIG`, which the taskbar and Alt+Tab use).
+- Verified by reading both icons back from the window handle: Ocean `#3b8cff`, and Toxic `#45e33f` after a change.
+- **Still red:** the exe's own icon (Explorer, shortcuts, a pinned taskbar button before the window opens) and the tray.

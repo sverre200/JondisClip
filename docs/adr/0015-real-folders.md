@@ -69,3 +69,35 @@ Verified:
 Not verified:
 - Cross-volume moves (copy, verify, delete). These are covered by code review only. There's no second volume under the clips root on the dev machine.
 - The real library's migration. It runs when the owner first opens the new build.
+
+## Update 2026-11-05: subfolders
+- **Folders nest up to 3 levels** (`library::MAX_DEPTH`). A folder's identity is its path relative to the clips root, `\`-separated (`Edited\DayZ\Raids`). Only top-level directories can be game folders. A directory inside a user folder is always a user folder, so `Edited\DayZ` is never mistaken for the recorder's `DayZ`.
+- **The scan** walks up to 3 levels and skips hidden (`.name`) directories and links below the top level. `Clip.dir` is the relative path; the game fallback is still the top-level name.
+- **Reconcile** works parents first.
+  - A directory inside a registered folder is adopted even when empty (an Explorer category).
+  - At the top level, only directories holding clips somewhere inside are adopted.
+  - A folder renamed or moved in Explorer is recognised by the clips in its whole subtree: same depth wins, then the outer folder. Its subfolders follow it.
+- **Commands:**
+  - `folder_create(parent)`.
+  - `folder_rename` renames in place.
+  - New `folder_move(name, parent)`: same drive only, never over an existing name, not into itself, and the deepest subfolder must still fit.
+  - `folder_delete` moves the clips of the whole subtree home, then removes the emptied directories from the deepest up. Directories still holding other files are kept.
+- **Save to Drive with "Keep my folders"** mirrors the path (`JondisClip\Edited\DayZ\…`). Leftover `.partial` cleanup walks the same depth.
+- **UI:**
+  - The sidebar is a tree: indented, collapsible, remembered.
+  - Drag a folder onto the middle of a row to nest it, or between rows to place it.
+  - Folder menu: New subfolder…, Move folder to.
+  - A breadcrumb shows where you are.
+  - "Include subfolders" (off by default) shows a folder's subtree; custom order then can't be arranged.
+  - Counts include subfolders.
+- **Verified 2026-11-05** in the sandbox profile on sample clips:
+  - Nested create.
+  - The 3-level limit for create and move.
+  - Moving a clip three levels deep.
+  - Moving a folder with its clip into another folder.
+  - Refusing a move into itself.
+  - Renaming the parent in Explorer, keeping every subfolder's colour.
+  - Save to Drive path.
+  - Deleting a folder that has subfolders: clip back to DayZ, directories removed.
+  - Every original's hash still present.
+  - In the browser: the tree, drag-to-nest, Move to top level, the view following a rename, and Include subfolders.

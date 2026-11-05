@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use jondisclip_core::library::{self as lib, Clip};
-use jondisclip_core::organize::{Found, OrgError, Organize, Pending, Store, folder_name};
+use jondisclip_core::organize::{
+    Found, OrgError, Organize, Pending, Store, depth_of, folder_name, folder_path, is_within,
+    leaf_of, parent_of,
+};
 use jondisclip_core::paths;
 use serde::{Deserialize, Serialize};
 
@@ -386,6 +389,25 @@ fn move_items(root: &Path, items: &[Item], to: Option<&str>) -> Result<MoveResul
     Ok(res)
 }
 
+/// `dir` and the directories inside it, up to `depth` levels, parents
+/// before children. Links aren't followed.
+fn collect_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if !dir.is_dir() {
+        return;
+    }
+    out.push(dir.to_path_buf());
+    if depth == 0 {
+        return;
+    }
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir() && !t.is_symlink()) {
+                collect_dirs(&e.path(), depth - 1, out);
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------ commands
 
 #[tauri::command]
@@ -408,9 +430,19 @@ pub async fn library_load() -> Result<Library, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Creates a real folder under the clips root and registers it.
+/// The directory a folder (relative path) lives in: the root, or its parent.
+fn parent_dir(root: &Path, path: &str) -> PathBuf {
+    parent_of(path).map_or_else(|| root.to_path_buf(), |p| root.join(p))
+}
+
+/// Creates a real folder under the clips root, or inside folder `parent`,
+/// and registers it.
 #[tauri::command]
-pub async fn folder_create(name: String, color: String) -> Result<(), String> {
+pub async fn folder_create(
+    name: String,
+    color: String,
+    parent: Option<String>,
+) -> Result<(), String> {
     blocking(move || {
         let root = root();
         if !root.is_dir() {
@@ -419,17 +451,36 @@ pub async fn folder_create(name: String, color: String) -> Result<(), String> {
                 root.display()
             ));
         }
-        let name = folder_name(&name).map_err(|e| e.to_string())?;
+        let leaf = folder_name(&name).map_err(|e| e.to_string())?;
         // Validate the metadata first, then create the directory.
         let mut probe = store().load()?;
-        probe.add_folder(&name, &color).map_err(|e| e.to_string())?;
-        if entry_exists(&root, &name) {
+        let (full, in_dir) = match parent.as_deref().filter(|p| !p.is_empty()) {
+            Some(p) => {
+                let f = probe
+                    .folder(p)
+                    .ok_or("That folder no longer exists. Refresh and try again.")?;
+                let d = root.join(&f.name);
+                if !d.is_dir() {
+                    return Err(format!(
+                        "{} isn't on disk any more. Refresh and try again.",
+                        d.display()
+                    ));
+                }
+                (
+                    folder_path(&format!("{}\\{leaf}", f.name)).map_err(|e| e.to_string())?,
+                    d,
+                )
+            }
+            None => (leaf.clone(), root.clone()),
+        };
+        probe.add_folder(&full, &color).map_err(|e| e.to_string())?;
+        if entry_exists(&in_dir, &leaf) {
             // An existing directory that isn't a game folder (one kept after
             // a delete because it held other files, or made in Explorer) is
             // adopted under its own spelling instead of refused.
-            let existing = std::fs::read_dir(&root).ok().and_then(|rd| {
+            let existing = std::fs::read_dir(&in_dir).ok().and_then(|rd| {
                 rd.flatten()
-                    .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(&name))
+                    .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(&leaf))
             });
             return match existing {
                 Some(e)
@@ -437,42 +488,130 @@ pub async fn folder_create(name: String, color: String) -> Result<(), String> {
                         && !probe.is_game_dir(&e.file_name().to_string_lossy()) =>
                 {
                     let on_disk = e.file_name().to_string_lossy().into_owned();
-                    meta(|o| o.add_folder(&on_disk, &color)).map(drop)
+                    let full = match parent_of(&full) {
+                        Some(p) => format!("{p}\\{on_disk}"),
+                        None => on_disk,
+                    };
+                    meta(|o| o.add_folder(&full, &color)).map(drop)
                 }
                 _ => Err(format!(
-                    "There's already something called \"{name}\" in {}.",
-                    root.display()
+                    "There's already something called \"{leaf}\" in {}.",
+                    in_dir.display()
                 )),
             };
         }
-        std::fs::create_dir(root.join(&name))
+        std::fs::create_dir(in_dir.join(&leaf))
             .map_err(|e| format!("couldn't create the folder: {e}"))?;
-        meta(|o| o.add_folder(&name, &color)).map(drop)
+        meta(|o| o.add_folder(&full, &color)).map(drop)
     })
     .await
 }
 
-/// Renames the folder's directory (never over an existing one), then the metadata.
+fn dir_move_error(e: std::io::Error) -> String {
+    match e.raw_os_error() {
+        Some(5) | Some(32) => {
+            "A clip in this folder is in use (playing or exporting?). Close it and try again."
+                .to_string()
+        }
+        Some(17) => "Folders can't be moved to another drive.".to_string(),
+        _ => format!("couldn't move the folder: {e}"),
+    }
+}
+
+/// Renames the folder's directory in place (never over an existing one),
+/// then the metadata (its subfolders follow).
 #[tauri::command]
 pub async fn folder_rename(name: String, to: String) -> Result<(), String> {
     blocking(move || {
         let root = root();
-        let to = folder_name(&to).map_err(|e| e.to_string())?;
+        let leaf = folder_name(&to).map_err(|e| e.to_string())?;
         let org = store().load()?;
         let f = org.folder(&name).ok_or("That folder no longer exists.")?;
         let from = root.join(&f.name);
         if !from.is_dir() {
-            return Err(format!("{} isn't on disk any more. Refresh and try again.", from.display()));
+            return Err(format!(
+                "{} isn't on disk any more. Refresh and try again.",
+                from.display()
+            ));
         }
-        if !to.eq_ignore_ascii_case(&f.name) && entry_exists(&root, &to) {
-            return Err(format!("There's already something called \"{to}\" in {}.", root.display()));
+        let in_dir = parent_dir(&root, &f.name);
+        if !leaf.eq_ignore_ascii_case(leaf_of(&f.name)) && entry_exists(&in_dir, &leaf) {
+            return Err(format!(
+                "There's already something called \"{leaf}\" in {}.",
+                in_dir.display()
+            ));
         }
-        crate::export::move_no_replace(&from, &root.join(&to)).map_err(|e| match e.raw_os_error() {
-            Some(5) | Some(32) => "A clip in this folder is in use (playing or exporting?). Close it and try again.".to_string(),
-            _ => format!("couldn't rename the folder: {e}"),
-        })?;
+        let new_full = match parent_of(&f.name) {
+            Some(p) => format!("{p}\\{leaf}"),
+            None => leaf.clone(),
+        };
+        crate::export::move_no_replace(&from, &in_dir.join(&leaf)).map_err(dir_move_error)?;
         let old = f.name.clone();
-        meta(|o| o.renamed(&old, &to)).map(drop)
+        meta(|o| o.renamed(&old, &new_full)).map(drop)
+    })
+    .await
+}
+
+/// Moves a folder (with everything in it) into folder `parent`, or back to
+/// the top level (None). Same drive only; never over an existing name.
+#[tauri::command]
+pub async fn folder_move(name: String, parent: Option<String>) -> Result<(), String> {
+    blocking(move || {
+        if crate::export::busy() {
+            return Err("Wait for the running export to finish first.".into());
+        }
+        let root = root();
+        let org = store().load()?;
+        let f = org.folder(&name).ok_or("That folder no longer exists.")?;
+        let old = f.name.clone();
+        let leaf = leaf_of(&old).to_string();
+        let dest_parent = match parent.as_deref().filter(|p| !p.is_empty()) {
+            Some(p) => {
+                let pf = org
+                    .folder(p)
+                    .ok_or("That folder no longer exists. Refresh and try again.")?;
+                if pf.name.eq_ignore_ascii_case(&old) || is_within(&pf.name, &old) {
+                    return Err("A folder can't go inside itself.".into());
+                }
+                Some(pf.name.clone())
+            }
+            None => None,
+        };
+        if parent_of(&old).map(str::to_lowercase) == dest_parent.as_deref().map(str::to_lowercase) {
+            return Ok(()); // already there
+        }
+        let new_full = match &dest_parent {
+            Some(p) => format!("{p}\\{leaf}"),
+            None => leaf.clone(),
+        };
+        // The deepest folder inside must still fit.
+        let deepest = org
+            .subtree(&old)
+            .iter()
+            .map(|x| depth_of(&x.name) - depth_of(&old))
+            .max()
+            .unwrap_or(0);
+        if depth_of(&new_full) + deepest > lib::MAX_DEPTH {
+            return Err(format!("Folders go up to {} levels deep.", lib::MAX_DEPTH));
+        }
+        if dest_parent.is_none() && org.game_dirs.contains(&leaf.to_lowercase()) {
+            return Err(format!(
+                "\"{leaf}\" is a game folder name at the top level. Rename the folder first."
+            ));
+        }
+        let from = root.join(&old);
+        let to_dir = parent_dir(&root, &new_full);
+        if !from.is_dir() || !to_dir.is_dir() {
+            return Err("That folder isn't on disk any more. Refresh and try again.".into());
+        }
+        if entry_exists(&to_dir, &leaf) {
+            return Err(format!(
+                "There's already something called \"{leaf}\" in {}.",
+                to_dir.display()
+            ));
+        }
+        crate::export::move_no_replace(&from, &to_dir.join(&leaf)).map_err(dir_move_error)?;
+        meta(|o| o.renamed(&old, &new_full)).map(drop)
     })
     .await
 }
@@ -504,15 +643,23 @@ pub async fn folder_delete(name: String) -> Result<DeleteFolderResult, String> {
         let dir = root.join(&f.name);
         let mut moved = 0;
         let mut failed = Vec::new();
+        // The folder and every directory inside it (deepest last).
+        let mut dirs = Vec::new();
+        collect_dirs(&dir, lib::MAX_DEPTH, &mut dirs);
         if dir.is_dir() {
-            let clips: Vec<PathBuf> = std::fs::read_dir(&dir)
-                .map_err(|e| e.to_string())?
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp4"))
-                })
-                .collect();
+            let mut clips: Vec<PathBuf> = Vec::new();
+            for d in &dirs {
+                clips.extend(
+                    std::fs::read_dir(d)
+                        .map_err(|e| e.to_string())?
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            p.is_file()
+                                && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("mp4"))
+                        }),
+                );
+            }
             for c in clips {
                 let name = c
                     .file_name()
@@ -531,8 +678,11 @@ pub async fn folder_delete(name: String) -> Result<DeleteFolderResult, String> {
                 kept_dir: true,
             });
         }
-        // remove_dir only succeeds on an empty directory.
-        let kept_dir = dir.is_dir() && std::fs::remove_dir(&dir).is_err();
+        // remove_dir only succeeds on an empty directory: deepest first.
+        for d in dirs.iter().rev() {
+            let _ = std::fs::remove_dir(d);
+        }
+        let kept_dir = dir.is_dir();
         let fname = f.name.clone();
         meta(|o| o.remove_folder(&fname).map(drop))?;
         Ok(DeleteFolderResult {
@@ -591,7 +741,7 @@ pub async fn pending_resolve(
             let root = root();
             // A folder from before ADR-0015 has no directory yet: make it
             // (not recursively: a missing clips root stays an error).
-            let name = folder_name(&folder).map_err(|e| e.to_string())?;
+            let name = folder_path(&folder).map_err(|e| e.to_string())?;
             let dir = root.join(&name);
             if !dir.is_dir() {
                 if dir.exists() {

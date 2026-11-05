@@ -575,7 +575,7 @@
       {/if}
     </div>
   </div>
-  <p class="keys">Space play/pause · I/O set start/end · Ctrl+S save · ←/→ 5 s · J/L 10 s · ,/. frame · Page Up/Down other clips · Esc back</p>
+  <p class="keys">Space play/pause · I/O set start/end · middle-drag moves the selection · Ctrl+S save · ←/→ 5 s · J/L 10 s · ,/. frame · Page Up/Down other clips · Esc back</p>
 </div>
 
 <style>

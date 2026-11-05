@@ -120,15 +120,7 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
     let mut files = Vec::new();
     let mut dirs = Vec::new();
     collect(root, None, &mut files);
-    if let Ok(rd) = std::fs::read_dir(root) {
-        for d in rd.flatten() {
-            if d.file_type().is_ok_and(|t| t.is_dir()) {
-                let name = d.file_name().to_string_lossy().into_owned();
-                collect(&d.path(), Some(&name), &mut files);
-                dirs.push(name);
-            }
-        }
-    }
+    walk_dirs(root, None, 1, &mut dirs, &mut files);
     dirs.sort_by_key(|d| d.to_lowercase());
 
     // Cached thumbnails, listed once (used for the flag and for pruning).
@@ -144,7 +136,11 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
     let mut fingerprinted = 0;
     let mut fresh = BTreeMap::new();
     let mut clips = Vec::with_capacity(files.len());
-    for (path, folder_game, size, mtime) in files {
+    for (path, rel_dir, size, mtime) in files {
+        // The top-level directory names the game (the recorder's layout).
+        let folder_game = rel_dir
+            .as_deref()
+            .map(|d| d.split('\\').next().unwrap_or(d).to_owned());
         let mut transient = false;
         let key = path.to_string_lossy().into_owned();
         let entry = match index.entries.remove(&key) {
@@ -175,7 +171,7 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let parsed = parse_name(&file_name);
-        let dir = folder_game.clone();
+        let dir = rel_dir;
         let game = folder_game
             .or_else(|| parsed.as_ref().map(|p| p.0.clone()))
             .unwrap_or_else(|| "Other".into());
@@ -247,6 +243,44 @@ pub fn scan(root: &Path, cache: &Cache, local_time: &dyn Fn(u64) -> String) -> S
 }
 
 type Found = (PathBuf, Option<String>, u64, u64);
+
+/// How deep folders go under the clips root (`A\B\C`).
+pub const MAX_DEPTH: usize = 3;
+
+/// Directories under `dir` (relative paths with `\`, up to [`MAX_DEPTH`]) and
+/// the clips in them. Hidden (`.name`) directories are skipped, and links
+/// below the top level aren't followed (no loops).
+fn walk_dirs(
+    dir: &Path,
+    rel: Option<&str>,
+    depth: usize,
+    dirs: &mut Vec<String>,
+    files: &mut Vec<Found>,
+) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for d in rd.flatten() {
+        let Ok(t) = d.file_type() else { continue };
+        let name = d.file_name().to_string_lossy().into_owned();
+        if !t.is_dir() && !(depth == 1 && t.is_symlink() && d.path().is_dir()) {
+            continue;
+        }
+        if name.starts_with('.') || (depth > 1 && t.is_symlink()) {
+            continue;
+        }
+        let here = match rel {
+            Some(r) => format!("{r}\\{name}"),
+            None => name,
+        };
+        collect(&d.path(), Some(&here), files);
+        dirs.push(here.clone());
+        walk_dirs(&d.path(), Some(&here), depth + 1, dirs, files);
+    }
+}
 
 fn collect(dir: &Path, game: Option<&str>, out: &mut Vec<Found>) {
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -1330,6 +1364,62 @@ pub(crate) mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn scans_subfolders_three_levels_deep_and_skips_hidden_ones() {
+        let t = TempDir::new("nested");
+        let root = t.0.join("clips");
+        let cache = Cache::new(t.0.join("cache"));
+        for dir in [
+            "Edited\\DayZ\\Raids",
+            "Edited\\Dota",
+            ".hidden",
+            "A\\B\\C\\TooDeep",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let put = |dir: &str, name: &str| {
+            std::fs::write(root.join(dir).join(name), sample_mp4(5, true)).unwrap()
+        };
+        put("Edited\\DayZ", "DayZ 2026-11-04 18-31-24 edit.mp4");
+        put("Edited\\DayZ\\Raids", "DayZ 2026-11-04 19-00-00.mp4");
+        put(".hidden", "secret.mp4");
+        put("A\\B\\C\\TooDeep", "deep.mp4");
+        let s = scan(&root, &cache, &|_| "2026-01-01 00:00:00".into());
+        let dir_of = |n: &str| {
+            s.clips
+                .iter()
+                .find(|c| c.file_name == n)
+                .map(|c| (c.dir.clone(), c.game.clone()))
+        };
+        assert_eq!(
+            dir_of("DayZ 2026-11-04 18-31-24 edit.mp4"),
+            Some((Some("Edited\\DayZ".into()), "Edited".into()))
+        );
+        assert_eq!(
+            dir_of("DayZ 2026-11-04 19-00-00.mp4").unwrap().0.as_deref(),
+            Some("Edited\\DayZ\\Raids")
+        );
+        assert!(dir_of("secret.mp4").is_none(), "hidden folders are skipped");
+        assert!(
+            dir_of("deep.mp4").is_none(),
+            "deeper than three levels isn't scanned"
+        );
+        for d in [
+            "Edited",
+            "Edited\\DayZ",
+            "Edited\\DayZ\\Raids",
+            "Edited\\Dota",
+            "A\\B\\C",
+        ] {
+            assert!(s.dirs.iter().any(|x| x == d), "{d} listed");
+        }
+        assert!(
+            !s.dirs
+                .iter()
+                .any(|x| x.contains("TooDeep") || x.starts_with('.'))
+        );
     }
 
     #[test]

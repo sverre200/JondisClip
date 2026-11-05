@@ -97,6 +97,7 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
   - **Six accent themes** (ADR-0016), with the Windows 11 title bar tinted. Status colours are fixed.
   - **Name sort** and a sort remembered per view. Reordering works with a filter on (hidden clips keep their places). Alt+←/→ moves clips. Dragging under another sort is refused with a hint.
   - All verified in a sandbox profile on sample clips; real Google Drive was not tested.
+  - **Subfolders** (up to 3 levels, ADR-0015 update), a window and taskbar icon in the theme colour, a fade-in when the window opens, and a middle-button drag (or Alt+←/→ on a handle) that moves the whole trim selection.
 - [ ] Later: export a folder as real files, and folder sharing. If the window is already open, "Settings…" should switch its page (today it only focuses the window).
 Tauri window with Library (grid, thumbnails, player, rename, delete to the Recycle Bin, open folder, copy path), Recording status and Settings. Trim with stream copy, and a share export.
 

@@ -108,8 +108,14 @@ export const FOLDER_COLORS: { value: FolderColor; label: string }[] = [
 
 /** A user folder: a real directory under the clips root (ADR-0015). */
 export interface Folder {
-  /** = name (the directory name is the identity) */
+  /** = name: its path under the clips root, `\`-separated ("Edited\DayZ") */
   id: string;
+  /** what the sidebar shows: the last part of the path */
+  leaf: string;
+  /** the folder it's inside, or null at the top level */
+  parent: string | null;
+  /** 1 = top level; folders go up to MAX_DEPTH */
+  depth: number;
   name: string;
   color: FolderColor;
   /** clip keys in custom order (complete for the folder's clips) */
@@ -130,6 +136,12 @@ export interface LibraryLoad {
   pending: PendingFolder[];
   rootOk: boolean;
 }
+
+/** Folders go up to this many levels deep (as the backend). */
+export const MAX_DEPTH = 3;
+
+/** `a` is inside `b` (not equal), ignoring case like Windows. */
+export const isWithin = (a: string, b: string) => a.length > b.length + 1 && a.slice(0, b.length).toLowerCase() === b.toLowerCase() && a[b.length] === "\\";
 
 export interface MoveResult {
   moved: number;
@@ -259,12 +271,27 @@ export const api = {
     }>("library_load");
     return {
       view: { root: r.root, clips: r.clips.map((c) => ({ ...c, title: c.title ?? undefined })) },
-      folders: r.folders.map((f) => ({ id: f.name, name: f.name, color: f.color, clips: f.order, count: f.count })),
+      folders: r.folders.map((f) => {
+        const cut = f.name.lastIndexOf("\\");
+        return {
+          id: f.name,
+          name: f.name,
+          leaf: cut < 0 ? f.name : f.name.slice(cut + 1),
+          parent: cut < 0 ? null : f.name.slice(0, cut),
+          depth: f.name.split("\\").length,
+          color: f.color,
+          clips: f.order,
+          count: f.count,
+        };
+      }),
       pending: r.pending,
       rootOk: r.root_ok,
     };
   },
-  folderCreate: (name: string, color: FolderColor) => call<void>("folder_create", { name, color }),
+  /** `parent`: make it inside that folder (null: top level). */
+  folderCreate: (name: string, color: FolderColor, parent: string | null = null) => call<void>("folder_create", { name, color, parent }),
+  /** Moves a folder (and what's in it) into `parent`, or to the top level. */
+  folderMove: (name: string, parent: string | null) => call<void>("folder_move", { name, parent }),
   folderRename: (name: string, to: string) => call<void>("folder_rename", { name, to }),
   folderColor: (name: string, color: FolderColor) => call<void>("folder_color", { name, color }),
   folderDelete: (name: string) => call<{ moved: number; failed: string[]; kept_dir: boolean }>("folder_delete", { name }),
@@ -549,21 +576,40 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       };
     }
     case "folder_create": {
-      const name = String(args?.name ?? "").trim();
-      if (!name) throw "Give the folder a name.";
-      if (/[<>:"/\\|?*]/.test(name)) throw `Folder names can't contain ${name.match(/[<>:"/\\|?*]/)![0]}`;
-      if (mockFolders.some((f) => f.name.toLowerCase() === name.toLowerCase())) throw `There's already something called "${name}".`;
+      const leaf = String(args?.name ?? "").trim();
+      if (!leaf) throw "Give the folder a name.";
+      if (/[<>:"/\\|?*]/.test(leaf)) throw `Folder names can't contain ${leaf.match(/[<>:"/\\|?*]/)![0]}`;
+      const parent = (args?.parent as string | null) ?? null;
+      if (parent && parent.split("\\").length >= MAX_DEPTH) throw `Folders go up to ${MAX_DEPTH} levels deep.`;
+      const name = parent ? `${parent}\\${leaf}` : leaf;
+      if (mockFolders.some((f) => f.name.toLowerCase() === name.toLowerCase())) throw `There's already something called "${leaf}".`;
       mockFolders.push({ name, color: args?.color as FolderColor, order: [] });
       return undefined;
     }
-    case "folder_rename": {
-      const f = mockFolders.find((x) => x.name === args?.name);
-      const to = String(args?.to ?? "").trim();
-      if (!to) throw "Give the folder a name.";
-      if (f) {
-        for (const c of mockLib ?? []) if (c.folder === f.name) c.folder = to;
-        f.name = to;
+    case "folder_rename":
+    case "folder_move": {
+      const from = String(args?.name ?? "");
+      const f = mockFolders.find((x) => x.name === from);
+      if (!f) throw "That folder no longer exists.";
+      const leafOf = (n: string) => n.slice(n.lastIndexOf("\\") + 1);
+      const parentOf = (n: string) => (n.includes("\\") ? n.slice(0, n.lastIndexOf("\\")) : null);
+      let to: string;
+      if (cmd === "folder_rename") {
+        const leaf = String(args?.to ?? "").trim();
+        if (!leaf) throw "Give the folder a name.";
+        const p = parentOf(from);
+        to = p ? `${p}\\${leaf}` : leaf;
+      } else {
+        const p = (args?.parent as string | null) ?? null;
+        if (p && (p === from || isWithin(p, from))) throw "A folder can't go inside itself.";
+        to = p ? `${p}\\${leafOf(from)}` : leafOf(from);
+        const deepest = Math.max(...mockFolders.filter((x) => x.name === from || isWithin(x.name, from)).map((x) => x.name.split("\\").length - from.split("\\").length));
+        if (to.split("\\").length + deepest > MAX_DEPTH) throw `Folders go up to ${MAX_DEPTH} levels deep.`;
       }
+      if (to !== from && mockFolders.some((x) => x.name.toLowerCase() === to.toLowerCase())) throw `There's already something called "${leafOf(to)}" there.`;
+      const re = (n: string) => (n === from ? to : isWithin(n, from) ? to + n.slice(from.length) : n);
+      for (const x of mockFolders) x.name = re(x.name);
+      for (const c of mockLib ?? []) if (c.folder) c.folder = re(c.folder);
       return undefined;
     }
     case "folder_color": {
@@ -572,10 +618,11 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       return undefined;
     }
     case "folder_delete": {
+      const name = String(args?.name ?? "");
+      const gone = (n: string) => n === name || isWithin(n, name);
       let moved = 0;
-      for (const c of mockLib ?? []) if (c.folder === args?.name) ((c.folder = null), moved++);
-      const at = mockFolders.findIndex((x) => x.name === args?.name);
-      if (at >= 0) mockFolders.splice(at, 1);
+      for (const c of mockLib ?? []) if (c.folder && gone(c.folder)) ((c.folder = null), moved++);
+      for (let k = mockFolders.length - 1; k >= 0; k--) if (gone(mockFolders[k]!.name)) mockFolders.splice(k, 1);
       return { moved, failed: [], kept_dir: false };
     }
     case "folders_reorder": {

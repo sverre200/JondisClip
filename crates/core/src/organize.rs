@@ -18,10 +18,12 @@ pub const MAX_FOLDER_NAME: usize = 60;
 /// The palette (muted tokens in the UI). Anything else is refused.
 pub const COLORS: [&str; 7] = ["red", "orange", "yellow", "green", "blue", "purple", "gray"];
 
-/// A user folder: a directory directly under the clips root.
+/// A user folder: a directory under the clips root, up to
+/// [`MAX_DEPTH`](crate::library::MAX_DEPTH) levels deep.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Folder {
-    /// The directory name (the filesystem is the truth for it).
+    /// Its path relative to the clips root, `\`-separated (`Edited\DayZ`).
+    /// The filesystem is the truth for it.
     pub name: String,
     pub color: String,
     /// Clip keys in the user's custom order (display only; files never move
@@ -118,11 +120,51 @@ pub fn folder_name(raw: &str) -> Result<String, OrgError> {
     Ok(name)
 }
 
+/// A folder path: one to [`MAX_DEPTH`](crate::library::MAX_DEPTH) valid
+/// names, separated by `\` (or `/`), returned `\`-separated.
+pub fn folder_path(raw: &str) -> Result<String, OrgError> {
+    let parts: Vec<&str> = raw.split(['\\', '/']).collect();
+    if parts.len() > crate::library::MAX_DEPTH {
+        return Err(OrgError::Invalid(format!(
+            "Folders go up to {} levels deep.",
+            crate::library::MAX_DEPTH
+        )));
+    }
+    let names = parts
+        .iter()
+        .map(|p| folder_name(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names.join("\\"))
+}
+
+/// `A\B\C` → `Some("A\B")`; a top-level folder has no parent.
+pub fn parent_of(path: &str) -> Option<&str> {
+    path.rsplit_once('\\').map(|(p, _)| p)
+}
+
+/// The last part of a path: what the sidebar shows.
+pub fn leaf_of(path: &str) -> &str {
+    path.rsplit_once('\\').map_or(path, |(_, l)| l)
+}
+
+/// Is `path` inside `ancestor` (not equal)? Case-insensitive, like Windows.
+pub fn is_within(path: &str, ancestor: &str) -> bool {
+    path.len() > ancestor.len() + 1
+        && path.is_char_boundary(ancestor.len())
+        && path[..ancestor.len()].eq_ignore_ascii_case(ancestor)
+        && path[ancestor.len()..].starts_with('\\')
+}
+
+/// How many levels deep a path is (`A` = 1).
+pub fn depth_of(path: &str) -> usize {
+    path.matches('\\').count() + 1
+}
+
 /// What a scan found in the clips root, for reconciliation.
 pub struct Found<'a> {
-    /// Every directory directly under the root.
+    /// Every directory under the root, as relative paths (`A`, `A\B`).
     pub dirs: &'a [String],
-    /// Directory name → (file name, clip key) of the clips directly in it.
+    /// Directory path → (file name, clip key) of the clips directly in it.
     pub clips: &'a HashMap<String, Vec<(String, String)>>,
     /// Recorder app name parsed from a file name (`parse_name`), if any.
     pub app_of: &'a dyn Fn(&str) -> Option<String>,
@@ -146,8 +188,19 @@ impl Organize {
         self.find(name).map(|i| &self.folders[i])
     }
 
+    /// Only top-level directories can be the recorder's game folders.
     pub fn is_game_dir(&self, name: &str) -> bool {
-        self.game_dirs.contains(&name.to_lowercase()) && self.find(name).is_none()
+        !name.contains('\\')
+            && self.game_dirs.contains(&name.to_lowercase())
+            && self.find(name).is_none()
+    }
+
+    /// The folder and every folder inside it.
+    pub fn subtree(&self, name: &str) -> Vec<&Folder> {
+        self.folders
+            .iter()
+            .filter(|f| f.name.eq_ignore_ascii_case(name) || is_within(&f.name, name))
+            .collect()
     }
 
     fn check_color(color: &str) -> Result<String, OrgError> {
@@ -159,13 +212,20 @@ impl Organize {
     }
 
     /// Registers a folder (its directory is created by the caller first).
+    /// A subfolder's parent must be a registered folder.
     pub fn add_folder(&mut self, name: &str, color: &str) -> Result<(), OrgError> {
-        let name = folder_name(name)?;
+        let name = folder_path(name)?;
         let color = Self::check_color(color)?;
         if self.find(&name).is_some() {
             return Err(OrgError::Invalid(format!(
-                "There's already a folder called \"{name}\"."
+                "There's already a folder called \"{}\" there.",
+                leaf_of(&name)
             )));
+        }
+        if let Some(parent) = parent_of(&name)
+            && self.find(parent).is_none()
+        {
+            return Err(OrgError::NotFound);
         }
         self.folders.push(Folder {
             name,
@@ -175,14 +235,39 @@ impl Organize {
         Ok(())
     }
 
-    /// Records a rename that already happened on disk.
+    /// Records a rename or move that already happened on disk (`from` and
+    /// `to` are full paths). Folders inside it move along.
     pub fn renamed(&mut self, from: &str, to: &str) -> Result<(), OrgError> {
-        let i = self.find(from).ok_or(OrgError::NotFound)?;
-        let to = folder_name(to)?;
-        self.folders[i].name = to.clone();
+        self.find(from).ok_or(OrgError::NotFound)?;
+        let from = self.folders[self.find(from).unwrap_or_default()]
+            .name
+            .clone();
+        let to = folder_path(to)?;
+        if let Some(j) = self.find(&to)
+            && !self.folders[j].name.eq_ignore_ascii_case(&from)
+        {
+            return Err(OrgError::Invalid(format!(
+                "There's already a folder called \"{}\" there.",
+                leaf_of(&to)
+            )));
+        }
+        let moved = |name: &str| -> Option<String> {
+            if name.eq_ignore_ascii_case(&from) {
+                Some(to.clone())
+            } else if is_within(name, &from) {
+                Some(format!("{to}{}", &name[from.len()..]))
+            } else {
+                None
+            }
+        };
+        for f in &mut self.folders {
+            if let Some(n) = moved(&f.name) {
+                f.name = n;
+            }
+        }
         for p in &mut self.pending {
-            if p.folder.eq_ignore_ascii_case(from) {
-                p.folder = to.clone();
+            if let Some(n) = moved(&p.folder) {
+                p.folder = n;
             }
         }
         Ok(())
@@ -195,12 +280,15 @@ impl Organize {
         Ok(())
     }
 
-    /// Forgets a folder (after its directory was removed by the caller).
+    /// Forgets a folder and the folders inside it (after the caller emptied
+    /// or removed their directories).
     pub fn remove_folder(&mut self, name: &str) -> Result<Folder, OrgError> {
         let i = self.find(name).ok_or(OrgError::NotFound)?;
-        self.pending
-            .retain(|p| !p.folder.eq_ignore_ascii_case(name));
-        Ok(self.folders.remove(i))
+        let gone = |n: &str| n.eq_ignore_ascii_case(name) || is_within(n, name);
+        self.pending.retain(|p| !gone(&p.folder));
+        let f = self.folders.remove(i);
+        self.folders.retain(|x| !is_within(&x.name, name));
+        Ok(f)
     }
 
     /// Sidebar order. Unknown names are ignored; folders missing from `names`
@@ -312,72 +400,91 @@ impl Organize {
     pub fn reconcile(&mut self, found: &Found) -> bool {
         let before = self.clone();
         let exists = |name: &str| found.dirs.iter().any(|d| d.eq_ignore_ascii_case(name));
-        let keys_in = |name: &str| -> Vec<String> {
+        let own_files = |name: &str| -> &[(String, String)] {
             found
                 .clips
                 .iter()
                 .find(|(d, _)| d.eq_ignore_ascii_case(name))
-                .map(|(_, v)| {
-                    v.iter()
-                        .map(|(_, k)| k.clone())
-                        .filter(|k| !k.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default()
+                .map(|(_, v)| v.as_slice())
+                .unwrap_or(&[])
         };
-        // 1. Learn game folders: a directory holding a recorder clip of the
-        //    same app, unless it's a registered user folder.
-        for d in found.dirs {
+        // Clip keys in a directory and everything inside it.
+        let keys_under = |name: &str| -> Vec<String> {
+            found
+                .clips
+                .iter()
+                .filter(|(d, _)| d.eq_ignore_ascii_case(name) || is_within(d, name))
+                .flat_map(|(_, v)| v.iter().map(|(_, k)| k.clone()))
+                .filter(|k| !k.is_empty())
+                .collect()
+        };
+        // 1. Learn game folders: a top-level directory holding a recorder
+        //    clip of the same app, unless it's a registered user folder.
+        for d in found.dirs.iter().filter(|d| !d.contains('\\')) {
             if self.find(d).is_some() {
                 continue;
             }
-            let files = found
-                .clips
-                .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case(d))
-                .map(|(_, v)| v.as_slice())
-                .unwrap_or(&[]);
-            if files
+            if own_files(d)
                 .iter()
                 .any(|(f, _)| (found.app_of)(f).is_some_and(|a| a.eq_ignore_ascii_case(d)))
             {
                 self.game_dirs.insert(d.to_lowercase());
             }
         }
-        // 2. Unknown directories holding clips: renamed folders first, else new.
-        let unknown: Vec<String> = found
-            .dirs
-            .iter()
-            .filter(|d| self.find(d).is_none() && !self.game_dirs.contains(&d.to_lowercase()))
-            .filter(|d| !keys_in(d).is_empty())
-            .cloned()
-            .collect();
-        for d in unknown {
-            let here = keys_in(&d);
-            // A registered folder whose directory is gone and whose clips are
-            // here: renamed outside the app — keep its colour and order.
-            let renamed = self
-                .folders
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| !exists(&f.name))
-                .map(|(i, f)| (i, f.order.iter().filter(|k| here.contains(k)).count()))
-                .filter(|(_, n)| *n > 0)
-                .max_by_key(|(_, n)| *n);
+        // 2. Unknown directories, parents first: a top-level one holding
+        //    clips (anywhere inside it), or any directory inside a user
+        //    folder. Renamed/moved folders are recognised by their clips.
+        let mut dirs: Vec<&String> = found.dirs.iter().collect();
+        dirs.sort_by_key(|d| depth_of(d));
+        for d in dirs {
+            if self.find(d).is_some() || self.game_dirs.contains(&d.to_lowercase()) {
+                continue;
+            }
+            match parent_of(d) {
+                Some(parent) if self.find(parent).is_none() => continue,
+                None if keys_under(d).is_empty() => continue,
+                _ => {}
+            }
+            let here = keys_under(d);
+            // A registered folder whose directory is gone, with its clips
+            // here: renamed or moved outside the app. Keep its colour/order.
+            let renamed = (!here.is_empty())
+                .then(|| {
+                    self.folders
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, f)| !exists(&f.name))
+                        .map(|(i, f)| {
+                            let n = self
+                                .subtree(&f.name)
+                                .iter()
+                                .flat_map(|x| x.order.iter())
+                                .filter(|k| here.contains(k))
+                                .count();
+                            (i, n)
+                        })
+                        .filter(|(_, n)| *n > 0)
+                        // Most shared clips; on a tie the folder at the same
+                        // depth, then the outermost (a parent before its child).
+                        .max_by_key(|(i, n)| {
+                            let dep = depth_of(&self.folders[*i].name);
+                            (*n, dep == depth_of(d), std::cmp::Reverse(dep))
+                        })
+                })
+                .flatten();
             match renamed {
                 Some((i, _)) => {
                     let old = self.folders[i].name.clone();
-                    self.folders[i].name = d.clone();
-                    for p in &mut self.pending {
-                        if p.folder.eq_ignore_ascii_case(&old) {
-                            p.folder = d.clone();
-                        }
-                    }
+                    let _ = self.renamed(&old, d);
                 }
                 None => self.folders.push(Folder {
                     name: d.clone(),
                     color: "gray".into(),
-                    order: here,
+                    order: own_files(d)
+                        .iter()
+                        .map(|(_, k)| k.clone())
+                        .filter(|k| !k.is_empty())
+                        .collect(),
                 }),
             }
         }
@@ -389,7 +496,7 @@ impl Organize {
         self.version = VERSION;
         let mut seen = std::collections::HashSet::new();
         self.folders
-            .retain(|f| folder_name(&f.name).is_ok() && seen.insert(f.name.to_lowercase()));
+            .retain(|f| folder_path(&f.name).is_ok() && seen.insert(f.name.to_lowercase()));
         for f in &mut self.folders {
             if !COLORS.contains(&f.color.as_str()) {
                 f.color = "gray".into();
@@ -833,5 +940,129 @@ mod tests {
         o.reorder_folders(&keys(&["c", "A", "ghost"]));
         let names: Vec<_> = o.folders.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["C", "A", "B"]);
+    }
+
+    #[test]
+    fn folder_paths_nest_up_to_three_levels() {
+        assert_eq!(folder_path("Edited/ DayZ ").unwrap(), "Edited\\DayZ");
+        assert_eq!(folder_path("A\\B\\C").unwrap(), "A\\B\\C");
+        assert!(folder_path("A\\B\\C\\D").is_err());
+        assert!(folder_path("A\\\\B").is_err(), "empty part");
+        assert!(folder_path("A\\CON").is_err());
+        assert_eq!(parent_of("A\\B\\C"), Some("A\\B"));
+        assert_eq!(leaf_of("A\\B"), "B");
+        assert!(is_within("Edited\\DayZ", "edited"));
+        assert!(!is_within("EditedX\\DayZ", "Edited"));
+        assert!(!is_within("Edited", "Edited"));
+    }
+
+    #[test]
+    fn subfolders_need_a_parent_and_follow_it_on_rename_and_delete() {
+        let mut o = Organize::new();
+        assert_eq!(o.add_folder("Edited\\DayZ", "red"), Err(OrgError::NotFound));
+        o.add_folder("Edited", "red").unwrap();
+        o.add_folder("Edited\\DayZ", "green").unwrap();
+        o.add_folder("Edited\\DayZ\\Raids", "blue").unwrap();
+        assert!(o.add_folder("edited\\dayz", "red").is_err(), "duplicate");
+        o.pending.push(Pending {
+            folder: "Edited\\DayZ".into(),
+            keys: keys(&[A]),
+        });
+        o.renamed("Edited", "Edits").unwrap();
+        let names: Vec<_> = o.folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Edits", "Edits\\DayZ", "Edits\\DayZ\\Raids"]);
+        assert_eq!(o.pending[0].folder, "Edits\\DayZ");
+        // Moving a folder into another one carries its subfolders along.
+        o.add_folder("Dota", "orange").unwrap();
+        o.renamed("Edits\\DayZ", "Dota\\DayZ").unwrap();
+        assert!(o.folder("Dota\\DayZ\\Raids").is_some());
+        assert!(o.renamed("Dota\\DayZ", "Edits").is_err(), "name taken");
+        o.remove_folder("Dota").unwrap();
+        let names: Vec<_> = o.folders.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["Edits"]);
+        assert!(o.pending.is_empty());
+        assert!(!o.is_game_dir("Edits\\DayZ"));
+    }
+
+    #[test]
+    fn reconcile_adopts_subfolders_and_follows_a_parent_renamed_in_explorer() {
+        let mut o = Organize::new();
+        o.add_folder("Edited", "purple").unwrap();
+        o.add_folder("Edited\\DayZ", "green").unwrap();
+        o.folders[1].order = keys(&[A, B]);
+        o.game_dirs.insert("dayz".into());
+        let dirs: Vec<String> = [
+            "DayZ",
+            "DayZ\\Old",
+            "Edited",
+            "Edited\\DayZ",
+            "Edited\\Dota",
+            "Edited\\DayZ\\Best",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut clips = HashMap::new();
+        clips.insert(
+            "Edited\\DayZ".to_string(),
+            vec![
+                ("x.mp4".to_string(), A.to_string()),
+                ("y.mp4".to_string(), B.to_string()),
+            ],
+        );
+        clips.insert(
+            "DayZ\\Old".to_string(),
+            vec![("z.mp4".to_string(), C.to_string())],
+        );
+        let found = Found {
+            dirs: &dirs,
+            clips: &clips,
+            app_of: &app,
+        };
+        o.reconcile(&found);
+        assert!(
+            o.folder("Edited\\Dota").is_some(),
+            "empty subfolder made in Explorer: adopted"
+        );
+        assert!(o.folder("Edited\\DayZ\\Best").is_some());
+        assert!(
+            o.folder("DayZ\\Old").is_none(),
+            "nothing inside a game folder"
+        );
+        assert!(!o.reconcile(&found), "idempotent");
+
+        // "Edited" renamed to "Edits" in Explorer: it has no clips of its
+        // own, but its subfolder does, so colours and order follow.
+        let dirs2: Vec<String> = [
+            "DayZ",
+            "Edits",
+            "Edits\\DayZ",
+            "Edits\\Dota",
+            "Edits\\DayZ\\Best",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut clips2 = HashMap::new();
+        clips2.insert(
+            "Edits\\DayZ".to_string(),
+            vec![
+                ("x.mp4".to_string(), A.to_string()),
+                ("y.mp4".to_string(), B.to_string()),
+            ],
+        );
+        o.reconcile(&Found {
+            dirs: &dirs2,
+            clips: &clips2,
+            app_of: &app,
+        });
+        assert_eq!(o.folder("Edits").map(|f| f.color.as_str()), Some("purple"));
+        let f = o.folder("Edits\\DayZ").expect("followed");
+        assert_eq!(
+            (f.color.as_str(), f.order.clone()),
+            ("green", keys(&[A, B]))
+        );
+        assert!(o.folder("Edits\\Dota").is_some());
+        assert!(o.folder("Edited").is_none());
     }
 }

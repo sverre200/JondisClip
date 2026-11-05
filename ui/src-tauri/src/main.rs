@@ -102,6 +102,97 @@ fn tray_status() -> TrayView {
 /// Applies `patch` (a subset of setting fields) on top of the settings file
 /// as it is now, so changes made from the tray menu meanwhile are kept.
 /// It refuses values that wouldn't survive validation.
+/// The theme's accent as 0xRRGGBB.
+fn theme_accent(theme: &str) -> u32 {
+    match theme {
+        "toxic" => 0x45e33f,
+        "midnight" => 0x7c5cff,
+        "ocean" => 0x3b8cff,
+        "sunset" => 0xff8a2b,
+        "graphite" => 0xe6e6ea,
+        _ => 0xe5484d,
+    }
+}
+
+/// The window/taskbar icon in the theme's colour: the record mark
+/// (`icons/mark128.rgba`, drawn in #e5484d on #1a1c20) recoloured, keeping
+/// its anti-aliasing. The exe's own icon (Explorer, shortcuts) stays red.
+fn themed_icon(theme: &str) -> tauri::image::Image<'static> {
+    const BASE: &[u8] = include_bytes!("../icons/mark128.rgba");
+    const DARK: [f32; 3] = [26.0, 28.0, 32.0];
+    const RED: f32 = 229.0;
+    let a = theme_accent(theme);
+    let accent = [
+        (a >> 16 & 0xff) as f32,
+        (a >> 8 & 0xff) as f32,
+        (a & 0xff) as f32,
+    ];
+    let mut out = BASE.to_vec();
+    for px in out.as_chunks_mut::<4>().0 {
+        // How far this pixel is from the dark ring towards the red fill.
+        let t = ((f32::from(px[0]) - DARK[0]) / (RED - DARK[0])).clamp(0.0, 1.0);
+        for i in 0..3 {
+            px[i] = (DARK[i] + t * (accent[i] - DARK[i])).round() as u8;
+        }
+    }
+    tauri::image::Image::new_owned(out, 128, 128)
+}
+
+fn set_theme_visuals(app: &tauri::AppHandle, theme: &str) {
+    title_bar(app, theme);
+    let icon = themed_icon(theme);
+    big_icon(app, icon.rgba(), icon.width(), icon.height());
+    if let Some(w) = tauri::Manager::get_webview_window(app, "main") {
+        let _ = w.set_icon(icon);
+    }
+}
+
+/// The taskbar and Alt+Tab use the window's big icon, which `set_icon`
+/// doesn't set: make one from the same pixels (WM_SETICON, ICON_BIG). The
+/// previous one is destroyed after the swap.
+fn big_icon(app: &tauri::AppHandle, rgba: &[u8], w: u32, h: u32) {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateIcon, DestroyIcon, HICON, ICON_BIG, SendMessageW, WM_SETICON,
+    };
+    static LAST: AtomicIsize = AtomicIsize::new(0);
+    let Some(hwnd) = export::main_hwnd(app) else {
+        return;
+    };
+    // 32-bit colour bits are BGRA; the AND mask is unused with alpha.
+    let mut bgra = rgba.to_vec();
+    for px in bgra.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+    }
+    let mask = vec![0u8; (w as usize).div_ceil(8) * h as usize];
+    let Ok(icon) = (unsafe {
+        CreateIcon(
+            None,
+            w as i32,
+            h as i32,
+            1,
+            32,
+            mask.as_ptr(),
+            bgra.as_ptr(),
+        )
+    }) else {
+        return;
+    };
+    unsafe {
+        SendMessageW(
+            HWND(hwnd as *mut core::ffi::c_void),
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(icon.0 as isize)),
+        );
+    }
+    let old = LAST.swap(icon.0 as isize, Ordering::Relaxed);
+    if old != 0 {
+        let _ = unsafe { DestroyIcon(HICON(old as *mut core::ffi::c_void)) };
+    }
+}
+
 /// Windows 11 title bar: caption in the window background, border in the
 /// theme's accent (DWM; Windows 10 ignores both and keeps the dark bar).
 fn title_bar(app: &tauri::AppHandle, theme: &str) {
@@ -109,14 +200,7 @@ fn title_bar(app: &tauri::AppHandle, theme: &str) {
     use windows::Win32::Graphics::Dwm::{
         DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DwmSetWindowAttribute,
     };
-    let accent: u32 = match theme {
-        "toxic" => 0x45e33f,
-        "midnight" => 0x7c5cff,
-        "ocean" => 0x3b8cff,
-        "sunset" => 0xff8a2b,
-        "graphite" => 0xe6e6ea,
-        _ => 0xe5484d,
-    };
+    let accent = theme_accent(theme);
     // 0xRRGGBB → COLORREF 0x00BBGGRR
     let colorref = |rgb: u32| ((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff);
     let Some(hwnd) = export::main_hwnd(app) else {
@@ -148,7 +232,7 @@ fn update(
     let (current, _) = read_settings();
     let validated = apply_patch(&current, patch)?;
     if validated.theme != current.theme {
-        title_bar(&app, &validated.theme);
+        set_theme_visuals(&app, &validated.theme);
     }
     let save = validated.save_dir_or(&paths::default_save_dir());
     if jondisclip_core::drive::overlaps(&save, &validated.drive_dir) {
@@ -617,12 +701,13 @@ async fn drive_save(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        // Drive keeps the clip's folder: its user folder if it's in one
-        // (the directory it's in), else its game.
+        // Drive keeps the clip's folder: its user folder (path, e.g.
+        // `Edited\DayZ`) if it's in one, else its game.
         let parent = path
             .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned());
+            .and_then(|p| p.strip_prefix(&save).ok())
+            .map(|r| r.to_string_lossy().into_owned())
+            .filter(|r| !r.is_empty());
         let org = jondisclip_core::organize::Store::new(
             paths::local_dir().join("library").join("organize.json"),
         )
@@ -796,7 +881,7 @@ fn main() {
             library::enqueue(request, responder);
         })
         .setup(|app| {
-            title_bar(app.handle(), &read_settings().0.theme);
+            set_theme_visuals(app.handle(), &read_settings().0.theme);
             // Safety net: the page reveals the window when it has rendered. If
             // that never happens (script error, stalled load), show it anyway
             // so the user never ends up with an invisible running instance.
@@ -841,6 +926,7 @@ fn main() {
             drive_open,
             organize::folder_create,
             organize::folder_rename,
+            organize::folder_move,
             organize::folder_color,
             organize::folder_delete,
             organize::folders_reorder,

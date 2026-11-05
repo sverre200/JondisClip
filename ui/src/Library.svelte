@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
-  import { api, FOLDER_COLORS, thumbUrl, type Clip, type Folder, type FolderColor, type Item, type LibraryView, type MoveResult, type PendingFolder } from "./lib/api";
+  import { api, FOLDER_COLORS, MAX_DEPTH, isWithin, thumbUrl, type Clip, type Folder, type FolderColor, type Item, type LibraryView, type MoveResult, type PendingFolder } from "./lib/api";
   import { bytes, clock, dayLabel, fromWithin, whenShort } from "./lib/format";
   import Banner from "./lib/Banner.svelte";
   import Button from "./lib/Button.svelte";
@@ -44,9 +44,9 @@
   let gridEl = $state<HTMLDivElement>();
   let menu = $state<{ x: number; y: number; items: MenuEntry[] } | null>(null);
   type DialogState =
-    | { kind: "new-folder"; moveIds: string[]; error: string | null }
+    | { kind: "new-folder"; moveIds: string[]; parent: string | null; error: string | null }
     | { kind: "rename-folder"; folder: Folder; error: string | null }
-    | { kind: "delete-folder"; folder: Folder; count: number }
+    | { kind: "delete-folder"; folder: Folder; count: number; subs: number }
     | { kind: "delete-clips"; ids: string[]; label: string };
   let dialog = $state<DialogState | null>(null);
   let notice = $state<string | null>(null);
@@ -189,18 +189,58 @@
     }
   }
 
-  const counts = $derived.by(() => {
+  /** Clips directly in each folder. */
+  const own = $derived.by(() => {
     const out: Record<string, number> = {};
     for (const f of folderOf.values()) out[f.id] = (out[f.id] ?? 0) + 1;
     return out;
   });
+  /** Sidebar counts: a folder's clips including its subfolders. */
+  const counts = $derived.by(() => {
+    const out: Record<string, number> = {};
+    for (const f of org.folders) out[f.id] = org.folders.filter((x) => x.id === f.id || isWithin(x.id, f.id)).reduce((n, x) => n + (own[x.id] ?? 0), 0);
+    return out;
+  });
   const unsortedCount = $derived(clips.filter((c) => !folderOf.has(c.id)).length);
+  const hasSubfolders = $derived(!!currentFolder && org.folders.some((x) => x.parent === currentFolder.id));
+
+  // Show a folder's subfolder clips too (a UI preference, off by default:
+  // like Explorer, a folder shows what's directly in it).
+  let withSubs = $state(localStorage.getItem("jc.library.subs") === "on");
+  $effect(() => localStorage.setItem("jc.library.subs", withSubs ? "on" : "off"));
+  const showingSubs = $derived(withSubs && hasSubfolders);
 
   const inView = $derived.by(() => {
     if (folderView === "all") return clips;
     if (folderView === "unsorted") return clips.filter((c) => !folderOf.has(c.id));
+    if (showingSubs) return clips.filter((c) => { const id = folderOf.get(c.id)?.id; return !!id && (id === folderView || isWithin(id, folderView)); });
     return clips.filter((c) => folderOf.get(c.id)?.id === folderView);
   });
+
+  /** Folders in tree order (parents first), for menus. */
+  const tree = $derived.by(() => {
+    const out: Folder[] = [];
+    const add = (parent: string | null) => {
+      for (const f of org.folders) if (f.parent === parent) (out.push(f), add(f.id));
+    };
+    add(null);
+    for (const f of org.folders) if (!out.includes(f)) out.push(f);
+    return out;
+  });
+  const pathLabel = (id: string) => id.replaceAll("\\", " › ");
+
+  /** After a folder is renamed or moved, keep showing it (or the subfolder
+   *  inside it that was open). Runs inside the reload, before the "folder
+   *  gone" fallback can see the old path. */
+  function follow(from: string, to: string) {
+    const v = folderView;
+    if (v !== from && !isWithin(v, from)) return;
+    const want = (to + v.slice(from.length)).toLowerCase();
+    afterLoad = () => {
+      const f = org.folders.find((x) => x.id.toLowerCase() === want);
+      if (f) folderView = f.id;
+    };
+  }
 
   const games = $derived.by(() => {
     const counts = new Map<string, number>();
@@ -342,10 +382,10 @@
     return FOLDER_COLORS.find((c) => !used.has(c.value))?.value ?? "gray";
   }
 
-  async function createFolder(name: string, moveIds: string[]) {
+  async function createFolder(name: string, moveIds: string[], parent: string | null) {
     const before = new Set(org.folders.map((f) => f.id));
     try {
-      await api.folderCreate(name, nextColor());
+      await api.folderCreate(name, parent ? (org.folders.find((x) => x.id === parent)?.color ?? nextColor()) : nextColor(), parent);
     } catch (e) {
       if (dialog?.kind === "new-folder") dialog = { ...dialog, error: String(e) };
       return;
@@ -355,7 +395,7 @@
     const f = org.folders.find((x) => !before.has(x.id));
     const cs = clips.filter((c) => moveIds.includes(c.id));
     if (f && cs.length) await moveTo(cs, f);
-    else if (f) tell(`Created ${f.name}: drag clips onto it`);
+    else if (f) tell(`Created ${f.leaf}: drag clips onto it`);
   }
 
   async function renameFolder(f: Folder, name: string) {
@@ -366,26 +406,46 @@
       if (dialog?.kind === "rename-folder") dialog = { ...dialog, error: String(e) };
       return;
     }
-    if (folderView === f.id) {
-      // Keep the renamed folder open: switch in the same step as the reload,
-      // before the "folder gone" fallback can see it.
-      const before = new Set(org.folders.map((x) => x.id));
-      afterLoad = () => {
-        const renamed = org.folders.find((x) => !before.has(x.id));
-        if (renamed) folderView = renamed.id;
-      };
-    }
+    const leaf = name.trim().replace(/\s+/g, " ");
+    follow(f.id, f.parent ? `${f.parent}\\${leaf}` : leaf);
     await refresh();
+  }
+
+  /** Puts a folder inside `parent` (null: top level), before sibling
+   *  `before` (null: last). Moving changes its directory on disk; the order
+   *  is metadata. */
+  async function placeFolder(id: string, parent: string | null, before: string | null) {
+    const f = org.folders.find((x) => x.id === id);
+    if (!f) return;
+    let cur = id;
+    if ((f.parent ?? "").toLowerCase() !== (parent ?? "").toLowerCase()) {
+      try {
+        await api.folderMove(id, parent);
+      } catch (e) {
+        onerror(String(e));
+        return;
+      }
+      cur = parent ? `${parent}\\${f.leaf}` : f.leaf;
+      follow(id, cur);
+      await refresh();
+      tell(parent ? `Moved ${f.leaf} into ${org.folders.find((x) => x.id === parent)?.leaf ?? parent}` : `Moved ${f.leaf} to the top level`);
+    }
+    const ids = org.folders.map((x) => x.id).filter((x) => x.toLowerCase() !== cur.toLowerCase());
+    const at = before ? ids.indexOf(before) : -1;
+    const real = org.folders.find((x) => x.id.toLowerCase() === cur.toLowerCase())?.id ?? cur;
+    if (at >= 0) ids.splice(at, 0, real);
+    else ids.push(real);
+    await orgDo(api.foldersReorder(ids));
   }
 
   async function deleteFolder(f: Folder) {
     dialog = null;
-    if (folderView === f.id) folderView = "all";
+    if (folderView === f.id || isWithin(folderView, f.id)) folderView = f.parent ?? "all";
     try {
       const r = await api.folderDelete(f.name);
-      if (r.failed.length) onerror(`${r.failed.length === 1 ? "1 clip" : `${r.failed.length} clips`} couldn't be moved out, so the folder ${f.name} was kept: ${r.failed[0]}`);
-      else if (r.kept_dir) tell(`${f.name} isn't shown anymore. Its Windows folder still has other files, so it was kept.`);
-      else tell(r.moved ? `Deleted ${f.name}. Its ${r.moved === 1 ? "clip is" : `${r.moved} clips are`} back in their game folders.` : `Deleted ${f.name}`);
+      if (r.failed.length) onerror(`${r.failed.length === 1 ? "1 clip" : `${r.failed.length} clips`} couldn't be moved out, so the folder ${f.leaf} was kept: ${r.failed[0]}`);
+      else if (r.kept_dir) tell(`${f.leaf} isn't shown anymore. Its Windows folder still has other files, so it was kept.`);
+      else tell(r.moved ? `Deleted ${f.leaf}. Its ${r.moved === 1 ? "clip is" : `${r.moved} clips are`} back in their game folders.` : `Deleted ${f.leaf}`);
     } catch (e) {
       onerror(String(e));
     }
@@ -408,9 +468,9 @@
 
   function moveMenu(cs: Clip[]): MenuItem[] {
     const here = cs.length === 1 ? folderOf.get(cs[0]!.id)?.id : undefined;
-    const items: MenuItem[] = org.folders.map((f) => ({ label: f.name, dot: f.color, checked: f.id === here, action: () => moveTo(cs, f) }));
+    const items: MenuItem[] = tree.map((f) => ({ label: pathLabel(f.id), dot: f.color, checked: f.id === here, action: () => moveTo(cs, f) }));
     items.push({ label: "Not in a folder", checked: cs.length === 1 && !here, action: () => moveTo(cs, null) });
-    items.push({ label: "New folder…", action: () => (dialog = { kind: "new-folder", moveIds: cs.map((c) => c.id), error: null }) });
+    items.push({ label: "New folder…", action: () => (dialog = { kind: "new-folder", moveIds: cs.map((c) => c.id), parent: null, error: null }) });
     return items;
   }
 
@@ -439,18 +499,30 @@
   }
 
   function folderMenu(e: MouseEvent, f: Folder) {
+    // Where it can be moved: not into itself or its subfolders, and the
+    // deepest subfolder must still fit within MAX_DEPTH.
+    const span = Math.max(1, ...org.folders.filter((x) => isWithin(x.id, f.id)).map((x) => x.depth - f.depth + 1));
+    const targets: MenuItem[] = [
+      { label: "Top level", checked: !f.parent, disabled: !f.parent, action: () => placeFolder(f.id, null, null) },
+      ...tree
+        .filter((x) => x.id !== f.id && !isWithin(x.id, f.id) && x.depth + span <= MAX_DEPTH)
+        .map((x) => ({ label: pathLabel(x.id), dot: x.color, checked: x.id === f.parent, disabled: x.id === f.parent, action: () => placeFolder(f.id, x.id, null) })),
+    ];
+    const subs = org.folders.filter((x) => isWithin(x.id, f.id)).length;
     menu = {
       x: e.clientX,
       y: e.clientY,
       items: [
         { label: "Open", action: () => (folderView = f.id) },
+        { label: "New subfolder…", disabled: f.depth >= MAX_DEPTH, action: () => (dialog = { kind: "new-folder", moveIds: [], parent: f.id, error: null }) },
         { label: "Rename…", action: () => (dialog = { kind: "rename-folder", folder: f, error: null }) },
+        { label: "Move folder to", submenu: targets },
         {
           label: "Color",
           submenu: FOLDER_COLORS.map((c) => ({ label: c.label, dot: c.value, checked: f.color === c.value, action: () => orgDo(api.folderColor(f.name, c.value)) })),
         },
         "separator",
-        { label: "Delete folder…", danger: true, action: () => (dialog = { kind: "delete-folder", folder: f, count: counts[f.id] ?? 0 }) },
+        { label: "Delete folder…", danger: true, action: () => (dialog = { kind: "delete-folder", folder: f, count: counts[f.id] ?? 0, subs }) },
       ],
     };
   }
@@ -462,6 +534,7 @@
   // hidden clips keep their places.
   const reorderBlocked = (): string | null => {
     if (!currentFolder) return "Open a folder to arrange clips in your own order";
+    if (showingSubs) return "Turn off Include subfolders to arrange clips";
     if (sort !== "custom") return `Sorted by ${sorts.find((x) => x.value === sort)?.label.toLowerCase() ?? sort}. Choose Custom order to arrange`;
     return null;
   };
@@ -656,9 +729,9 @@
     view={folderView}
     {collapsed}
     onview={(v) => (folderView = v)}
-    oncreate={() => (dialog = { kind: "new-folder", moveIds: [], error: null })}
+    oncreate={() => (dialog = { kind: "new-folder", moveIds: [], parent: null, error: null })}
     oncontext={folderMenu}
-    onreorder={(names) => orgDo(api.foldersReorder(names))}
+    onplace={placeFolder}
     ontoggle={() => (collapsed = !collapsed)}
   />
 
@@ -677,7 +750,17 @@
   <div class="toolbar">
     <div class="chips" role="group" aria-label="Filter by game">
       {#if currentFolder}
-        <span class="where" title={currentFolder.name}><span class="fdot" style:background="var(--folder-{currentFolder.color})"></span>{currentFolder.name}</span>
+        <span class="where" title={pathLabel(currentFolder.id)}>
+          <span class="fdot" style:background="var(--folder-{currentFolder.color})"></span>
+          {#each currentFolder.id.split("\\").slice(0, -1) as part, k (k)}
+            {@const up = currentFolder.id.split("\\").slice(0, k + 1).join("\\")}
+            <button type="button" class="crumb" onclick={() => (folderView = up)}>{part}</button><span class="sepc" aria-hidden="true">›</span>
+          {/each}
+          <span class="leaf">{currentFolder.leaf}</span>
+        </span>
+        {#if hasSubfolders}
+          <button type="button" class="chip" class:on={withSubs} aria-pressed={withSubs} onclick={() => (withSubs = !withSubs)} title="Also show the clips in this folder's subfolders">Include subfolders</button>
+        {/if}
       {/if}
       <button type="button" class="chip" class:on={!game} aria-pressed={!game} onclick={() => (game = "")}>
         All games <span class="n">{inView.length}</span>
@@ -722,7 +805,7 @@
   {:else if !inView.length && currentFolder}
     <div class="empty">
       <svg viewBox="0 0 48 48" aria-hidden="true" style:color="var(--folder-{currentFolder.color})"><path d="M6 14a3 3 0 0 1 3-3h10l4 4.5h16a3 3 0 0 1 3 3V35a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3z" fill="currentColor" fill-opacity="0.15" stroke="currentColor" stroke-width="2" stroke-linejoin="round" /></svg>
-      <h2>{currentFolder.name} is empty</h2>
+      <h2>{currentFolder.leaf} is empty</h2>
       <p>Drag clips from All clips onto this folder in the sidebar, or right-click a clip and choose Move to folder.</p>
       <Button onclick={() => (folderView = "all")}>Go to All clips</Button>
     </div>
@@ -797,7 +880,7 @@
       </div>
       <div class="sel-meta">
         <strong title={selected.title ?? selected.game}>{selected.title ?? selected.game}</strong>
-        <span>{#if selected.title}{selected.game} · {/if}{whenShort(selected.recorded)} · {selected.probe ? clock(selected.probe.duration) : "unreadable"} · {bytes(selected.size)}{#if folderOf.get(selected.id)} · {folderOf.get(selected.id)?.name}{/if}</span>
+        <span>{#if selected.title}{selected.game} · {/if}{whenShort(selected.recorded)} · {selected.probe ? clock(selected.probe.duration) : "unreadable"} · {bytes(selected.size)}{#if folderOf.get(selected.id)} · {pathLabel(folderOf.get(selected.id)?.id ?? "")}{/if}</span>
       </div>
       <div class="sel-actions">
         <Button variant="ghost" onclick={() => rename(selected)} title="Rename (F2)">Rename</Button>
@@ -821,20 +904,20 @@
 {#if dialog?.kind === "new-folder"}
   {@const d = dialog}
   <Dialog
-    title="New folder"
+    title={d.parent ? `New folder in ${org.folders.find((x) => x.id === d.parent)?.leaf ?? d.parent}` : "New folder"}
     confirmLabel={d.moveIds.length ? "Create and move" : "Create"}
-    input={{ value: "", placeholder: "e.g. DayZ Raids", max: 60 }}
+    input={{ value: "", placeholder: d.parent ? "e.g. DayZ" : "e.g. DayZ Raids", max: 60 }}
     error={d.error}
-    onconfirm={(v) => createFolder(v, d.moveIds)}
+    onconfirm={(v) => createFolder(v, d.moveIds, d.parent)}
     oncancel={() => (dialog = null)}
   />
 {:else if dialog?.kind === "rename-folder"}
   {@const d = dialog}
-  <Dialog title="Rename folder" confirmLabel="Rename" input={{ value: d.folder.name, max: 60 }} error={d.error} onconfirm={(v) => renameFolder(d.folder, v)} oncancel={() => (dialog = null)} />
+  <Dialog title="Rename folder" confirmLabel="Rename" input={{ value: d.folder.leaf, max: 60 }} error={d.error} onconfirm={(v) => renameFolder(d.folder, v)} oncancel={() => (dialog = null)} />
 {:else if dialog?.kind === "delete-folder"}
   {@const d = dialog}
-  <Dialog title="Delete “{d.folder.name}”?" confirmLabel="Delete folder" danger onconfirm={() => deleteFolder(d.folder)} oncancel={() => (dialog = null)}>
-    <p>{#if d.count}Its {d.count === 1 ? "clip is" : `${d.count} clips are`} moved back to {d.count === 1 ? "its game folder" : "their game folders"} first.{:else}It's empty.{/if} No recordings are deleted.</p>
+  <Dialog title="Delete “{d.folder.leaf}”?" confirmLabel="Delete folder" danger onconfirm={() => deleteFolder(d.folder)} oncancel={() => (dialog = null)}>
+    <p>{#if d.subs}Its {d.subs === 1 ? "subfolder goes" : `${d.subs} subfolders go`} too. {/if}{#if d.count}{d.subs ? "All" : "Its"} {d.count === 1 ? "clip is" : `${d.count} clips are`} moved back to {d.count === 1 ? "its game folder" : "their game folders"} first.{:else}It's empty.{/if} No recordings are deleted.</p>
   </Dialog>
 {:else if dialog?.kind === "delete-clips"}
   {@const d = dialog}
@@ -856,11 +939,32 @@
     flex-direction: column;
     min-height: 0;
   }
+  .crumb {
+    border: 0;
+    padding: 0;
+    background: none;
+    color: var(--text-muted);
+    font: inherit;
+    font-weight: var(--fw-regular);
+    cursor: pointer;
+  }
+  .crumb:hover {
+    color: var(--text);
+    text-decoration: underline;
+  }
+  .sepc {
+    color: var(--text-faint);
+    font-weight: var(--fw-regular);
+  }
+  .where .leaf {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .where {
     display: inline-flex;
     align-items: center;
     gap: var(--s2);
-    max-width: 220px;
+    max-width: 340px;
     margin-right: var(--s1);
     font-size: var(--fs-md);
     font-weight: var(--fw-strong);

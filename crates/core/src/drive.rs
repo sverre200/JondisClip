@@ -61,7 +61,11 @@ pub fn target(
     source: Option<Stamp>,
     existing: &dyn Fn(&Path) -> Option<Stamp>,
 ) -> Target {
-    let dir = drive.join("JondisClip").join(sanitize(game));
+    // `game` may be a folder path (`Edited\DayZ`): each part is cleaned.
+    let mut dir = drive.join("JondisClip");
+    for part in game.split('\\') {
+        dir.push(sanitize(part));
+    }
     let (stem, ext) = match file_name.rsplit_once('.') {
         Some((s, e)) => (s.to_string(), format!(".{e}")),
         None => (file_name.to_string(), String::new()),
@@ -121,29 +125,28 @@ pub fn overlaps(a: &Path, b: &Path) -> bool {
 /// Leftover `.partial` files in our part of the Drive folder (a copy or
 /// trim cut short by closing the window). Only `<drive>\JondisClip\…`.
 pub fn stale_partials(drive: &Path) -> Vec<PathBuf> {
-    let root = drive.join("JondisClip");
-    let mut out = Vec::new();
-    let Ok(games) = std::fs::read_dir(&root) else {
-        return out;
-    };
-    for g in games
-        .flatten()
-        .filter(|g| g.file_type().is_ok_and(|t| t.is_dir()))
-    {
-        let Ok(files) = std::fs::read_dir(g.path()) else {
-            continue;
+    // `JondisClip\<folder path, up to MAX_DEPTH>\*.mp4.partial`.
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
         };
-        for f in files.flatten() {
-            if f.file_name()
-                .to_string_lossy()
-                .to_lowercase()
-                .ends_with(".mp4.partial")
-                && f.file_type().is_ok_and(|t| t.is_file())
+        for e in rd.flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            if t.is_dir() && !t.is_symlink() && depth < crate::library::MAX_DEPTH {
+                walk(&e.path(), depth + 1, out);
+            } else if t.is_file()
+                && depth > 0
+                && e.file_name()
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .ends_with(".mp4.partial")
             {
-                out.push(f.path());
+                out.push(e.path());
             }
         }
     }
+    let mut out = Vec::new();
+    walk(&drive.join("JondisClip"), 0, &mut out);
     out
 }
 

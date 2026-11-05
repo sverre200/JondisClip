@@ -25,7 +25,9 @@
 
   let track = $state<HTMLDivElement>();
   let hover = $state<number | null>(null);
-  let drag = $state<"head" | "start" | "end" | null>(null);
+  let drag = $state<"head" | "start" | "end" | "range" | null>(null);
+  // Middle-button drag moves the whole selection: where it was grabbed.
+  let grab = { at: 0, start: 0, end: 0 };
 
   /** Shortest selection: a quarter of a second. */
   const MIN = 0.25;
@@ -58,6 +60,19 @@
   }
 
   function down(e: PointerEvent, what: "head" | "start" | "end") {
+    // Middle button anywhere on the bar: slide the selection, length kept.
+    if (e.button === 1 && trim && ontrim) {
+      e.preventDefault(); // no autoscroll
+      e.stopPropagation();
+      drag = "range";
+      grab = { at: at(e), start: trim.start, end: trim.end };
+      try {
+        track?.setPointerCapture(e.pointerId);
+      } catch {
+        /* see below */
+      }
+      return;
+    }
     if (e.button !== 0) return;
     e.stopPropagation();
     drag = what;
@@ -74,7 +89,15 @@
     const t = at(e);
     hover = t;
     if (drag === "head") seekSoon(t);
+    else if (drag === "range") slide(t);
     else if (drag) setEdge(drag, t);
+  }
+
+  function slide(t: number) {
+    if (!ontrim) return;
+    const len = grab.end - grab.start;
+    const start = Math.min(duration - len, Math.max(0, grab.start + t - grab.at));
+    ontrim(start, start + len, "start");
   }
   function up(e: PointerEvent) {
     if (!drag) return;
@@ -104,6 +127,16 @@
     const step = e.shiftKey ? 1 / 60 : 1;
     const cur = edge === "start" ? trim.start : trim.end;
     let t: number | null = null;
+    // Alt+arrows on either handle move the whole selection (keyboard
+    // equivalent of the middle-button drag).
+    if (e.altKey && (e.key === "ArrowRight" || e.key === "ArrowLeft") && ontrim) {
+      e.preventDefault();
+      e.stopPropagation();
+      const len = trim.end - trim.start;
+      const start = Math.min(duration - len, Math.max(0, trim.start + (e.key === "ArrowRight" ? step : -step)));
+      ontrim(start, start + len, "start");
+      return;
+    }
     if (e.key === "ArrowRight") t = cur + step;
     else if (e.key === "ArrowLeft") t = cur - step;
     if (t === null) return;
@@ -113,13 +146,14 @@
   }
 
   const tip = $derived(
-    drag === "start" && trim ? trim.start : drag === "end" && trim ? trim.end : hover,
+    (drag === "start" || drag === "range") && trim ? trim.start : drag === "end" && trim ? trim.end : hover,
   );
 </script>
 
 <div
   class="tl"
   class:dragging={drag !== null}
+  class:range={drag === "range"}
   class:trimming={!!trim}
   bind:this={track}
   onpointerdown={(e) => down(e, "head")}
@@ -127,6 +161,8 @@
   onpointerup={up}
   onpointercancel={up}
   onpointerleave={() => (hover = null)}
+  onmousedown={(e) => e.button === 1 && trim && e.preventDefault()}
+  onauxclick={(e) => e.button === 1 && e.preventDefault()}
   role="presentation"
 >
   <div class="rail">
@@ -181,7 +217,7 @@
     onkeydown={key}
   ></div>
   {#if tip !== null}
-    <div class="tip" style:left="{pct(tip)}%">{drag === "start" || drag === "end" ? clockPrecise(tip) : clock(tip)}</div>
+    <div class="tip" style:left="{pct(tip)}%">{drag === "start" || drag === "end" || drag === "range" ? clockPrecise(tip) : clock(tip)}</div>
   {/if}
 </div>
 
@@ -194,6 +230,9 @@
   }
   .tl.trimming {
     height: 40px;
+  }
+  .tl.range {
+    cursor: grabbing;
   }
   .rail {
     position: absolute;

@@ -34,6 +34,9 @@ export interface Reorder {
 export interface FolderReorder {
   rows: () => { id: string; el: HTMLElement }[];
   area: () => HTMLElement | null | undefined;
+  /** can the dragged folder go inside this one? (not itself, not its own
+   *  subfolder, not deeper than allowed) */
+  canNest?: (id: string) => boolean;
 }
 
 const THRESHOLD = 6;
@@ -158,12 +161,26 @@ function hitTest(x: number, y: number, opts: { reorder?: Reorder; folders?: Fold
   const under = document.elementFromPoint(x, y);
 
   if (p.kind === "folder") {
-    // Folders only reorder among themselves.
+    // Folders reorder among themselves, or go inside another folder when
+    // dropped on the middle of its row.
     const rows = opts.folders?.rows() ?? [];
     const area = opts.folders?.area();
     if (!area || !under || !area.contains(under) || rows.length === 0) {
       drag.target = null;
       return;
+    }
+    const onRow = rows.find((r) => r.el.contains(under));
+    if (onRow && onRow.id !== p.id) {
+      const b = onRow.el.getBoundingClientRect();
+      if (y > b.top + b.height * 0.28 && y < b.bottom - b.height * 0.28) {
+        if (opts.folders?.canNest?.(onRow.id)) {
+          drag.target = { type: "folder", id: onRow.id };
+        } else {
+          drag.target = null;
+          drag.hint = "Can't go in there: not inside itself, and 3 levels at most";
+        }
+        return;
+      }
     }
     let before: string | null = null;
     let line = rows[rows.length - 1]!.el.getBoundingClientRect().bottom;
