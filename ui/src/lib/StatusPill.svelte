@@ -47,12 +47,12 @@
   }
   .live {
     color: var(--text);
-    background: var(--accent-soft);
+    background: var(--recording-soft);
     border-color: transparent;
   }
   .live .dot {
-    background: var(--accent);
-    box-shadow: 0 0 0 3px rgb(229 72 77 / 0.25);
+    background: var(--recording);
+    box-shadow: 0 0 0 3px var(--recording-glow);
   }
   .warn {
     color: var(--warning);

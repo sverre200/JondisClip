@@ -30,6 +30,8 @@ export interface Settings {
   drive_dir: string;
   /** Save to Drive keeps the clip's library folder name (else its game) */
   drive_keep_folders: boolean;
+  /** Window theme id (see lib/theme.ts) */
+  theme: string;
 }
 
 export interface DriveCheck {
@@ -411,6 +413,7 @@ const mockState: Snapshot = {
     discord_limit_mb: 19,
     drive_dir: "",
     drive_keep_folders: true,
+    theme: "crimson",
   },
   default_save_dir: "C:\\Users\\you\\Videos\\JondisClip",
   replay_presets: [30, 60, 120, 180, 300, 600, 900],

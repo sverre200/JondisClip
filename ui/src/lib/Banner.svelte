@@ -30,7 +30,7 @@
     color: var(--warning);
   }
   .error {
-    background: var(--accent-soft);
+    background: var(--danger-soft);
   }
   .error .icon {
     color: var(--danger);

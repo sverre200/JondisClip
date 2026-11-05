@@ -12,6 +12,7 @@
   import Select from "./lib/Select.svelte";
   import Slider from "./lib/Slider.svelte";
   import Toggle from "./lib/Toggle.svelte";
+  import { THEMES, applyTheme } from "./lib/theme";
 
   // Tray status is polled by the shell (App.svelte) for both pages.
   let { tray }: { tray: TrayView | null } = $props();
@@ -60,6 +61,15 @@
       settings = before;
       showToast(String(e), "error");
     }
+  }
+
+  /** Applies at once (only colours change, the recorder isn't involved), then saves. */
+  async function setTheme(id: string) {
+    if (!settings || settings.theme === id) return;
+    const before = settings.theme;
+    applyTheme(id);
+    await change({ theme: id });
+    if (settings.theme !== id) applyTheme(before);
   }
 
   async function pickFolder() {
@@ -414,6 +424,21 @@
       {/if}
     </section>
 
+    <section aria-labelledby="h-look">
+      <h2 id="h-look">Appearance</h2>
+      <Row label="Theme" hint="Accent colour for buttons, selection and highlights. Recording and warning colours don't change." stacked>
+        <div class="themes" role="radiogroup" aria-label="Theme">
+          {#each THEMES as t (t.id)}
+            <label class="theme" class:on={settings.theme === t.id} style:--sw={t.color}>
+              <input type="radio" name="theme" value={t.id} checked={settings.theme === t.id} onchange={() => setTheme(t.id)} />
+              <span class="sw" aria-hidden="true"><span class="sw-bar"></span><span class="sw-dot"></span></span>
+              <span class="tname">{t.label}</span>
+            </label>
+          {/each}
+        </div>
+      </Row>
+    </section>
+
     <section aria-labelledby="h-general">
       <h2 id="h-general">General</h2>
       <Row label="Start with Windows" hint="Start JondisClip in the tray when you sign in." id="t-boot">
@@ -481,6 +506,71 @@
     display: flex;
     align-items: center;
     gap: var(--s1);
+  }
+  .themes {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+    gap: var(--s2);
+  }
+  .theme {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    padding: var(--s2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    cursor: pointer;
+    transition:
+      border-color var(--t-fast) var(--ease),
+      background var(--t-fast) var(--ease);
+  }
+  .theme:hover {
+    background: var(--surface-hover);
+  }
+  .theme.on {
+    border-color: var(--sw);
+    box-shadow: 0 0 0 1px var(--sw);
+  }
+  .theme input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .theme:has(input:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  /* A tiny preview: a dark surface with the accent as a button and a dot. */
+  .sw {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 36px;
+    padding: 0 var(--s2);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+  }
+  .sw-bar {
+    width: 44px;
+    height: 12px;
+    border-radius: var(--radius-pill);
+    background: var(--sw);
+  }
+  .sw-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid var(--sw);
+  }
+  .tname {
+    font-size: var(--fs-sm);
+    font-weight: var(--fw-strong);
+  }
+  .theme:not(.on) .tname {
+    color: var(--text-muted);
   }
   .dcard {
     display: flex;

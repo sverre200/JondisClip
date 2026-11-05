@@ -292,8 +292,9 @@
     top: var(--s2);
     padding: 1px 6px;
     border-radius: var(--radius-sm);
-    background: var(--accent);
-    color: var(--on-accent);
+    /* The Edit badge is always red, whatever the theme. */
+    background: var(--danger);
+    color: var(--on-danger);
     font-size: var(--fs-xs);
     font-weight: var(--fw-strong);
   }

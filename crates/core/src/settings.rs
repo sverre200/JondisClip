@@ -111,7 +111,15 @@ pub struct Settings {
     /// Save to Drive keeps the clip's library folder name
     /// (`JondisClip\<Folder>`); off: always `JondisClip\<Game>`.
     pub drive_keep_folders: bool,
+    /// Window colour theme (one of [`THEMES`]); only the accent changes.
+    pub theme: String,
 }
+
+/// Window themes, all dark. "crimson" is the original look.
+pub const THEMES: [&str; 6] = [
+    "crimson", "toxic", "midnight", "ocean", "sunset", "graphite",
+];
+pub const DEFAULT_THEME: &str = "crimson";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -133,6 +141,7 @@ impl Default for Settings {
             discord_limit_mb: DISCORD_LIMIT_DEFAULT,
             drive_dir: PathBuf::new(),
             drive_keep_folders: true,
+            theme: DEFAULT_THEME.into(),
         }
     }
 }
@@ -187,6 +196,13 @@ impl Settings {
                 s.discord_limit_mb, DISCORD_LIMIT_RANGE.0, DISCORD_LIMIT_RANGE.1
             ));
             s.discord_limit_mb = DISCORD_LIMIT_DEFAULT;
+        }
+        if !THEMES.contains(&s.theme.as_str()) {
+            warnings.push(format!(
+                "theme \"{}\" is unknown; using {DEFAULT_THEME}",
+                s.theme
+            ));
+            s.theme = DEFAULT_THEME.into();
         }
         if let Err(e) = Hotkey::parse(&s.hotkey) {
             warnings.push(format!(
@@ -355,5 +371,14 @@ mod tests {
     fn labels() {
         assert_eq!(replay_label(30), "30 s");
         assert_eq!(replay_label(300), "5 min");
+    }
+
+    #[test]
+    fn theme_defaults_to_crimson_and_rejects_unknown_names() {
+        assert_eq!(Settings::default().theme, "crimson");
+        let (s, w) = Settings::from_toml("theme = \"ocean\"");
+        assert_eq!((s.theme.as_str(), w.len()), ("ocean", 0));
+        let (s, w) = Settings::from_toml("theme = \"neon pink\"");
+        assert_eq!((s.theme.as_str(), w.len()), ("crimson", 1));
     }
 }

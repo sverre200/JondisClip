@@ -16,17 +16,27 @@
   --text-muted: #a0a3ab;
   --text-faint: #6f737c;
 
-  /* Brand + semantic (the record-red is the only accent) */
+  /* Accent: the theme colour (Crimson, the original record-red, by
+     default; see the [data-theme] blocks below). Buttons, toggles,
+     selection, progress and focus use it. */
   --accent: #e5484d;
   --accent-hover: #ec5d61;
   --accent-press: #cf3c41;
   --accent-soft: rgb(229 72 77 / 0.14);
   --on-accent: #ffffff;
+
+  /* Status colours: the same in every theme. */
   --success: #30a46c;
   --success-soft: rgb(48 164 108 / 0.14);
   --warning: #f5a524;
   --warning-soft: rgb(245 165 36 / 0.12);
   --danger: #e5484d;
+  --danger-soft: rgb(229 72 77 / 0.14);
+  --on-danger: #ffffff;
+  /* The live recording indicator stays record-red whatever the theme. */
+  --recording: #e5484d;
+  --recording-soft: rgb(229 72 77 / 0.14);
+  --recording-glow: rgb(229 72 77 / 0.25);
 
   /* Folder colours: muted, for small dots and icons only (never fills) */
   --folder-red: #d4625f;
@@ -36,7 +46,7 @@
   --folder-blue: #5b8ed4;
   --folder-purple: #9a7dd0;
   --folder-gray: #8a8f98;
-  --focus: #e5484d;
+  --focus: var(--accent);
 
   /* Type */
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
@@ -68,6 +78,44 @@
   --t-fast: 120ms;
   --t-med: 200ms;
   --shadow-pop: 0 8px 24px rgb(0 0 0 / 0.45), 0 0 0 1px var(--border-strong);
+}
+
+/* Themes (all dark). Only the accent changes; surfaces, text and status
+   colours are shared. data-theme is set on <html> before first paint. */
+:root[data-theme="toxic"] {
+  --accent: #45e33f;
+  --accent-hover: #5be656;
+  --accent-press: #3bc336;
+  --accent-soft: rgb(69 227 63 / 0.14);
+  --on-accent: #0c0d0f;
+}
+:root[data-theme="midnight"] {
+  --accent: #7c5cff;
+  --accent-hover: #8c70ff;
+  --accent-press: #6b4fdb;
+  --accent-soft: rgb(124 92 255 / 0.16);
+  --on-accent: #ffffff;
+}
+:root[data-theme="ocean"] {
+  --accent: #3b8cff;
+  --accent-hover: #539aff;
+  --accent-press: #3378db;
+  --accent-soft: rgb(59 140 255 / 0.15);
+  --on-accent: #ffffff;
+}
+:root[data-theme="sunset"] {
+  --accent: #ff8a2b;
+  --accent-hover: #ff9844;
+  --accent-press: #db7725;
+  --accent-soft: rgb(255 138 43 / 0.14);
+  --on-accent: #0c0d0f;
+}
+:root[data-theme="graphite"] {
+  --accent: #e6e6ea;
+  --accent-hover: #f4f4f7;
+  --accent-press: #c9c9cf;
+  --accent-soft: rgb(230 230 234 / 0.12);
+  --on-accent: #0c0d0f;
 }
 
 * {

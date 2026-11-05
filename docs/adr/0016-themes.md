@@ -1,0 +1,23 @@
+# ADR-0016: Accent themes
+
+Status: **Proposed** (2026-11-05).
+
+## Context
+The owner wants colour themes like JondisBoard's, all dark, without losing the current look. Until now the record-red accent also meant "recording" and "danger". Swapping the accent alone would have turned the Edit badge, the recording pill and the Delete buttons purple or green.
+
+## Decision
+- **Six themes, accent only.** Crimson (default), Toxic Green, Midnight Purple, Ocean Blue, Sunset Orange and Graphite. Surfaces, text, spacing and type stay the same in every theme.
+- **Crimson keeps the original values** (`#e5484d`), so the default look is unchanged. The requested `#FF3D5E` would have shifted it.
+- **The other themes** set `--accent`, `--accent-hover`, `--accent-press`, `--accent-soft` and `--on-accent` in `:root[data-theme="…"]` blocks in `tokens.css`. `--focus` follows the accent.
+- **Text on the accent** is dark (`#0c0d0f`) for the light accents: Toxic Green, Sunset Orange and Graphite (white would be 1.2–2.4:1). It's white for Midnight Purple (4.35:1) and Ocean Blue (3.3:1, comparable to Crimson's 3.9:1).
+- **Status colours are separate tokens and never change:** `--success`, `--warning`, `--danger`, `--danger-soft`, `--on-danger`, `--recording` and `--recording-soft`/`--recording-glow`. The Edit badge and the live recording pill use them. Destructive dialog buttons use a new `danger` Button variant.
+- **Storage.** `theme` in `settings.toml` (validated; unknown names fall back to crimson with a warning) is the source of truth. `localStorage` caches it so `main.ts` sets `data-theme` before the first render, while the window is still hidden. `settings.toml` is then read to confirm it.
+- **Windows title bar.** Windows 11's DWM sets the caption colour to the window background (`#121316`) and the border to the accent: at startup and when the theme changes. Windows 10 ignores both and keeps the dark bar.
+- **The recorder is unaffected.** The tray reads the same settings file but ignores `theme`.
+
+## Consequences
+- New components must use `--accent*` for interactive highlights and the status tokens for meaning. Never use a raw red.
+- **Verified 2026-11-05:**
+  - In the browser: all six themes.
+  - In the release window (sandbox profile): a change is applied instantly and saved to `settings.toml`; after a restart the theme and the accent border come back; the Edit badge and the recording pill stay red; Delete stays red under Graphite.
+- **A small flash is possible** only if `settings.toml`'s theme is edited by hand while the window is closed. The cached theme shows until the file is read.

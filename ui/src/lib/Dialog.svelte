@@ -83,7 +83,7 @@
     {#if error}<p class="err" role="alert">{error}</p>{/if}
     <div class="buttons">
       <Button variant="ghost" onclick={oncancel}>Cancel</Button>
-      <Button variant="primary" onclick={() => onconfirm(value)}>{confirmLabel}</Button>
+      <Button variant={danger ? "danger" : "primary"} onclick={() => onconfirm(value)}>{confirmLabel}</Button>
     </div>
   </div>
 </div>

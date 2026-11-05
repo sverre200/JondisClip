@@ -8,7 +8,7 @@
     title,
     children,
   }: {
-    variant?: "primary" | "secondary" | "ghost";
+    variant?: "primary" | "secondary" | "ghost" | "danger";
     onclick?: (e: MouseEvent) => void;
     disabled?: boolean;
     title?: string;
@@ -45,6 +45,17 @@
   }
   .primary:active:not(:disabled) {
     background: var(--accent-press);
+  }
+  /* Destructive confirms: red in every theme. */
+  .danger {
+    background: var(--danger);
+    color: var(--on-danger);
+  }
+  .danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 88%, white);
+  }
+  .danger:active:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 88%, black);
   }
   .secondary {
     background: var(--surface-raised);

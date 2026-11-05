@@ -102,10 +102,54 @@ fn tray_status() -> TrayView {
 /// Applies `patch` (a subset of setting fields) on top of the settings file
 /// as it is now, so changes made from the tray menu meanwhile are kept.
 /// It refuses values that wouldn't survive validation.
+/// Windows 11 title bar: caption in the window background, border in the
+/// theme's accent (DWM; Windows 10 ignores both and keeps the dark bar).
+fn title_bar(app: &tauri::AppHandle, theme: &str) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DwmSetWindowAttribute,
+    };
+    let accent: u32 = match theme {
+        "toxic" => 0x45e33f,
+        "midnight" => 0x7c5cff,
+        "ocean" => 0x3b8cff,
+        "sunset" => 0xff8a2b,
+        "graphite" => 0xe6e6ea,
+        _ => 0xe5484d,
+    };
+    // 0xRRGGBB → COLORREF 0x00BBGGRR
+    let colorref = |rgb: u32| ((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff);
+    let Some(hwnd) = export::main_hwnd(app) else {
+        return;
+    };
+    let hwnd = HWND(hwnd as *mut core::ffi::c_void);
+    for (attr, rgb) in [
+        (DWMWA_CAPTION_COLOR, 0x121316),
+        (DWMWA_BORDER_COLOR, accent),
+    ] {
+        let c = colorref(rgb);
+        // Best effort: fails harmlessly before Windows 11.
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                attr,
+                (&c as *const u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+            )
+        };
+    }
+}
+
 #[tauri::command]
-fn update(patch: serde_json::Map<String, serde_json::Value>) -> Result<Settings, String> {
+fn update(
+    app: tauri::AppHandle,
+    patch: serde_json::Map<String, serde_json::Value>,
+) -> Result<Settings, String> {
     let (current, _) = read_settings();
     let validated = apply_patch(&current, patch)?;
+    if validated.theme != current.theme {
+        title_bar(&app, &validated.theme);
+    }
     let save = validated.save_dir_or(&paths::default_save_dir());
     if jondisclip_core::drive::overlaps(&save, &validated.drive_dir) {
         return Err(
@@ -752,6 +796,7 @@ fn main() {
             library::enqueue(request, responder);
         })
         .setup(|app| {
+            title_bar(app.handle(), &read_settings().0.theme);
             // Safety net: the page reveals the window when it has rendered. If
             // that never happens (script error, stalled load), show it anyway
             // so the user never ends up with an invisible running instance.
