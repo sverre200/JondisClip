@@ -59,6 +59,10 @@ pub struct Organize {
     /// by Save to Drive. Shown as "In Google Drive" while a copy exists.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub drive: BTreeMap<String, Vec<String>>,
+    /// Titles set before they renamed files have been written into the file
+    /// names once (ADR-0017).
+    #[serde(default)]
+    pub titles_in_names: bool,
 }
 
 /// Most Drive copies remembered per clip (oldest dropped first).

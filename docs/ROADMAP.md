@@ -95,6 +95,7 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
   - **Real Windows folders** (ADR-0015): the app and Explorer match. Explorer changes are picked up. Moves never overwrite. Old metadata folders ask before moving anything.
   - **Settings → Google Drive:** a folder check with a write test, Open in Explorer, "Keep my folders". Whole-clip copies are verified by size and fingerprint.
   - **Six accent themes** (ADR-0016), with the Windows 11 title bar tinted. Status colours are fixed.
+  - **Titles rename the file** (ADR-0017, 2026-11-06): `<title> — <Game> <stamp>.mp4`, so Explorer and file pickers show the name set in the app.
   - **Name sort** and a sort remembered per view. Reordering works with a filter on (hidden clips keep their places). Alt+←/→ moves clips. Dragging under another sort is refused with a hint.
   - All verified in a sandbox profile on sample clips; real Google Drive was not tested.
   - **Subfolders** (up to 3 levels, ADR-0015 update), a window and taskbar icon in the theme colour, a fade-in when the window opens, and a middle-button drag (or Alt+←/→ on a handle) that moves the whole trim selection.

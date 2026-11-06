@@ -148,6 +148,27 @@ pub fn load(root: PathBuf, drive: &Path, keep: bool) -> Result<Library, String> 
                 .0;
         }
     }
+    // Once: titles set before titles renamed files go into the file names.
+    if root_ok && !org.titles_in_names {
+        let mut renamed = 0;
+        for c in &lv.clips {
+            if let Some(t) = org.titles.get(&c.key)
+                && lib::parse_title(&c.file_name).is_none()
+                && rename_for_title(&c.path, Some(t.as_str())).is_ok_and(|p| p != c.path)
+            {
+                renamed += 1;
+            }
+        }
+        org = store()
+            .update(|o| {
+                o.titles_in_names = true;
+                Ok(())
+            })?
+            .0;
+        if renamed > 0 {
+            lv = library::scan(root.clone());
+        }
+    }
     let exists = |n: &str| lv.dirs.iter().any(|d| d.eq_ignore_ascii_case(n));
     let user = |dir: &Option<String>| -> Option<String> {
         let d = dir.as_ref()?;
@@ -165,7 +186,7 @@ pub fn load(root: PathBuf, drive: &Path, keep: bool) -> Result<Library, String> 
                     .map(|p| p.0)
                     .unwrap_or_else(|| "Other".into());
             }
-            let title = org.titles.get(&c.key).cloned();
+            let title = shown_title(org.titles.get(&c.key), &c.file_name);
             let in_drive = org.drive_copy(&c.key, &|p| p.is_file()).map(str::to_string);
             ClipView {
                 clip: c,
@@ -264,6 +285,56 @@ pub fn load(root: PathBuf, drive: &Path, keep: bool) -> Result<Library, String> 
 }
 
 // ------------------------------------------------------------------ files
+
+/// The title to show: the one set in JondisClip while the file name still
+/// carries it, else the one in the file name (renamed in Explorer, or the
+/// metadata was lost), else the stored one (the file couldn't be renamed).
+fn shown_title(stored: Option<&String>, file_name: &str) -> Option<String> {
+    match (stored, lib::parse_title(file_name)) {
+        (Some(t), Some(f))
+            if crate::export::title_to_file_stem(t).is_some_and(|s| s.eq_ignore_ascii_case(&f)) =>
+        {
+            Some(t.clone())
+        }
+        (_, Some(f)) => Some(f),
+        (t, None) => t.cloned(),
+    }
+}
+
+/// Renames `src` in place so its name carries `title` (or no title),
+/// never overwriting. Returns the new path (the same one if nothing changed).
+fn rename_for_title(src: &Path, title: Option<&str>) -> Result<PathBuf, String> {
+    let name = src
+        .file_name()
+        .ok_or("bad clip path")?
+        .to_string_lossy()
+        .into_owned();
+    let dir = src.parent().ok_or("bad clip path")?;
+    let stem = title.and_then(crate::export::title_to_file_stem);
+    let want = lib::titled_name(&name, stem.as_deref());
+    if want == name {
+        return Ok(src.to_path_buf());
+    }
+    // Same name apart from case or a clash suffix: rename to the exact
+    // name only if it's free, otherwise " (2)"…
+    let dst = lib::free_path(dir, &want, &|p| {
+        (p.exists() && !p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(&name)))
+            || p.with_extension("mp4.partial").exists()
+    });
+    if dst.file_name().is_some_and(|n| n.to_string_lossy() == name) {
+        return Ok(src.to_path_buf());
+    }
+    crate::export::move_no_replace(src, &dst).map_err(|e| match e.raw_os_error() {
+        Some(32) | Some(33) => {
+            format!(
+                "{name} is in use (playing or being exported?), so its file keeps the old name."
+            )
+        }
+        Some(5) => format!("Windows denied renaming {name} (permissions)."),
+        _ => format!("couldn't rename {name}: {e}"),
+    })?;
+    Ok(dst)
+}
 
 /// `p` resolved, and inside `root`.
 fn inside(root: &Path, p: &Path) -> Result<PathBuf, String> {
@@ -877,8 +948,17 @@ pub async fn clips_arrange(
 }
 
 #[tauri::command]
-pub async fn clip_title(key: String, title: String) -> Result<(), String> {
-    blocking(move || meta(|o| o.set_title(&key, &title)).map(drop)).await
+pub async fn clip_title(id: String, key: String, title: String) -> Result<(), String> {
+    blocking(move || {
+        let (org, ()) = meta(|o| o.set_title(&key, &title))?;
+        // The file name carries the title too, so Explorer (and anything the
+        // file is sent to) shows it.
+        let src = inside(&root(), &clip_path(&id)?)?;
+        rename_for_title(&src, org.titles.get(&key).map(String::as_str))
+            .map(drop)
+            .map_err(|e| format!("Title saved, but {e}"))
+    })
+    .await
 }
 
 /// Save to Drive finished (or found the copy already there): remember it,
@@ -1030,6 +1110,49 @@ mod tests {
         #[allow(clippy::permissions_set_readonly_false)]
         p.set_readonly(on);
         std::fs::set_permissions(d, p).unwrap();
+    }
+
+    #[test]
+    fn titles_rename_the_file_without_overwriting() {
+        let t = tmp("title");
+        let raw = t.0.join("DayZ 2026-11-04 14-35-41 edit.mp4");
+        std::fs::write(&raw, b"clip").unwrap();
+        // Someone else already has the name: the clip gets " (2)".
+        let other = t.0.join("Raid day 2 — DayZ 2026-11-04 14-35-41 edit.mp4");
+        std::fs::write(&other, b"other").unwrap();
+        let p = rename_for_title(&raw, Some("Raid: day 2?")).unwrap();
+        assert_eq!(
+            p.file_name().unwrap().to_string_lossy(),
+            "Raid day 2 — DayZ 2026-11-04 14-35-41 edit (2).mp4"
+        );
+        assert_eq!(std::fs::read(&other).unwrap(), b"other");
+        assert_eq!(
+            shown_title(
+                Some(&"Raid: day 2?".to_string()),
+                &p.file_name().unwrap().to_string_lossy()
+            )
+            .as_deref(),
+            Some("Raid: day 2?")
+        );
+        // Same title again: nothing to do.
+        assert_eq!(rename_for_title(&p, Some("Raid: day 2?")).unwrap(), p);
+        // Cleared: back to the recorder name, now free.
+        let back = rename_for_title(&p, None).unwrap();
+        assert_eq!(back, raw);
+        assert_eq!(std::fs::read(&raw).unwrap(), b"clip");
+        // Renamed in Explorer: the file name wins over the stored title.
+        assert_eq!(
+            shown_title(
+                Some(&"Old".to_string()),
+                "New — DayZ 2026-11-04 14-35-41.mp4"
+            )
+            .as_deref(),
+            Some("New")
+        );
+        assert_eq!(
+            shown_title(Some(&"Kept".to_string()), "DayZ 2026-11-04 14-35-41.mp4").as_deref(),
+            Some("Kept")
+        );
     }
 
     #[test]

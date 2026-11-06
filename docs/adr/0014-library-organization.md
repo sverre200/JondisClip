@@ -33,7 +33,7 @@ The owner wants personal folders (with colours), clip titles, drag-and-drop movi
    - A clip deleted and restored from the Recycle Bin gets them back.
    - Two byte-identical copies share one key, which is acceptable: they are the same clip.
 3. **Missing clips aren't purged.** Entries whose file isn't present right now (a disconnected drive, a file deleted outside the app) stay in the JSON, invisible, so nothing is lost if the file comes back. Folder counts show present clips only.
-4. **Titles are display names only.** The file name never changes. Search matches titles, game and file name. Titles are trimmed, limited to 120 characters, and stripped of control characters. Folder names are 1–60 characters, unique ignoring case.
+4. *(Superseded by ADR-0017: titles now rename the file.)* **Titles are display names only.** The file name never changes. Search matches titles, game and file name. Titles are trimmed, limited to 120 characters, and stripped of control characters. Folder names are 1–60 characters, unique ignoring case.
 5. **Colours** come from a fixed palette: red, orange, yellow, green, blue, purple and grey. They're muted tokens shown as a small dot or icon tint, never fills.
 6. **Deleting:**
    - **Deleting a folder** never deletes recordings. Its clips go back to "All clips", and the dialog says so.

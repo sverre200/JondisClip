@@ -435,9 +435,10 @@
   async function saveTitle(c: Clip, title: string | null) {
     renamingId = null;
     if (title === null || title.trim() === (c.title ?? "")) return;
-    await orgDo(api.clipTitle(c.key, title));
+    await orgDo(api.clipTitle(c.id, c.key, title));
     await tick();
-    cardEls[c.id]?.focus({ preventScroll: true });
+    // The file was renamed too (a new id); the selection followed it by key.
+    cardEls[selectedId ?? c.id]?.focus({ preventScroll: true });
   }
 
   function rename(c: Clip) {

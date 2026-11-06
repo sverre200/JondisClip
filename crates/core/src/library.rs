@@ -382,8 +382,22 @@ pub fn is_clip_id(s: &str) -> bool {
     s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// `"DayZ 2026-11-04 14-35-41 (2).mp4"` → `("DayZ", "2026-11-04 14:35:41")`.
-pub fn parse_name(file_name: &str) -> Option<(String, String)> {
+/// Between a clip's title and its recorder name in a renamed file:
+/// `Our Base Got Raided — DayZ 2026-11-04 14-35-41.mp4`.
+pub const TITLE_SEP: &str = " — ";
+
+/// A recorder file name taken apart: `[<title> — ]<app> <stamp>[ edit[ N]]`,
+/// ignoring " (n)" clash suffixes.
+struct NameParts<'a> {
+    title: Option<&'a str>,
+    /// As written (may be empty: "Other").
+    app: &'a str,
+    /// `YYYY-MM-DD HH-MM-SS`
+    stamp: &'a str,
+    edit: Option<u32>,
+}
+
+fn name_parts(file_name: &str) -> Option<NameParts<'_>> {
     let stem = file_name.strip_suffix(".mp4").or_else(|| {
         let n = file_name.len().checked_sub(4)?;
         file_name
@@ -393,7 +407,8 @@ pub fn parse_name(file_name: &str) -> Option<(String, String)> {
     })?;
     // " (n)" from a name clash (recorder or a move), then " edit[ N]", then
     // possibly another " (n)" from the recorder.
-    let stem = strip_dup(split_edit(strip_dup(stem)).0);
+    let (stem, edit) = split_edit(strip_dup(stem));
+    let stem = strip_dup(stem);
     // The stamp is the last 19 bytes: "YYYY-MM-DD HH-MM-SS" (ASCII).
     let n = stem.len().checked_sub(19)?;
     let (app, stamp) = (stem.get(..n)?, stem.get(n..)?);
@@ -408,18 +423,61 @@ pub fn parse_name(file_name: &str) -> Option<(String, String)> {
     {
         return None;
     }
-    let app = app.strip_suffix(' ').unwrap_or(app).trim();
-    let app = if app.is_empty() { "Other" } else { app };
+    let app = app.strip_suffix(' ').unwrap_or(app);
+    // A title in front (set in JondisClip). Game names don't contain the
+    // separator; titles may, so split at the last one.
+    let (title, app) = match app.rsplit_once(TITLE_SEP) {
+        Some((t, a)) if !t.trim().is_empty() => (Some(t.trim()), a),
+        _ => (None, app),
+    };
+    Some(NameParts {
+        title,
+        app: app.trim(),
+        stamp,
+        edit,
+    })
+}
+
+/// `"DayZ 2026-11-04 14-35-41 (2).mp4"` → `("DayZ", "2026-11-04 14:35:41")`.
+/// A title in front (`"Raid — DayZ 2026-…"`) is skipped.
+pub fn parse_name(file_name: &str) -> Option<(String, String)> {
+    let p = name_parts(file_name)?;
+    let app = if p.app.is_empty() { "Other" } else { p.app };
+    let s = p.stamp;
     Some((
         app.to_owned(),
-        format!(
-            "{} {}:{}:{}",
-            &stamp[..10],
-            &stamp[11..13],
-            &stamp[14..16],
-            &stamp[17..19]
-        ),
+        format!("{} {}:{}:{}", &s[..10], &s[11..13], &s[14..16], &s[17..19]),
     ))
+}
+
+/// The title in front of a recorder name (`"Raid — DayZ 2026-….mp4"` →
+/// `"Raid"`), if the file was renamed with one.
+pub fn parse_title(file_name: &str) -> Option<String> {
+    name_parts(file_name)?.title.map(str::to_owned)
+}
+
+/// The file name for a clip given (or, with None, cleared of) a title,
+/// keeping what the library reads from the name: game, time and the edit
+/// suffix. `title_stem` must already be a safe file name stem.
+/// `Raid — DayZ 2026-11-04 14-35-41 edit.mp4`; a file without a recorder
+/// name becomes `<title>.mp4` (and is left alone when the title is cleared).
+pub fn titled_name(file_name: &str, title_stem: Option<&str>) -> String {
+    let Some(p) = name_parts(file_name) else {
+        return match title_stem {
+            Some(t) => format!("{t}.mp4"),
+            None => file_name.to_owned(),
+        };
+    };
+    let app = if p.app.is_empty() { "Other" } else { p.app };
+    let edit = match p.edit {
+        None => String::new(),
+        Some(1) => " edit".into(),
+        Some(n) => format!(" edit {n}"),
+    };
+    match title_stem {
+        Some(t) => format!("{t}{TITLE_SEP}{app} {}{edit}.mp4", p.stamp),
+        None => format!("{app} {}{edit}.mp4", p.stamp),
+    }
 }
 
 fn file_stem(file_name: &str) -> &str {
@@ -1156,6 +1214,49 @@ pub(crate) mod tests {
         assert_eq!(p("DayZ 2026-11-04 14-35-41 (two).mp4"), None);
         assert_eq!(p("ø.mp4"), None); // shorter than a stamp, multi-byte: no panic
         assert_eq!(p("ææææææææææææææææææææ.mp4"), None);
+    }
+
+    #[test]
+    fn titles_in_file_names_keep_game_time_and_edit() {
+        let n = "Raid — DayZ 2026-11-04 14-35-41 edit 2 (3).mp4";
+        assert_eq!(
+            parse_name(n),
+            Some(("DayZ".into(), "2026-11-04 14:35:41".into()))
+        );
+        assert_eq!(parse_title(n).as_deref(), Some("Raid"));
+        assert!(is_edit_name(n));
+        // A title may contain the separator; the game can't.
+        let n = "A — B — Escape From Tarkov 2026-01-02 03-04-05.mp4";
+        assert_eq!(parse_title(n).as_deref(), Some("A — B"));
+        assert_eq!(parse_name(n).unwrap().0, "Escape From Tarkov");
+        assert_eq!(parse_title("DayZ 2026-11-04 14-35-41.mp4"), None);
+        assert_eq!(parse_title("my clip.mp4"), None);
+
+        let raw = "DayZ 2026-11-04 14-35-41 edit (2).mp4";
+        let titled = titled_name(raw, Some("Raid"));
+        assert_eq!(titled, "Raid — DayZ 2026-11-04 14-35-41 edit.mp4");
+        assert_eq!(
+            titled_name(&titled, Some("Other title")),
+            "Other title — DayZ 2026-11-04 14-35-41 edit.mp4"
+        );
+        assert_eq!(
+            titled_name(&titled, None),
+            "DayZ 2026-11-04 14-35-41 edit.mp4"
+        );
+        assert_eq!(
+            titled_name("2026-11-04 14-35-41 edit 3.mp4", Some("X")),
+            "X — Other 2026-11-04 14-35-41 edit 3.mp4"
+        );
+        assert_eq!(titled_name("my clip.mp4", Some("Raid")), "Raid.mp4");
+        assert_eq!(titled_name("Raid.mp4", None), "Raid.mp4");
+        // Editing a titled clip keeps the title in the edit's name.
+        assert_eq!(
+            edit_path(Path::new(r"C:\c\Raid — DayZ 2026-11-04 14-35-41.mp4"))
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "Raid — DayZ 2026-11-04 14-35-41 edit.mp4"
+        );
     }
 
     #[test]

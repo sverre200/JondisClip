@@ -308,7 +308,7 @@ export const api = {
   /** Custom order inside a folder: metadata only, no file moves. */
   clipsArrange: (folder: string, present: string[], keys: string[], before: string | null) =>
     call<void>("clips_arrange", { folder, present, keys, before }),
-  clipTitle: (key: string, title: string) => call<void>("clip_title", { key, title }),
+  clipTitle: (id: string, key: string, title: string) => call<void>("clip_title", { id, key, title }),
   /** Records a Save to Drive copy, so the library marks the clip. */
   clipDriveMark: (key: string, path: string) => call<void>("clip_drive_mark", { key, path }),
   pendingResolve: (folder: string, items: Item[], moveThem: boolean) => call<MoveResult>("pending_resolve", { folder, items, moveThem }),
