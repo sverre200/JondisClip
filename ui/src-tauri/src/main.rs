@@ -1029,6 +1029,8 @@ fn main() {
             organize::clip_title,
             organize::clip_drive_mark,
             organize::clips_delete,
+            organize::clips_delete_permanently,
+            organize::open_recycle_bin,
             organize::clip_copy_file
         ])
         .run(tauri::generate_context!())

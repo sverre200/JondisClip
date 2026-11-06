@@ -1106,6 +1106,69 @@ fn recycle(paths: &[PathBuf], owner: Option<isize>) -> Result<usize, String> {
     })
 }
 
+/// Deletes clips for good (Shift+Delete in Explorer): no Recycle Bin, so
+/// they can't be restored. The page asks first, with its own warning. Their
+/// titles and places in folder orders are forgotten, unless a byte-identical
+/// copy is still in the library.
+#[tauri::command]
+pub async fn clips_delete_permanently(ids: Vec<String>) -> Result<usize, String> {
+    if crate::export::busy() {
+        return Err(tr!("Wait for the running export to finish first."));
+    }
+    let paths: Vec<PathBuf> = ids
+        .iter()
+        .map(|id| clip_path(id))
+        .collect::<Result<_, _>>()?;
+    if paths.iter().any(|p| !p.is_absolute()) {
+        return Err("bad clip path".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut gone = Vec::new();
+        let mut first_error = None;
+        for (id, p) in ids.iter().zip(&paths) {
+            match std::fs::remove_file(p) {
+                Ok(()) => gone.push(id.clone()),
+                Err(e) => {
+                    first_error.get_or_insert_with(|| format!("{}: {e}", p.display()));
+                }
+            }
+        }
+        let forget: Vec<String> = gone
+            .iter()
+            .filter_map(|id| library::key_of(id))
+            .filter(|k| !library::key_held_by_others(k, &gone))
+            .collect();
+        if !forget.is_empty() {
+            meta(|o| {
+                o.forget(&forget);
+                Ok(())
+            })?;
+        }
+        match first_error {
+            None => Ok(gone.len()),
+            Some(why) if gone.is_empty() => Err(tr!("Nothing was deleted ({why}).", why = why)),
+            Some(why) => Err(tr!(
+                "{gone} of {total} clips were deleted ({why}).",
+                gone = gone.len(),
+                total = paths.len(),
+                why = why
+            )),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Opens the Windows Recycle Bin in File Explorer.
+#[tauri::command]
+pub fn open_recycle_bin() -> Result<(), String> {
+    std::process::Command::new("explorer")
+        .arg("shell:RecycleBinFolder")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 /// Puts a clip's file on the clipboard (Explorer-style "Copy").
 #[tauri::command]
 pub async fn clip_copy_file(app: tauri::AppHandle, id: String) -> Result<(), String> {

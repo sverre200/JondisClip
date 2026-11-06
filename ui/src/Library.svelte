@@ -48,7 +48,7 @@
     | { kind: "new-folder"; moveIds: string[]; parent: string | null; color: FolderColor; error: string | null }
     | { kind: "rename-folder"; folder: Folder; error: string | null }
     | { kind: "delete-folder"; folder: Folder; count: number; subs: number }
-    | { kind: "delete-clips"; ids: string[]; label: string };
+    | { kind: "delete-clips"; ids: string[]; label: string; permanent: boolean };
   let dialog = $state<DialogState | null>(null);
   let notice = $state<string | null>(null);
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -461,16 +461,22 @@
     }
   }
 
-  function askDelete(cs: Clip[]) {
+  /** Asks before deleting: to the Recycle Bin, or for good (Shift+Delete, like Explorer). */
+  function askDelete(cs: Clip[], permanent = false) {
     const label = cs.length === 1 ? `“${cs[0]!.title ?? cs[0]!.file_name}”` : t("{n} clips", { n: cs.length });
-    dialog = { kind: "delete-clips", ids: cs.map((c) => c.id), label };
+    dialog = { kind: "delete-clips", ids: cs.map((c) => c.id), label, permanent };
   }
 
-  async function doDelete(ids: string[]) {
+  async function doDelete(ids: string[], permanent: boolean) {
     dialog = null;
     try {
-      const n = await api.clipsDelete(ids);
-      tell(tn(n, "Moved to the Recycle Bin", "Moved {n} clips to the Recycle Bin"));
+      if (permanent) {
+        const n = await api.clipsDeletePermanently(ids);
+        tell(tn(n, "Deleted permanently", "Deleted {n} clips permanently"));
+      } else {
+        const n = await api.clipsDelete(ids);
+        tell(tn(n, "Moved to the Recycle Bin", "Moved {n} clips to the Recycle Bin"));
+      }
     } catch (e) {
       onerror(String(e));
     }
@@ -616,6 +622,7 @@
         { label: t("Open in default player"), disabled: many, action: () => api.openExternal(c.id).catch((err) => onerror(String(err))) },
         "separator",
         { label: many ? t("Delete {n} clips…", { n: cs.length }) : t("Delete…"), shortcut: "Del", danger: true, action: () => askDelete(cs) },
+        { label: t("Delete permanently…"), shortcut: "Shift+Del", danger: true, action: () => askDelete(cs, true) },
       ],
     };
   }
@@ -790,7 +797,7 @@
       case "Delete":
         if (selectedClips.length) {
           e.preventDefault();
-          askDelete(selectedClips);
+          askDelete(selectedClips, e.shiftKey);
         }
         return;
       case "a":
@@ -855,6 +862,7 @@
     {collapsed}
     onview={(v) => (folderView = v)}
     oncreate={() => newFolder([], null)}
+    onrecyclebin={() => api.openRecycleBin().catch((err) => onerror(String(err)))}
     oncontext={folderMenu}
     onplace={placeFolder}
     ontoggle={() => (collapsed = !collapsed)}
@@ -1084,9 +1092,15 @@
   </Dialog>
 {:else if dialog?.kind === "delete-clips"}
   {@const d = dialog}
-  <Dialog title={t("Delete {what}?", { what: d.label })} confirmLabel={t("Move to Recycle Bin")} danger onconfirm={() => doDelete(d.ids)} oncancel={() => (dialog = null)}>
-    <p>{tn(d.ids.length, "The recording is moved to the Windows Recycle Bin, so you can restore it from there. Titles and folders come back if you do.", "The recordings are moved to the Windows Recycle Bin, so you can restore them from there. Titles and folders come back if you do.")}</p>
-  </Dialog>
+  {#if d.permanent}
+    <Dialog title={t("Delete {what} permanently?", { what: d.label })} confirmLabel={t("Delete permanently")} danger onconfirm={() => doDelete(d.ids, true)} oncancel={() => (dialog = null)}>
+      <p>{tn(d.ids.length, "The recording is removed from your computer. It doesn't go to the Recycle Bin and can't be restored.", "The recordings are removed from your computer. They don't go to the Recycle Bin and can't be restored.")}</p>
+    </Dialog>
+  {:else}
+    <Dialog title={t("Delete {what}?", { what: d.label })} confirmLabel={t("Move to Recycle Bin")} danger onconfirm={() => doDelete(d.ids, false)} oncancel={() => (dialog = null)}>
+      <p>{tn(d.ids.length, "The recording is moved to the Windows Recycle Bin, so you can restore it from there. Titles and folders come back if you do.", "The recordings are moved to the Windows Recycle Bin, so you can restore them from there. Titles and folders come back if you do.")}</p>
+    </Dialog>
+  {/if}
 {/if}
 
 <style>

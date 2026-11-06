@@ -343,5 +343,14 @@ export const nn: Record<string, string> = {
   "{n} clips couldn't be moved out, so the folder {name} was kept: {error}": "{n} klipp kunne ikkje flyttast ut, så mappa {name} vart behalden: {error}",
   "{n} clips couldn't be moved: {error}": "{n} klipp kunne ikkje flyttast: {error}",
   "{n} clips selected": "{n} klipp valde",
-  "{time} of {duration}": "{time} av {duration}"
+  "{time} of {duration}": "{time} av {duration}",
+  "Delete permanently…": "Slett permanent …",
+  "Delete permanently": "Slett permanent",
+  "Delete {what} permanently?": "Slette {what} permanent?",
+  "Deleted permanently": "Sletta permanent",
+  "Deleted {n} clips permanently": "Sletta {n} klipp permanent",
+  "The recording is removed from your computer. It doesn't go to the Recycle Bin and can't be restored.": "Opptaket vert fjerna frå datamaskina. Det hamnar ikkje i papirkorga og kan ikkje gjenopprettast.",
+  "The recordings are removed from your computer. They don't go to the Recycle Bin and can't be restored.": "Opptaka vert fjerna frå datamaskina. Dei hamnar ikkje i papirkorga og kan ikkje gjenopprettast.",
+  "Recycle Bin": "Papirkorg",
+  "Open the Windows Recycle Bin: clips you delete go there, and can be restored": "Opne papirkorga i Windows: klipp du slettar hamnar der, og kan gjenopprettast"
 };

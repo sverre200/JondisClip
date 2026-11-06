@@ -319,6 +319,9 @@ export const api = {
   clipDriveMark: (key: string, path: string) => call<void>("clip_drive_mark", { key, path }),
   pendingResolve: (folder: string, items: Item[], moveThem: boolean) => call<MoveResult>("pending_resolve", { folder, items, moveThem }),
   clipsDelete: (ids: string[]) => call<number>("clips_delete", { ids }),
+  /** Deletes for good: no Recycle Bin, can't be undone. */
+  clipsDeletePermanently: (ids: string[]) => call<number>("clips_delete_permanently", { ids }),
+  openRecycleBin: () => call<void>("open_recycle_bin"),
   clipCopyFile: (id: string) => call<void>("clip_copy_file", { id }),
   showInFolder: (id: string) => call<void>("show_in_folder", { id }),
   clipKeyframes: (id: string) => call<number[]>("clip_keyframes", { id }),
@@ -692,6 +695,13 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       return { moved: 0, failed: [] };
     case "clips_delete":
       return (args?.ids as string[]).length;
+    case "clips_delete_permanently": {
+      const ids = args?.ids as string[];
+      mockLib = (mockLib ?? mockClips()).filter((c) => !ids.includes(c.id));
+      return ids.length;
+    }
+    case "open_recycle_bin":
+      return undefined;
     case "clip_copy_file":
       return undefined;
 

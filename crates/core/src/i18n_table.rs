@@ -405,6 +405,11 @@ pub static TABLE: &[(&str, &str, &str)] = &[
         r#"{gone} av {total} klipp ble flyttet til papirkurven ({why})."#,
         r#"{gone} av {total} klipp vart flytte til papirkorga ({why})."#,
     ),
+    (
+        r#"{gone} of {total} clips were deleted ({why})."#,
+        r#"{gone} av {total} klipp ble slettet ({why})."#,
+        r#"{gone} av {total} klipp vart sletta ({why})."#,
+    ),
     // ---- window: export, share, Drive copies
     (
         r#"Choose a section to save: the start must be before the end."#,

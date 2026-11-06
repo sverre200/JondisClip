@@ -405,6 +405,26 @@ impl Organize {
         Ok(())
     }
 
+    /// Forgets everything about clips that were deleted permanently: title,
+    /// place in custom orders, Drive copies and pending moves. (Clips moved
+    /// to the Recycle Bin keep theirs, so a restore brings them back.)
+    /// Returns true if anything changed.
+    pub fn forget(&mut self, keys: &[String]) -> bool {
+        let before = self.clone();
+        for k in keys {
+            self.titles.remove(k);
+            self.drive.remove(k);
+        }
+        for f in &mut self.folders {
+            f.order.retain(|k| !keys.contains(k));
+        }
+        for p in &mut self.pending {
+            p.keys.retain(|k| !keys.contains(k));
+        }
+        self.pending.retain(|p| !p.keys.is_empty());
+        before != *self
+    }
+
     /// Remembers that clip `key` has a copy at `path` in the Drive folder.
     pub fn mark_in_drive(&mut self, key: &str, path: &str) -> Result<(), OrgError> {
         if !is_key(key) || path.trim().is_empty() {
@@ -809,6 +829,26 @@ mod tests {
             folder_name("Con artists").is_ok(),
             "only exact device names are reserved"
         );
+    }
+
+    #[test]
+    fn permanently_deleted_clips_are_forgotten_everywhere() {
+        let mut o = Organize::new();
+        o.add_folder("Raidz", "red").unwrap();
+        o.folders[0].order = keys(&[A, B, C]);
+        o.set_title(A, "Big raid").unwrap();
+        o.set_title(B, "Keep me").unwrap();
+        o.mark_in_drive(A, r"G:\My Drive\a.mp4").unwrap();
+        o.pending.push(Pending {
+            folder: "Old".into(),
+            keys: keys(&[A]),
+        });
+        assert!(o.forget(&keys(&[A])));
+        assert_eq!(o.folders[0].order, keys(&[B, C]));
+        assert!(!o.titles.contains_key(A));
+        assert_eq!(o.titles.get(B).map(String::as_str), Some("Keep me"));
+        assert!(o.drive.is_empty() && o.pending.is_empty());
+        assert!(!o.forget(&keys(&[D])), "nothing to forget: no save");
     }
 
     #[test]

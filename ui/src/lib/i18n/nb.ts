@@ -343,5 +343,14 @@ export const nb: Record<string, string> = {
   "{n} clips couldn't be moved out, so the folder {name} was kept: {error}": "{n} klipp kunne ikke flyttes ut, så mappen {name} ble beholdt: {error}",
   "{n} clips couldn't be moved: {error}": "{n} klipp kunne ikke flyttes: {error}",
   "{n} clips selected": "{n} klipp valgt",
-  "{time} of {duration}": "{time} av {duration}"
+  "{time} of {duration}": "{time} av {duration}",
+  "Delete permanently…": "Slett permanent …",
+  "Delete permanently": "Slett permanent",
+  "Delete {what} permanently?": "Slette {what} permanent?",
+  "Deleted permanently": "Slettet permanent",
+  "Deleted {n} clips permanently": "Slettet {n} klipp permanent",
+  "The recording is removed from your computer. It doesn't go to the Recycle Bin and can't be restored.": "Opptaket fjernes fra datamaskinen. Det havner ikke i papirkurven og kan ikke gjenopprettes.",
+  "The recordings are removed from your computer. They don't go to the Recycle Bin and can't be restored.": "Opptakene fjernes fra datamaskinen. De havner ikke i papirkurven og kan ikke gjenopprettes.",
+  "Recycle Bin": "Papirkurv",
+  "Open the Windows Recycle Bin: clips you delete go there, and can be restored": "Åpne papirkurven i Windows: klipp du sletter havner der, og kan gjenopprettes"
 };

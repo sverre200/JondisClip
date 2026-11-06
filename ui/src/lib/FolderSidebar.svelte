@@ -20,6 +20,7 @@
     collapsed,
     onview,
     oncreate,
+    onrecyclebin,
     oncontext,
     onplace,
     ontoggle,
@@ -32,6 +33,8 @@
     collapsed: boolean;
     onview: (v: View) => void;
     oncreate: () => void;
+    /** open the Windows Recycle Bin (deleted clips can be restored there) */
+    onrecyclebin: () => void;
     oncontext: (e: MouseEvent, f: Folder) => void;
     /** put folder `id` inside `parent` (null: top level), before sibling `before` (null: last) */
     onplace: (id: string, parent: string | null, before: string | null) => void;
@@ -221,6 +224,10 @@
     <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
     {#if !collapsed}<span class="name">{t("New folder")}</span>{/if}
   </button>
+  <button type="button" class="row bin" onclick={onrecyclebin} title={t("Open the Windows Recycle Bin: clips you delete go there, and can be restored")}>
+    <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M6.5 4.5V3a.5.5 0 0 1 .5-.5h2a.5.5 0 0 1 .5.5v1.5M4 4.5l.6 8.1a1 1 0 0 0 1 .9h4.8a1 1 0 0 0 1-.9l.6-8.1M6.75 7v4M9.25 7v4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    {#if !collapsed}<span class="name">{t("Recycle Bin")}</span><svg class="ext" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5H3.5v9h9V10M9 3.5h3.5V7M12.5 3.5 7.5 8.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>{/if}
+  </button>
 </nav>
 
 <style>
@@ -378,6 +385,15 @@
   .new {
     margin-top: var(--s2);
     color: var(--text-faint);
+  }
+  .bin {
+    color: var(--text-faint);
+  }
+  .ext {
+    width: 12px;
+    height: 12px;
+    flex: none;
+    opacity: 0.7;
   }
   .insert {
     position: absolute;

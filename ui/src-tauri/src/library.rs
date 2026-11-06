@@ -25,6 +25,31 @@ pub fn cache() -> Cache {
     Cache::new(paths::local_dir().join("library"))
 }
 
+/// Content keys of the latest scan: id → key (only clips that could be read).
+fn known_keys() -> &'static Mutex<HashMap<String, String>> {
+    static K: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    K.get_or_init(Default::default)
+}
+
+/// The content key of a clip from the latest scan.
+pub fn key_of(id: &str) -> Option<String> {
+    known_keys()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(id)
+        .cloned()
+}
+
+/// Whether a clip other than `except` has content key `key` (a byte-identical
+/// copy shares its title and folders, so they're kept for it).
+pub fn key_held_by_others(key: &str, except: &[String]) -> bool {
+    known_keys()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|(id, k)| k == key && !except.contains(id))
+}
+
 pub fn path_of(id: &str) -> Result<PathBuf, String> {
     known()
         .lock()
@@ -54,6 +79,15 @@ pub fn scan(root: PathBuf) -> LibraryView {
     let mut k = known().lock().unwrap_or_else(|e| e.into_inner());
     k.clear();
     k.extend(s.clips.iter().map(|c| (c.id.clone(), c.path.clone())));
+    let mut ks = known_keys().lock().unwrap_or_else(|e| e.into_inner());
+    ks.clear();
+    ks.extend(
+        s.clips
+            .iter()
+            .filter(|c| !c.key.is_empty())
+            .map(|c| (c.id.clone(), c.key.clone())),
+    );
+    drop(ks);
     let mut t = known_thumbs().lock().unwrap_or_else(|e| e.into_inner());
     t.clear();
     t.extend(s.clips.iter().map(|c| c.thumb_key.clone()));

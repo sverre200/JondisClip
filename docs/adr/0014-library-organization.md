@@ -37,7 +37,7 @@ The owner wants personal folders (with colours), clip titles, drag-and-drop movi
 5. **Colours** come from a fixed palette: red, orange, yellow, green, blue, purple and grey. They're muted tokens shown as a small dot or icon tint, never fills.
 6. **Deleting:**
    - **Deleting a folder** never deletes recordings. Its clips go back to "All clips", and the dialog says so.
-   - **Deleting a clip** is an explicit action with a confirmation dialog. It goes to the **Recycle Bin** (`SHFileOperationW` with `FOF_ALLOWUNDO`, plus Windows' own warning if the volume has no Recycle Bin). It's never a permanent delete, and the clip's metadata is kept for a restore.
+   - **Deleting a clip** is an explicit action with a confirmation dialog. It goes to the **Recycle Bin** (`SHFileOperationW` with `FOF_ALLOWUNDO`, plus Windows' own warning if the volume has no Recycle Bin). The clip's metadata is kept for a restore. (*Superseded in part by ADR-0019:* there's now also a separate, confirmed Delete permanently on Shift+Delete.)
 7. **Manual order:**
    - "Custom order" is a sort mode **inside a folder**, and it's the default there.
    - Dragging within the grid reorders only when the view shows the folder's complete list: custom sort, no search, no game filter. Otherwise the UI says "Clear the search and game filter to reorder". Dragging onto a folder always works.

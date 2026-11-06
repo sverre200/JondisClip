@@ -97,6 +97,7 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
   - **Six accent themes** (ADR-0016), with the Windows 11 title bar tinted. Status colours are fixed.
   - **Titles rename the file** (ADR-0017, 2026-11-06): `<title> — <Game> <stamp>.mp4`, so Explorer and file pickers show the name set in the app.
   - **Norwegian and date format** (ADR-0018, 2026-11-06): the window and tray in English, Norsk bokmål or Norsk nynorsk; dates in the app and new file names as 06.11.2026, 2026-11-06 or 11/06/2026.
+  - **Permanent delete and Recycle Bin** (ADR-0019, 2026-11-06): Delete permanently… (Shift+Del, confirmed) next to Delete to the Recycle Bin, and a Recycle Bin row in the sidebar that opens it in File Explorer.
   - **Name sort** and a sort remembered per view. Reordering works with a filter on (hidden clips keep their places). Alt+←/→ moves clips. Dragging under another sort is refused with a hint.
   - All verified in a sandbox profile on sample clips; real Google Drive was not tested.
   - **Subfolders** (up to 3 levels, ADR-0015 update), a window and taskbar icon in the theme colour, a fade-in when the window opens, and a middle-button drag (or Alt+←/→ on a handle) that moves the whole trim selection.
