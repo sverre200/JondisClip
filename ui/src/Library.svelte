@@ -254,6 +254,8 @@
       const isFolder = v !== "all" && v !== "unsorted";
       const kept = sortMemory[v];
       sort = kept && (isFolder || kept !== "custom") ? kept : isFolder ? "custom" : "newest";
+      sub = "all";
+      game = "";
       selection = [];
       selectedId = null;
     });
@@ -283,17 +285,27 @@
   const unsortedCount = $derived(clips.filter((c) => !folderOf.has(c.id)).length);
   const hasSubfolders = $derived(!!currentFolder && org.folders.some((x) => x.parent === currentFolder.id));
 
-  // Show a folder's subfolder clips too (a UI preference, off by default:
-  // like Explorer, a folder shows what's directly in it).
-  let withSubs = $state(localStorage.getItem("jc.library.subs") === "on");
-  $effect(() => localStorage.setItem("jc.library.subs", withSubs ? "on" : "off"));
-  const showingSubs = $derived(withSubs && hasSubfolders);
+  // A folder with subfolders gets chips: All (the folder and everything
+  // inside it), "Only here" (its own clips) and one per subfolder (that
+  // subfolder and everything inside it). Reset when another folder opens.
+  let sub = $state<string>("all");
+  const subfolders = $derived(currentFolder ? org.folders.filter((x) => x.parent === currentFolder.id) : []);
+  const inTree = (id: string | undefined, root: string) => !!id && (id === root || isWithin(id, root));
+  const showingSubs = $derived(hasSubfolders && sub !== "here");
+  /** The one folder whose custom order is shown and can be arranged (null: several). */
+  const orderFolder = $derived.by(() => {
+    if (!currentFolder) return null;
+    if (!hasSubfolders || sub === "here") return currentFolder;
+    const f = org.folders.find((x) => x.id === sub);
+    return f && !org.folders.some((x) => x.parent === f.id) ? f : null;
+  });
 
   const inView = $derived.by(() => {
     if (folderView === "all") return clips;
     if (folderView === "unsorted") return clips.filter((c) => !folderOf.has(c.id));
-    if (showingSubs) return clips.filter((c) => { const id = folderOf.get(c.id)?.id; return !!id && (id === folderView || isWithin(id, folderView)); });
-    return clips.filter((c) => folderOf.get(c.id)?.id === folderView);
+    if (!hasSubfolders || sub === "here") return clips.filter((c) => folderOf.get(c.id)?.id === folderView);
+    const root = sub === "all" ? folderView : sub;
+    return clips.filter((c) => inTree(folderOf.get(c.id)?.id, root));
   });
 
   /** Folders in tree order (parents first), for menus. */
@@ -335,9 +347,15 @@
         (!q || c.game.toLowerCase().includes(q) || c.file_name.toLowerCase().includes(q) || (c.title ?? "").toLowerCase().includes(q)),
     );
     const dur = (c: Clip) => c.probe?.duration ?? -1;
-    if (sort === "custom" && currentFolder) {
-      const pos = new Map(currentFolder.clips.map((k, i) => [k, i]));
+    if (sort === "custom" && orderFolder) {
+      const pos = new Map(orderFolder.clips.map((k, i) => [k, i]));
       list = [...list].sort((a, b) => (pos.get(a.key) ?? 1e9) - (pos.get(b.key) ?? 1e9));
+    } else if (sort === "custom" && currentFolder) {
+      // Several folders shown: folder by folder (sidebar order), each in its own order.
+      const fpos = new Map(tree.map((f, i) => [f.id, i]));
+      const cpos = new Map(org.folders.flatMap((f) => f.clips.map((k, i) => [k, i] as const)));
+      const at = (c: Clip) => fpos.get(folderOf.get(c.id)?.id ?? "") ?? 1e9;
+      list = [...list].sort((a, b) => at(a) - at(b) || (cpos.get(a.key) ?? 1e9) - (cpos.get(b.key) ?? 1e9));
     } else if (sort === "oldest") list = [...list].reverse();
     else if (sort === "name") list = [...list].sort((a, b) => byName.compare(a.title ?? a.game, b.title ?? b.game) || b.recorded.localeCompare(a.recorded));
     else if (sort === "longest") list = [...list].sort((a, b) => dur(b) - dur(a));
@@ -633,7 +651,7 @@
   // hidden clips keep their places.
   const reorderBlocked = (): string | null => {
     if (!currentFolder) return "Open a folder to arrange clips in your own order";
-    if (showingSubs) return "Turn off Include subfolders to arrange clips";
+    if (!orderFolder) return "Pick one folder in the chips above to arrange its clips";
     if (sort !== "custom") return `Sorted by ${sorts.find((x) => x.value === sort)?.label.toLowerCase() ?? sort}. Choose Custom order to arrange`;
     return null;
   };
@@ -661,7 +679,7 @@
         if (t.type === "folder") {
           const f = t.id ? (org.folders.find((x) => x.id === t.id) ?? null) : null;
           void moveTo(cs, f);
-        } else if (t.type === "insert" && currentFolder) {
+        } else if (t.type === "insert" && orderFolder) {
           void arrange(p.keys, t.before);
         }
       },
@@ -681,15 +699,16 @@
    *  `before` null means "after the last visible clip": with a filter on,
    *  that's right after it, not after the hidden clips at the very end. */
   async function arrange(keys: string[], before: string | null) {
-    if (!currentFolder) return;
+    const f = orderFolder;
+    if (!f) return;
     const present = inView.map((x) => x.key).filter(Boolean);
     if (before === null && shown.length < inView.length) {
-      const pos = new Map(currentFolder.clips.map((k, i) => [k, i]));
+      const pos = new Map(f.clips.map((k, i) => [k, i]));
       const full = [...present].sort((a, b) => (pos.get(a) ?? 1e9) - (pos.get(b) ?? 1e9));
       const last = shown.filter((c) => !keys.includes(c.key)).at(-1)?.key;
       if (last) before = full.slice(full.indexOf(last) + 1).find((k) => !keys.includes(k)) ?? null;
     }
-    await orgDo(api.clipsArrange(currentFolder.name, present, keys, before));
+    await orgDo(api.clipsArrange(f.name, present, keys, before));
   }
 
   /** Alt+←/→: move the selection one place in custom order (keyboard drag). */
@@ -847,7 +866,7 @@
   {/each}
   {#if !view || view.clips.length || loadError}
   <div class="toolbar">
-    <div class="chips" role="group" aria-label="Filter by game">
+    <div class="chips" role="group" aria-label="Filter by folder">
       {#if currentFolder}
         <span class="where" title={pathLabel(currentFolder.id)}>
           <span class="fdot" style:background="var(--folder-{currentFolder.color})"></span>
@@ -858,23 +877,35 @@
           <span class="leaf">{currentFolder.leaf}</span>
         </span>
         {#if hasSubfolders}
-          <button type="button" class="chip" class:on={withSubs} aria-pressed={withSubs} onclick={() => (withSubs = !withSubs)} title="Also show the clips in this folder's subfolders">Include subfolders</button>
+          <button type="button" class="chip" class:on={sub === "all"} aria-pressed={sub === "all"} onclick={() => (sub = "all")} title="This folder and everything in its subfolders">
+            All <span class="n">{counts[currentFolder.id] ?? 0}</span>
+          </button>
+          {#if own[currentFolder.id]}
+            <button type="button" class="chip" class:on={sub === "here"} aria-pressed={sub === "here"} onclick={() => (sub = "here")} title="Only the clips directly in {currentFolder.leaf}">
+              Only here <span class="n">{own[currentFolder.id]}</span>
+            </button>
+          {/if}
+          {#each subfolders as s (s.id)}
+            <button type="button" class="chip" class:on={sub === s.id} aria-pressed={sub === s.id} onclick={() => (sub = sub === s.id ? "all" : s.id)} title={pathLabel(s.id)}>
+              <span class="fdot" style:background="var(--folder-{s.color})" aria-hidden="true"></span>{s.leaf} <span class="n">{counts[s.id] ?? 0}</span>
+            </button>
+          {/each}
         {/if}
       {/if}
-      <button type="button" class="chip" class:on={!game} aria-pressed={!game} onclick={() => (game = "")}>
-        All games <span class="n">{inView.length}</span>
-      </button>
-      {#each games as [name, n] (name)}
-        <button type="button" class="chip" class:on={game === name} aria-pressed={game === name} onclick={() => (game = game === name ? "" : name)}>
-          {name} <span class="n">{n}</span>
-        </button>
-      {/each}
     </div>
     <div class="tools">
       <label class="search">
         <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
         <input type="search" placeholder="Search clips" aria-label="Search clips" bind:value={query} spellcheck="false" />
       </label>
+      {#if games.length > 1 || game}
+        <Select
+          label="Filter by game"
+          value={game}
+          options={[{ value: "", label: `All games (${inView.length})` }, ...games.map(([name, n]) => ({ value: name, label: `${name} (${n})` }))]}
+          onchange={(v) => (game = v)}
+        />
+      {/if}
       <Select label="Sort clips" value={sort} options={sorts} onchange={(v) => setSort(v as Sort)} />
       <button type="button" class="icon-btn" title="Refresh" aria-label="Refresh library" onclick={refresh} disabled={refreshing}>
         <svg class:spin={refreshing} viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.5v2.8h-2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
@@ -934,6 +965,7 @@
                 selected={selectedSet.has(c.id)}
                 tabindex={c.id === tabStop ? 0 : -1}
                 folderColor={folderOf.get(c.id)?.color ?? null}
+                folderName={folderOf.get(c.id)?.leaf ?? null}
                 renaming={renamingId === c.id}
                 lifted={dragging?.has(c.id) ?? false}
                 onselect={(e) => click(c, e)}
@@ -1203,20 +1235,27 @@
   .pad {
     padding: 0 var(--s5);
   }
+  /* Nothing is hidden when space runs out: the chips wrap, and the tools
+     drop to their own row before squeezing them. */
   .toolbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
-    gap: var(--s4);
+    gap: var(--s2) var(--s4);
     padding: var(--s3) var(--s5);
     border-bottom: 1px solid var(--border);
   }
   .chips {
     display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: var(--s2);
-    overflow-x: auto;
     min-width: 0;
-    scrollbar-width: none;
+  }
+  .chip .fdot {
+    width: 7px;
+    height: 7px;
   }
   .chip {
     flex: none;
@@ -1252,9 +1291,13 @@
   }
   .tools {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     align-items: center;
     gap: var(--s2);
-    flex: none;
+    flex: 0 1 auto;
+    min-width: 0;
+    margin-left: auto;
   }
   .tools :global(select) {
     width: 148px;
@@ -1265,6 +1308,8 @@
     gap: var(--s2);
     height: var(--control-h);
     width: 200px;
+    min-width: 140px;
+    flex: 0 1 200px;
     padding: 0 var(--s3);
     border-radius: var(--radius-md);
     border: 1px solid var(--border-strong);

@@ -9,6 +9,7 @@
     selected,
     tabindex,
     folderColor = null,
+    folderName = null,
     renaming = false,
     lifted = false,
     onselect,
@@ -23,6 +24,8 @@
     tabindex: number;
     /** colour of the clip's folder (a small dot), when shown outside it */
     folderColor?: string | null;
+    /** name of the clip's folder (its last part), shown next to the dot */
+    folderName?: string | null;
     /** inline title editor open */
     renaming?: boolean;
     /** being dragged (dimmed) */
@@ -178,7 +181,7 @@
     </div>
     <div class="l2">
       {#if folderColor}<span class="fdot" style:background="var(--folder-{folderColor})" aria-hidden="true"></span>{/if}
-      <span class="l2text">{#if clip.title}{clip.game} · {/if}{#if res}{res} · {/if}{bytes(clip.size)}</span>
+      <span class="l2text">{#if folderName}<span class="fname">{folderName}</span> · {/if}{#if clip.title}{clip.game} · {/if}{#if res}{res} · {/if}{bytes(clip.size)}</span>
     </div>
   </div>
 </div>
@@ -221,6 +224,10 @@
     height: 7px;
     border-radius: 50%;
     flex: none;
+  }
+  .fname {
+    color: var(--text);
+    font-weight: var(--fw-strong);
   }
   .l2text {
     min-width: 0;
