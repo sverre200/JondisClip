@@ -116,6 +116,32 @@
   let buffered = $state(0);
   let paused = $state(true);
   let muted = $state(false);
+  // Playback volume in this window only (never the clip or its exports),
+  // remembered between sessions.
+  const VOLUME_KEY = "jc.playerVolume";
+  let volume = $state(
+    (() => {
+      try {
+        const v = Number(localStorage.getItem(VOLUME_KEY));
+        return localStorage.getItem(VOLUME_KEY) !== null && v >= 0 && v <= 1 ? v : 1;
+      } catch {
+        return 1;
+      }
+    })(),
+  );
+  $effect(() => {
+    if (video) video.volume = volume;
+    try {
+      localStorage.setItem(VOLUME_KEY, String(volume));
+    } catch {
+      // storage unavailable: the level still applies now
+    }
+  });
+  function setVolume(v: number) {
+    volume = Math.round(Math.min(1, Math.max(0, v)) * 100) / 100;
+    if (volume > 0) muted = false;
+  }
+  const silent = $derived(muted || volume === 0);
   let loading = $state(true);
   let failed = $state<string | null>(null);
 
@@ -332,6 +358,12 @@
         case "M":
           muted = !muted;
           return true;
+        case "ArrowUp":
+          setVolume(volume + 0.1);
+          return true;
+        case "ArrowDown":
+          setVolume(volume - 0.1);
+          return true;
         case "i":
         case "I":
           markIn();
@@ -503,13 +535,35 @@
     <div class="seek">
       <Timeline {duration} {time} {buffered} trim={{ start: trimStart, end: trimEnd }} onseek={seek} ontrim={setTrim} />
     </div>
-    <button type="button" class="icon-btn" aria-label={muted ? "Unmute (M)" : "Mute (M)"} title={muted ? "Unmute (M)" : "Mute (M)"} onclick={() => (muted = !muted)}>
-      {#if muted}
+    <button
+      type="button"
+      class="icon-btn"
+      aria-label={muted ? "Unmute (M)" : "Mute (M)"}
+      title={muted ? "Unmute (M)" : "Mute (M)"}
+      onclick={() => {
+        if (!muted && volume === 0) setVolume(0.5);
+        else muted = !muted;
+      }}
+    >
+      {#if silent}
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6h2.5L8.5 3v10L5 10H2.5z" fill="currentColor" /><path d="m11 6 3.5 4m0-4L11 10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
       {:else}
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6h2.5L8.5 3v10L5 10H2.5z" fill="currentColor" /><path d="M11 5.5a3.5 3.5 0 0 1 0 5M12.8 3.8a6 6 0 0 1 0 8.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
       {/if}
     </button>
+    <input
+      class="volume"
+      type="range"
+      min="0"
+      max="1"
+      step="0.01"
+      value={silent ? 0 : volume}
+      style="--pct: {(silent ? 0 : volume) * 100}%"
+      aria-label="Playback volume (↑/↓)"
+      aria-valuetext="{Math.round((silent ? 0 : volume) * 100)}%"
+      title="Playback volume {Math.round((silent ? 0 : volume) * 100)}% · only in this window, the clip isn't changed"
+      oninput={(e) => setVolume(Number((e.currentTarget as HTMLInputElement).value))}
+    />
   </div>
   <div class="edit" aria-label="Trim and save">
     <div class="sel-info">
@@ -606,7 +660,7 @@
       {/if}
     </div>
   </div>
-  <p class="keys">Space play/pause · I/O set start/end · middle-drag moves the selection · Ctrl+S save · ←/→ 5 s · J/L 10 s · ,/. frame · Page Up/Down other clips · Esc back</p>
+  <p class="keys">Space play/pause · I/O set start/end · middle-drag moves the selection · Ctrl+S save · ←/→ 5 s · J/L 10 s · ,/. frame · ↑/↓ volume · Page Up/Down other clips · Esc back</p>
 </div>
 
 <style>
@@ -736,6 +790,40 @@
   .seek {
     flex: 1;
     min-width: 0;
+  }
+  /* Compact playback-volume slider (same look as Settings' sliders). */
+  .volume {
+    appearance: none;
+    width: 84px;
+    height: var(--control-h);
+    margin: 0 0 0 calc(var(--s1) * -1);
+    background: transparent;
+    cursor: pointer;
+    flex: none;
+  }
+  .volume::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: var(--radius-pill);
+    background: linear-gradient(to right, var(--accent) 0 var(--pct), var(--border-strong) var(--pct) 100%);
+  }
+  .volume::-webkit-slider-thumb {
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    margin-top: -4px;
+    border-radius: 50%;
+    background: var(--text);
+    transition: transform var(--t-fast) var(--ease);
+  }
+  .volume:hover::-webkit-slider-thumb {
+    transform: scale(1.15);
+  }
+  .volume:focus-visible {
+    outline: none;
+  }
+  .volume:focus-visible::-webkit-slider-thumb {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
   }
   .icon-btn {
     display: grid;
