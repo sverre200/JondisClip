@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import { thumbUrl, type Clip } from "./api";
-  import { bytes, clock, timeOfDay } from "./format";
+  import { bytes, clock, shortDate, timeOfDay } from "./format";
   import { requestThumb } from "./thumbs";
 
   let {
@@ -115,7 +115,7 @@
   class:lifted
   {tabindex}
   aria-pressed={selected}
-  aria-label="{clip.title ? `${clip.title}, ` : ''}{clip.game}, {timeOfDay(clip.recorded)}, {clip.probe ? clock(clip.probe.duration) : 'unreadable'}{clip.edit ? ', edit' : ''}{clip.in_drive ? ', in Google Drive' : ''}"
+  aria-label="{clip.title ? `${clip.title}, ` : ''}{clip.game}, {shortDate(clip.recorded)} {timeOfDay(clip.recorded)}, {clip.probe ? clock(clip.probe.duration) : 'unreadable'}{clip.edit ? ', edit' : ''}{clip.in_drive ? ', in Google Drive' : ''}"
   onclick={(e) => !renaming && onselect(e)}
   ondblclick={() => !renaming && onopen()}
   oncontextmenu={(e) => {
@@ -173,7 +173,7 @@
         />
       {:else}
         <span class="game" class:titled={!!clip.title} title={clip.title ?? clip.game}>{clip.title ?? clip.game}</span>
-        <span class="time">{timeOfDay(clip.recorded)}</span>
+        <span class="time">{shortDate(clip.recorded)} · {timeOfDay(clip.recorded)}</span>
       {/if}
     </div>
     <div class="l2">

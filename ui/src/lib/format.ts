@@ -104,6 +104,15 @@ export function timeOfDay(stamp: string): string {
   return stamp.slice(11, 16);
 }
 
+/** A clip card's date, kept short so titles keep their room: "4 Nov", or "4 Nov 2025" in another year. */
+export function shortDate(stamp: string, now = new Date()): string {
+  const d = parseLocal(stamp);
+  return d.toLocaleDateString(
+    undefined,
+    d.getFullYear() === now.getFullYear() ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" },
+  );
+}
+
 /** "Today 17:47", "Yesterday 09:02", "3 Nov 17:47". */
 export function whenShort(stamp: string, now = new Date()): string {
   const day = dayLabel(stamp, now);
