@@ -13,6 +13,7 @@
   import Slider from "./lib/Slider.svelte";
   import Toggle from "./lib/Toggle.svelte";
   import { THEMES, applyTheme } from "./lib/theme";
+  import { LANGUAGES, setLocale, t } from "./lib/i18n.svelte";
 
   // Tray status is polled by the shell (App.svelte) for both pages.
   let { tray }: { tray: TrayView | null } = $props();
@@ -56,7 +57,7 @@
     settings = { ...settings, ...patch }; // optimistic
     try {
       settings = await api.update(patch);
-      showToast(tray?.running ? "Saved · applied within 2 s" : "Saved");
+      showToast(tray?.running ? t("Saved · applied within 2 s") : t("Saved"));
     } catch (e) {
       settings = before;
       showToast(String(e), "error");
@@ -71,6 +72,25 @@
     await change({ theme: id });
     if (settings.theme !== id) applyTheme(before);
   }
+
+  /** Language and date format apply at once in the window, then save (the tray follows within 2 s). */
+  async function setLanguage(lang: string, dateFormat: string) {
+    if (!settings) return;
+    const before = { language: settings.language, date_format: settings.date_format };
+    setLocale(lang, dateFormat);
+    await change({ language: lang, date_format: dateFormat });
+    if (settings.language !== lang || settings.date_format !== dateFormat) setLocale(before.language, before.date_format);
+  }
+  const sample = new Date(2026, 10, 6);
+  const dateFormats = $derived.by(() => {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const [y, m, d] = [sample.getFullYear(), pad(sample.getMonth() + 1), pad(sample.getDate())];
+    return [
+      { value: "dmy", label: `${d}.${m}.${y}`, title: t("Day.month.year") },
+      { value: "ymd", label: `${y}-${m}-${d}`, title: t("Year-month-day") },
+      { value: "mdy", label: `${m}/${d}/${y}`, title: t("Month/day/year") },
+    ];
+  });
 
   async function pickFolder() {
     if (!settings || !snap) return;
@@ -105,11 +125,11 @@
   const micOptions = $derived.by(() => {
     const list = mics ?? [];
     const def = list.find((m) => m.is_default);
-    const opts = [{ value: "", label: def ? `Windows default · ${def.name}` : "Windows default" }];
+    const opts = [{ value: "", label: def ? t("Windows default · {name}", { name: def.name }) : t("Windows default") }];
     for (const m of list) opts.push({ value: m.id, label: m.name });
     const chosen = settings?.microphone_device;
     if (chosen && mics && !list.some((m) => m.id === chosen)) {
-      opts.push({ value: chosen, label: "Selected microphone (not connected)" });
+      opts.push({ value: chosen, label: t("Selected microphone (not connected)") });
     }
     return opts;
   });
@@ -118,22 +138,22 @@
     return mics?.find((m) => (chosen ? m.id === chosen : m.is_default)) ?? null;
   });
   const micHint = $derived.by(() => {
-    if (micsError) return `Couldn't list microphones: ${micsError}`;
+    if (micsError) return t("Couldn't list microphones: {error}", { error: micsError });
     const chosen = settings?.microphone_device;
     if (chosen && mics && !mics.some((m) => m.id === chosen))
-      return "Not connected. The mic track stays silent until it's plugged back in.";
+      return t("Not connected. The mic track stays silent until it's plugged back in.");
     if (activeMic?.is_virtual)
-      return `${activeMic.name} is a virtual device, not a physical microphone. Choose your real microphone unless you route your voice through it on purpose.`;
-    if (!chosen) return "Follows the Windows default if you change it.";
-    return "Always records this microphone, even if the Windows default changes.";
+      return t("{name} is a virtual device, not a physical microphone. Choose your real microphone unless you route your voice through it on purpose.", { name: activeMic.name });
+    if (!chosen) return t("Follows the Windows default if you change it.");
+    return t("Always records this microphone, even if the Windows default changes.");
   });
   const gainDb = $derived(gainPreview ?? settings?.microphone_gain_db ?? 0);
   const levelHint = $derived.by(() => {
-    if (level.error) return `Can't read this microphone: ${level.error}`;
-    if (level.hold <= -60) return "Speak normally: your voice should reach the green zone.";
-    if (level.hold > -3) return "Peaks are very hot. Lower the gain a little (loud peaks are limited, not clipped).";
-    if (level.hold <= -18) return "Quiet. Raise the gain until normal speech reaches the green zone.";
-    return "Good level.";
+    if (level.error) return t("Can't read this microphone: {error}", { error: level.error });
+    if (level.hold <= -60) return t("Speak normally: your voice should reach the green zone.");
+    if (level.hold > -3) return t("Peaks are very hot. Lower the gain a little (loud peaks are limited, not clipped).");
+    if (level.hold <= -18) return t("Quiet. Raise the gain until normal speech reaches the green zone.");
+    return t("Good level.");
   });
 
   // Live meter: polls only while the mic is enabled; the backend capture stops
@@ -196,63 +216,63 @@
 
   function discordLimits(current: number) {
     const presets = [
-      { value: "10", label: "10 MB", title: "Very strict servers or older limits" },
-      { value: "19", label: "19 MB", title: "Free account (recommended)" },
+      { value: "10", label: "10 MB", title: t("Very strict servers or older limits") },
+      { value: "19", label: "19 MB", title: t("Free account (recommended)") },
       { value: "50", label: "50 MB", title: "Nitro Basic" },
       { value: "500", label: "500 MB", title: "Nitro" },
     ];
     // A custom value from the settings file stays visible.
-    if (!presets.some((p) => p.value === String(current))) presets.push({ value: String(current), label: `${current} MB`, title: "Set in settings.toml" });
+    if (!presets.some((p) => p.value === String(current))) presets.push({ value: String(current), label: `${current} MB`, title: t("Set in settings.toml") });
     return presets;
   }
 
-  const resolutions: { value: Resolution; label: string }[] = [
-    { value: "source", label: "Native" },
+  const resolutions: { value: Resolution; label: string }[] = $derived([
+    { value: "source", label: t("Native") },
     { value: "1440p", label: "1440p" },
     { value: "1080p", label: "1080p" },
     { value: "720p", label: "720p" },
-  ];
-  const qualities: { value: Quality; label: string; title: string }[] = [
-    { value: "performance", label: "Performance", title: "Smallest files, lightest on the GPU" },
-    { value: "balanced", label: "Balanced", title: "Recommended" },
-    { value: "high", label: "High", title: "Sharpest motion, biggest files" },
-  ];
-  const codecs: { value: Codec; label: string; title: string }[] = [
-    { value: "auto", label: "H.264", title: "Plays everywhere (recommended)" },
-    { value: "hevc", label: "HEVC", title: "Smaller files; needs the HEVC extension or VLC to play" },
-    { value: "av1", label: "AV1", title: "Smallest files; newest GPUs only" },
-  ];
+  ]);
+  const qualities: { value: Quality; label: string; title: string }[] = $derived([
+    { value: "performance", label: t("Performance"), title: t("Smallest files, lightest on the GPU") },
+    { value: "balanced", label: t("Balanced"), title: t("Recommended") },
+    { value: "high", label: t("High"), title: t("Sharpest motion, biggest files") },
+  ]);
+  const codecs: { value: Codec; label: string; title: string }[] = $derived([
+    { value: "auto", label: "H.264", title: t("Plays everywhere (recommended)") },
+    { value: "hevc", label: "HEVC", title: t("Smaller files; needs the HEVC extension or VLC to play") },
+    { value: "av1", label: "AV1", title: t("Smallest files; newest GPUs only") },
+  ]);
 </script>
 
 <main>
   {#if snap?.warnings.length}
-    <Banner>Some settings in the file were invalid and were reset: {snap.warnings.join("; ")}</Banner>
+    <Banner>{t("Some settings in the file were invalid and were reset: {list}", { list: snap.warnings.join("; ") })}</Banner>
   {/if}
   {#if tray?.status?.mic_connected === false}
-    <Banner>Your microphone isn't connected, so the mic track is silent until it's back.</Banner>
+    <Banner>{t("Your microphone isn't connected, so the mic track is silent until it's back.")}</Banner>
   {/if}
   {#if tray?.status?.audio_error}
-    <Banner>Audio couldn't start, so clips are recorded without sound. {tray.status.audio_error}</Banner>
+    <Banner>{t("Audio couldn't start, so clips are recorded without sound.")} {tray.status.audio_error}</Banner>
   {/if}
 
   {#if loadError}
-    <Banner tone="error">Couldn't load settings: {loadError}</Banner>
+    <Banner tone="error">{t("Couldn't load settings: {error}", { error: loadError })}</Banner>
   {:else if !settings || !snap}
-    <div class="skeleton" aria-busy="true" aria-label="Loading settings">
+    <div class="skeleton" aria-busy="true" aria-label={t("Loading settings")}>
       {#each Array(6) as _, i (i)}<div class="sk-row"></div>{/each}
     </div>
   {:else}
     <section aria-labelledby="h-replay">
-      <h2 id="h-replay">Instant replay</h2>
-      <Row label="Replay length" hint="How much of the past the hotkey saves.">
+      <h2 id="h-replay">{t("Instant replay")}</h2>
+      <Row label={t("Replay length")} hint={t("How much of the past the hotkey saves.")}>
         <Segmented
-          label="Replay length"
+          label={t("Replay length")}
           value={settings.replay_seconds}
           options={snap.replay_presets.map((s) => ({ value: s, label: replayShort(s), title: replayLabel(s) }))}
           onchange={(v) => change({ replay_seconds: v })}
         />
       </Row>
-      <Row label="Save hotkey" hint="Works everywhere, including in fullscreen games.">
+      <Row label={t("Save hotkey")} hint={t("Works everywhere, including in fullscreen games.")}>
         <HotkeyField
           value={settings.hotkey}
           conflict={hotkeyConflict}
@@ -260,34 +280,34 @@
           onchange={(v) => change({ hotkey: v })}
         />
       </Row>
-      <Row label="Save location" hint="Clips go into a folder per game.">
+      <Row label={t("Save location")} hint={t("Clips go into a folder per game.")}>
         <span class="path" title={saveDir}>{saveDir}</span>
-        <Button onclick={pickFolder} disabled={!isDesktop}>Change…</Button>
-        <Button variant="ghost" onclick={() => api.openFolder(saveDir)} title="Open in File Explorer">Open</Button>
+        <Button onclick={pickFolder} disabled={!isDesktop}>{t("Change…")}</Button>
+        <Button variant="ghost" onclick={() => api.openFolder(saveDir)} title={t("Open in File Explorer")}>{t("Open")}</Button>
         {#snippet below()}
           {#if settings?.save_dir}
             <div class="below-right">
-              <Button variant="ghost" onclick={() => change({ save_dir: "" })}>Use default (Videos\JondisClip)</Button>
+              <Button variant="ghost" onclick={() => change({ save_dir: "" })}>{t("Use default (Videos\\JondisClip)")}</Button>
             </div>
           {/if}
         {/snippet}
       </Row>
-      <Row label="Save sound" hint="A short sound confirms the hotkey, even in fullscreen." id="t-sound">
-        <Toggle id="t-sound" label="Save sound" checked={settings.save_sound} onchange={(v) => change({ save_sound: v })} />
+      <Row label={t("Save sound")} hint={t("A short sound confirms the hotkey, even in fullscreen.")} id="t-sound">
+        <Toggle id="t-sound" label={t("Save sound")} checked={settings.save_sound} onchange={(v) => change({ save_sound: v })} />
       </Row>
     </section>
 
     <section aria-labelledby="h-video">
-      <h2 id="h-video">Video</h2>
-      <Row label="Quality" hint={est ? `Up to ${est.perMin} per minute in busy scenes (a ${replayLabel(settings.replay_seconds)} clip up to ${est.perClip}). Calm scenes use much less.` : undefined}>
-        <Segmented label="Quality" value={settings.quality} options={qualities} onchange={(v) => change({ quality: v })} />
+      <h2 id="h-video">{t("Video")}</h2>
+      <Row label={t("Quality")} hint={est ? t("Up to {perMin} per minute in busy scenes (a {length} clip up to {perClip}). Calm scenes use much less.", { perMin: est.perMin, length: replayLabel(settings.replay_seconds), perClip: est.perClip }) : undefined}>
+        <Segmented label={t("Quality")} value={settings.quality} options={qualities} onchange={(v) => change({ quality: v })} />
       </Row>
-      <Row label="Resolution" hint={est ? `Records at ${est.out}. It never upscales.` : undefined}>
-        <Segmented label="Resolution" value={settings.resolution} options={resolutions} onchange={(v) => change({ resolution: v })} />
+      <Row label={t("Resolution")} hint={est ? t("Records at {size}. It never upscales.", { size: est.out }) : undefined}>
+        <Segmented label={t("Resolution")} value={settings.resolution} options={resolutions} onchange={(v) => change({ resolution: v })} />
       </Row>
-      <Row label="Frame rate" hint="Higher is smoother and uses more space.">
+      <Row label={t("Frame rate")} hint={t("Higher is smoother and uses more space.")}>
         <Segmented
-          label="Frame rate"
+          label={t("Frame rate")}
           value={settings.fps}
           options={snap.fps_presets.map((f) => ({ value: f, label: `${f}` }))}
           onchange={(v) => change({ fps: v })}
@@ -296,28 +316,28 @@
     </section>
 
     <section aria-labelledby="h-audio">
-      <h2 id="h-audio">Audio</h2>
-      <Row label="Game and system audio" hint="Everything you hear through your speakers or headset." id="t-sys">
-        <Toggle id="t-sys" label="Game and system audio" checked={settings.system_audio} onchange={(v) => change({ system_audio: v })} />
+      <h2 id="h-audio">{t("Audio")}</h2>
+      <Row label={t("Game and system audio")} hint={t("Everything you hear through your speakers or headset.")} id="t-sys">
+        <Toggle id="t-sys" label={t("Game and system audio")} checked={settings.system_audio} onchange={(v) => change({ system_audio: v })} />
       </Row>
-      <Row label="Microphone" hint="Saved as its own track, so it can be removed from a clip later." id="t-mic">
-        <Toggle id="t-mic" label="Microphone" checked={settings.microphone} onchange={(v) => change({ microphone: v })} />
+      <Row label={t("Microphone")} hint={t("Saved as its own track, so it can be removed from a clip later.")} id="t-mic">
+        <Toggle id="t-mic" label={t("Microphone")} checked={settings.microphone} onchange={(v) => change({ microphone: v })} />
       </Row>
       {#if settings.microphone}
-        <Row label="Microphone device" hint={micHint} id="s-mic">
+        <Row label={t("Microphone device")} hint={micHint} id="s-mic">
           <Select
             id="s-mic"
-            label="Microphone device"
+            label={t("Microphone device")}
             value={settings.microphone_device}
             options={micOptions}
             onopen={refreshMics}
             onchange={(v) => change({ microphone_device: v })}
           />
         </Row>
-        <Row label="Microphone gain" hint="Boosts or lowers only your voice. Applies instantly, without restarting recording." id="g-mic">
+        <Row label={t("Microphone gain")} hint={t("Boosts or lowers only your voice. Applies instantly, without restarting recording.")} id="g-mic">
           <Slider
             id="g-mic"
-            label="Microphone gain"
+            label={t("Microphone gain")}
             min={-12}
             max={24}
             value={gainDb}
@@ -329,22 +349,22 @@
             }}
           />
         </Row>
-        <Row label="Level" hint={levelHint}>
+        <Row label={t("Level")} hint={levelHint}>
           <LevelMeter peakDb={level.peak} rmsDb={level.rms} hold={level.hold} />
         </Row>
         <Row
-          label="Low-cut filter"
-          hint="Removes rumble below 80 Hz (desk bumps, boom from speaking close, breath pops). Your voice is unaffected. Turn it on if the mic check suggests it."
+          label={t("Low-cut filter")}
+          hint={t("Removes rumble below 80 Hz (desk bumps, boom from speaking close, breath pops). Your voice is unaffected. Turn it on if the mic check suggests it.")}
           id="t-lowcut"
         >
           <Toggle
             id="t-lowcut"
-            label="Low-cut filter"
+            label={t("Low-cut filter")}
             checked={settings.microphone_low_cut}
             onchange={(v) => change({ microphone_low_cut: v })}
           />
         </Row>
-        <Row label="Mic check" hint="Record 8 seconds of your voice and get advice on the mic's gain knob and settings. Nothing is saved except the measurements." stacked>
+        <Row label={t("Mic check")} hint={t("Record 8 seconds of your voice and get advice on the mic's gain knob and settings. Nothing is saved except the measurements.")} stacked>
           <MicCheck
             device={settings.microphone_device}
             gainDb={settings.microphone_gain_db}
@@ -356,13 +376,13 @@
     </section>
 
     <section aria-labelledby="h-share">
-      <h2 id="h-share">Sharing</h2>
+      <h2 id="h-share">{t("Sharing")}</h2>
       <Row
-        label="Discord upload limit"
-        hint="Share to Discord keeps files under this size. 19 MB is safe on a free account; Nitro allows more, which means better quality."
+        label={t("Discord upload limit")}
+        hint={t("Share to Discord keeps files under this size. 19 MB is safe on a free account; Nitro allows more, which means better quality.")}
       >
         <Segmented
-          label="Discord upload limit"
+          label={t("Discord upload limit")}
           value={String(settings.discord_limit_mb)}
           options={discordLimits(settings.discord_limit_mb)}
           onchange={(v) => change({ discord_limit_mb: Number(v) })}
@@ -373,22 +393,22 @@
     <section aria-labelledby="h-drive">
       <h2 id="h-drive">Google Drive</h2>
       <Row
-        label="Drive folder"
+        label={t("Drive folder")}
         hint={settings.drive_dir
-          ? "Save to Drive copies clips into a JondisClip folder here. Google Drive for desktop uploads them from there; JondisClip never uploads anything itself."
+          ? t("Save to Drive copies clips into a JondisClip folder here. Google Drive for desktop uploads them from there; JondisClip never uploads anything itself.")
           : driveSuggestion
-            ? `Found Google Drive for desktop at ${driveSuggestion}. Use it to turn on Save to Drive.`
-            : "Optional. Choose the folder Google Drive for desktop syncs (usually G:\\My Drive) to turn on Save to Drive."}
+            ? t("Found Google Drive for desktop at {path}. Use it to turn on Save to Drive.", { path: driveSuggestion })
+            : t("Optional. Choose the folder Google Drive for desktop syncs (usually G:\\My Drive) to turn on Save to Drive.")}
       >
         <div class="drive">
           {#if settings.drive_dir}
-            <Button variant="ghost" onclick={pickDrive}>Change…</Button>
-            <Button variant="ghost" onclick={() => setDrive("")}>Turn off</Button>
+            <Button variant="ghost" onclick={pickDrive}>{t("Change…")}</Button>
+            <Button variant="ghost" onclick={() => setDrive("")}>{t("Turn off")}</Button>
           {:else}
             {#if driveSuggestion}
-              <Button onclick={() => setDrive(driveSuggestion ?? "")}>Use {driveSuggestion}</Button>
+              <Button onclick={() => setDrive(driveSuggestion ?? "")}>{t("Use {path}", { path: driveSuggestion })}</Button>
             {/if}
-            <Button variant="ghost" onclick={pickDrive}>Choose…</Button>
+            <Button variant="ghost" onclick={pickDrive}>{t("Choose…")}</Button>
           {/if}
         </div>
         {#snippet below()}
@@ -402,55 +422,71 @@
               <div class="dtext" role="status">
                 <span class="dpath" title={settings.drive_dir}>{settings.drive_dir}</span>
                 <span class="dmsg">
-                  {#if driveChecking}Checking the folder…
-                  {:else if driveCheck?.state === "ok"}Found and writable. Google Drive for desktop uploads what you save here.
-                  {:else}{driveCheck?.message ?? "Not checked yet."}{/if}
+                  {#if driveChecking}{t("Checking the folder…")}
+                  {:else if driveCheck?.state === "ok"}{t("Found and writable. Google Drive for desktop uploads what you save here.")}
+                  {:else}{driveCheck?.message ?? t("Not checked yet.")}{/if}
                 </span>
               </div>
-              <Button variant="ghost" disabled={driveChecking} onclick={checkDrive}>Check again</Button>
-              <Button variant="ghost" disabled={driveCheck?.state !== "ok"} onclick={() => api.driveOpen().catch((e) => showToast(String(e), "error"))}>Open in Explorer</Button>
+              <Button variant="ghost" disabled={driveChecking} onclick={checkDrive}>{t("Check again")}</Button>
+              <Button variant="ghost" disabled={driveCheck?.state !== "ok"} onclick={() => api.driveOpen().catch((e) => showToast(String(e), "error"))}>{t("Open in Explorer")}</Button>
             </div>
           {/if}
         {/snippet}
       </Row>
       {#if settings.drive_dir}
         <Row
-          label="Keep my folders"
-          hint="Clips in a library folder go into a Drive folder with the same name. Off: sorted by game."
+          label={t("Keep my folders")}
+          hint={t("Clips in a library folder go into a Drive folder with the same name. Off: sorted by game.")}
           id="t-drive-folders"
         >
-          <Toggle id="t-drive-folders" label="Keep my folders" checked={settings.drive_keep_folders} onchange={(v) => change({ drive_keep_folders: v })} />
+          <Toggle id="t-drive-folders" label={t("Keep my folders")} checked={settings.drive_keep_folders} onchange={(v) => change({ drive_keep_folders: v })} />
         </Row>
       {/if}
     </section>
 
     <section aria-labelledby="h-look">
-      <h2 id="h-look">Appearance</h2>
-      <Row label="Theme" hint="Accent colour for buttons, selection and highlights. Recording and warning colours don't change." stacked>
-        <div class="themes" role="radiogroup" aria-label="Theme">
-          {#each THEMES as t (t.id)}
-            <label class="theme" class:on={settings.theme === t.id} style:--sw={t.color}>
-              <input type="radio" name="theme" value={t.id} checked={settings.theme === t.id} onchange={() => setTheme(t.id)} />
+      <h2 id="h-look">{t("Appearance")}</h2>
+      <Row label={t("Theme")} hint={t("Accent colour for buttons, selection and highlights. Recording and warning colours don't change.")} stacked>
+        <div class="themes" role="radiogroup" aria-label={t("Theme")}>
+          {#each THEMES as th (th.id)}
+            <label class="theme" class:on={settings.theme === th.id} style:--sw={th.color}>
+              <input type="radio" name="theme" value={th.id} checked={settings.theme === th.id} onchange={() => setTheme(th.id)} />
               <span class="sw" aria-hidden="true"><span class="sw-bar"></span><span class="sw-dot"></span></span>
-              <span class="tname">{t.label}</span>
+              <span class="tname">{t(th.label)}</span>
             </label>
           {/each}
         </div>
       </Row>
     </section>
 
+    <section aria-labelledby="h-lang">
+      <h2 id="h-lang">{t("Language and dates")}</h2>
+      <Row label={t("Language")} hint={t("For this window and the tray.")} id="s-lang">
+        <Select
+          id="s-lang"
+          label={t("Language")}
+          value={settings.language}
+          options={LANGUAGES.map((l) => ({ value: l.id, label: l.label }))}
+          onchange={(v) => setLanguage(v, settings?.date_format ?? "ymd")}
+        />
+      </Row>
+      <Row label={t("Date format")} hint={t("Used in the app and in the names of new clips. Clips you already have keep their names.")}>
+        <Segmented label={t("Date format")} value={settings.date_format} options={dateFormats} onchange={(v) => setLanguage(settings?.language ?? "en", v)} />
+      </Row>
+    </section>
+
     <section aria-labelledby="h-general">
-      <h2 id="h-general">General</h2>
-      <Row label="Start with Windows" hint="Start JondisClip in the tray when you sign in." id="t-boot">
-        <Toggle id="t-boot" label="Start with Windows" checked={settings.start_with_windows} onchange={(v) => change({ start_with_windows: v })} />
+      <h2 id="h-general">{t("General")}</h2>
+      <Row label={t("Start with Windows")} hint={t("Start JondisClip in the tray when you sign in.")} id="t-boot">
+        <Toggle id="t-boot" label={t("Start with Windows")} checked={settings.start_with_windows} onchange={(v) => change({ start_with_windows: v })} />
       </Row>
     </section>
 
     <details>
-      <summary>Advanced</summary>
-      <Row label="Video codec" hint="H.264 plays everywhere. HEVC and AV1 make smaller files but need extra codecs to play on many PCs.">
+      <summary>{t("Advanced")}</summary>
+      <Row label={t("Video codec")} hint={t("H.264 plays everywhere. HEVC and AV1 make smaller files but need extra codecs to play on many PCs.")}>
         <Segmented
-          label="Video codec"
+          label={t("Video codec")}
           value={settings.codec === "h264" ? "auto" : settings.codec}
           options={codecs}
           onchange={(v) => change({ codec: v })}
@@ -458,7 +494,7 @@
       </Row>
     </details>
 
-    <footer>Changes are saved automatically.</footer>
+    <footer>{t("Changes are saved automatically.")}</footer>
   {/if}
 </main>
 

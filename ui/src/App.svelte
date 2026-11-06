@@ -7,6 +7,7 @@
   import Library from "./Library.svelte";
   import Player from "./Player.svelte";
   import Settings from "./Settings.svelte";
+  import { t } from "./lib/i18n.svelte";
 
   type Page = "library" | "settings";
   let page = $state<Page | null>(null);
@@ -113,9 +114,9 @@
         </svg>
         <span class="word">JondisClip</span>
       </div>
-      <nav aria-label="Pages">
-        <button type="button" class:on={page === "library"} aria-current={page === "library" ? "page" : undefined} onclick={() => (page = "library")}>Library</button>
-        <button type="button" class:on={page === "settings"} aria-current={page === "settings" ? "page" : undefined} onclick={() => (page = "settings")}>Settings</button>
+      <nav aria-label={t("Pages")}>
+        <button type="button" class:on={page === "library"} aria-current={page === "library" ? "page" : undefined} onclick={() => (page = "library")}>{t("Library")}</button>
+        <button type="button" class:on={page === "settings"} aria-current={page === "settings" ? "page" : undefined} onclick={() => (page = "settings")}>{t("Settings")}</button>
       </nav>
       <div class="right"><StatusPill {tray} /></div>
     </header>
@@ -123,10 +124,10 @@
     {#if tray && !tray.running}
       <div class="banner-wrap">
         <Banner>
-          JondisClip isn't running, so nothing is being recorded.
+          {t("JondisClip isn't running, so nothing is being recorded.")}
           {#snippet action()}
             <Button variant="primary" onclick={startTray} disabled={startingTray}>
-              {startingTray ? "Starting…" : "Start JondisClip"}
+              {startingTray ? t("Starting…") : t("Start JondisClip")}
             </Button>
           {/snippet}
         </Banner>

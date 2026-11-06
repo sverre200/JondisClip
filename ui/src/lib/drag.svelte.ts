@@ -2,6 +2,7 @@
 // fights WebView2's own file drops) and no library. A 6 px threshold tells a
 // click from a drag; while dragging, one hit test per pointer move decides
 // the target. Nothing runs when no drag is in progress.
+import { t } from "./i18n.svelte";
 
 export type Payload =
   | { kind: "clips"; ids: string[]; keys: string[]; label: string; thumb: string | null }
@@ -177,7 +178,7 @@ function hitTest(x: number, y: number, opts: { reorder?: Reorder; folders?: Fold
           drag.target = { type: "folder", id: onRow.id };
         } else {
           drag.target = null;
-          drag.hint = "Can't go in there: not inside itself, and 3 levels at most";
+          drag.hint = t("Can't go in there: not inside itself, and 3 levels at most");
         }
         return;
       }

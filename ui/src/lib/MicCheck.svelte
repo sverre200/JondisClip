@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, type MicCheck } from "./api";
   import Button from "./Button.svelte";
+  import { t } from "./i18n.svelte";
 
   let {
     device,
@@ -37,20 +38,20 @@
     }
   }
 
-  const VERDICT = {
-    good: { title: "Sounds good", tone: "good" },
-    quiet: { title: "A bit quiet", tone: "warn" },
-    hot: { title: "Too loud", tone: "warn" },
-    clipping: { title: "The microphone is clipping", tone: "bad" },
-    no_speech: { title: "Didn't hear you", tone: "warn" },
-  } as const;
-  const fmt = (db: number) => (db <= -199 ? "silent" : `${db.toFixed(0)} dBFS`);
+  const VERDICT = $derived({
+    good: { title: t("Sounds good"), tone: "good" },
+    quiet: { title: t("A bit quiet"), tone: "warn" },
+    hot: { title: t("Too loud"), tone: "warn" },
+    clipping: { title: t("The microphone is clipping"), tone: "bad" },
+    no_speech: { title: t("Didn't hear you"), tone: "warn" },
+  } as const);
+  const fmt = (db: number) => (db <= -199 ? t("silent") : `${db.toFixed(0)} dBFS`);
   const showGainAction = $derived(
     !!result &&
       result.report.speech_detected &&
       result.report.adc_clipped === 0 &&
       Math.abs(result.report.suggested_gain_db - gainDb) >= 3 &&
-      !result.report.tips.some((t) => t.includes("knob up")),
+      !result.report.knob_up,
   );
 </script>
 
@@ -58,7 +59,7 @@
   {#if phase === "recording"}
     <div class="live" role="status">
       <span class="dot" aria-hidden="true"></span>
-      Speak normally, like you do in game… {left} s
+      {t("Speak normally, like you do in game… {n} s", { n: left })}
     </div>
   {:else if phase === "done" && result}
     {@const r = result.report}
@@ -66,13 +67,13 @@
     <div class="result {v.tone}">
       <div class="head">
         <strong>{v.title}</strong>
-        <Button variant="ghost" onclick={run}>Test again</Button>
+        <Button variant="ghost" onclick={run}>{t("Test again")}</Button>
       </div>
       <dl>
-        <div><dt>Voice level</dt><dd>{fmt(r.speech_db)}</dd></div>
-        <div><dt>Peaks</dt><dd>{fmt(r.peak_db)}</dd></div>
-        <div><dt>Background noise</dt><dd>{fmt(r.noise_floor_db)}</dd></div>
-        <div><dt>Mic mode</dt><dd>{r.mode === "mono" ? "Mono" : r.mode === "two_track" ? "2-Track" : "Stereo"}</dd></div>
+        <div><dt>{t("Voice level")}</dt><dd>{fmt(r.speech_db)}</dd></div>
+        <div><dt>{t("Peaks")}</dt><dd>{fmt(r.peak_db)}</dd></div>
+        <div><dt>{t("Background noise")}</dt><dd>{fmt(r.noise_floor_db)}</dd></div>
+        <div><dt>{t("Mic mode")}</dt><dd>{r.mode === "mono" ? "Mono" : r.mode === "two_track" ? "2-Track" : "Stereo"}</dd></div>
       </dl>
       <ul>
         {#each r.tips as tip, i (i)}<li>{tip}</li>{/each}
@@ -80,18 +81,18 @@
       <div class="actions">
         {#if result.audio}
           <!-- svelte-ignore a11y_media_has_caption -->
-          <audio controls src={result.audio} aria-label="Listen back to the test recording"></audio>
+          <audio controls src={result.audio} aria-label={t("Listen back to the test recording")}></audio>
         {/if}
         {#if showGainAction}
           <Button onclick={() => onUseGain(r.suggested_gain_db)}>
-            Use {r.suggested_gain_db > 0 ? "+" : ""}{r.suggested_gain_db} dB
+            {t("Use {gain} dB", { gain: `${r.suggested_gain_db > 0 ? "+" : ""}${r.suggested_gain_db}` })}
           </Button>
         {/if}
       </div>
     </div>
   {:else}
-    {#if phase === "error"}<p class="err" role="alert">Couldn't record: {error}</p>{/if}
-    <Button onclick={run}>Test my mic ({SECONDS} s)</Button>
+    {#if phase === "error"}<p class="err" role="alert">{t("Couldn't record: {error}", { error: error ?? "" })}</p>{/if}
+    <Button onclick={run}>{t("Test my mic ({n} s)", { n: SECONDS })}</Button>
   {/if}
 </div>
 

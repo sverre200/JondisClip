@@ -113,6 +113,11 @@ pub struct Settings {
     pub drive_keep_folders: bool,
     /// Window colour theme (one of [`THEMES`]); only the accent changes.
     pub theme: String,
+    /// Language of the window and tray (one of [`LANGUAGES`]).
+    pub language: String,
+    /// How dates are written in the app and in new clip file names (one of
+    /// [`DATE_FORMATS`]): "ymd" 2026-11-06, "dmy" 06.11.2026, "mdy" 11-06-2026.
+    pub date_format: String,
 }
 
 /// Window themes, all dark. "crimson" is the original look.
@@ -120,6 +125,13 @@ pub const THEMES: [&str; 6] = [
     "crimson", "toxic", "midnight", "ocean", "sunset", "graphite",
 ];
 pub const DEFAULT_THEME: &str = "crimson";
+
+/// English, Norwegian Bokmål, Norwegian Nynorsk.
+pub const LANGUAGES: [&str; 3] = ["en", "nb", "nn"];
+pub const DEFAULT_LANGUAGE: &str = "en";
+/// Year-month-day, day.month.year, month-day-year.
+pub const DATE_FORMATS: [&str; 3] = ["ymd", "dmy", "mdy"];
+pub const DEFAULT_DATE_FORMAT: &str = "ymd";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -142,6 +154,8 @@ impl Default for Settings {
             drive_dir: PathBuf::new(),
             drive_keep_folders: true,
             theme: DEFAULT_THEME.into(),
+            language: DEFAULT_LANGUAGE.into(),
+            date_format: DEFAULT_DATE_FORMAT.into(),
         }
     }
 }
@@ -204,6 +218,20 @@ impl Settings {
             ));
             s.theme = DEFAULT_THEME.into();
         }
+        if !LANGUAGES.contains(&s.language.as_str()) {
+            warnings.push(format!(
+                "language \"{}\" is unknown; using {DEFAULT_LANGUAGE}",
+                s.language
+            ));
+            s.language = DEFAULT_LANGUAGE.into();
+        }
+        if !DATE_FORMATS.contains(&s.date_format.as_str()) {
+            warnings.push(format!(
+                "date_format \"{}\" is unknown; using {DEFAULT_DATE_FORMAT}",
+                s.date_format
+            ));
+            s.date_format = DEFAULT_DATE_FORMAT.into();
+        }
         if let Err(e) = Hotkey::parse(&s.hotkey) {
             warnings.push(format!(
                 "hotkey \"{}\": {e}; using {DEFAULT_HOTKEY}",
@@ -223,7 +251,8 @@ impl Settings {
              # save_dir: empty = Videos\\JondisClip\n\
              # fps: 30, 60, 120, 144 | resolution: source, 720p, 1080p, 1440p\n\
              # quality: performance, balanced, high | codec: auto (= h264), h264, hevc, av1\n\
-             # (hevc/av1 need the paid HEVC extension or VLC to play on Windows)\n\n{body}"
+             # (hevc/av1 need the paid HEVC extension or VLC to play on Windows)\n\
+             # language: en, nb (bokmål), nn (nynorsk) | date_format: ymd, dmy, mdy\n\n{body}"
         )
     }
 
@@ -264,6 +293,11 @@ pub fn replay_label(secs: u32) -> String {
     } else {
         format!("{} min", secs / 60)
     }
+}
+
+/// Sets this process's message language from the settings (ADR-0018).
+pub fn apply_language(s: &Settings) {
+    crate::i18n::set_language(&s.language);
 }
 
 #[cfg(test)]

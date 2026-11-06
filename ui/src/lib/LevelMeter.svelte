@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "./i18n.svelte";
   // Horizontal mic meter, -60..0 dBFS. Zones guide the gain setting: speech
   // peaks should land in "good" (-18..-6 dBFS). Above -3 dBFS the limiter will
   // catch peaks; consistently there means the gain is too high.
@@ -13,11 +14,11 @@
 <div
   class="meter"
   role="meter"
-  aria-label="Microphone level"
+  aria-label={t("Microphone level")}
   aria-valuemin={MIN}
   aria-valuemax={0}
   aria-valuenow={Math.round(peakDb)}
-  aria-valuetext={peakDb <= -99 ? "silence" : `${Math.round(peakDb)} dB`}
+  aria-valuetext={peakDb <= -99 ? t("silence") : `${Math.round(peakDb)} dB`}
 >
   <div class="track">
     <span class="z good" style="left:{pos(-18)}%; width:{pos(-6) - pos(-18)}%"></span>

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { clock, clockPrecise } from "./format";
+  import { t } from "./i18n.svelte";
 
   // Seek bar with an optional trim selection: the area between the handles is
   // what gets saved; outside it is dimmed. Handles drag; the playhead drags.
@@ -182,7 +183,7 @@
       style:left="{pct(trim.start)}%"
       role="slider"
       tabindex="0"
-      aria-label="Start of the selection"
+      aria-label={t("Start of the selection")}
       aria-valuemin={0}
       aria-valuemax={Math.round(duration)}
       aria-valuenow={Math.round(trim.start)}
@@ -195,7 +196,7 @@
       style:left="{pct(trim.end)}%"
       role="slider"
       tabindex="0"
-      aria-label="End of the selection"
+      aria-label={t("End of the selection")}
       aria-valuemin={0}
       aria-valuemax={Math.round(duration)}
       aria-valuenow={Math.round(trim.end)}
@@ -209,11 +210,11 @@
     style:left="{pct(time)}%"
     role="slider"
     tabindex="0"
-    aria-label="Position"
+    aria-label={t("Position")}
     aria-valuemin={0}
     aria-valuemax={Math.round(duration)}
     aria-valuenow={Math.round(time)}
-    aria-valuetext="{clock(time)} of {clock(duration)}"
+    aria-valuetext={t("{time} of {duration}", { time: clock(time), duration: clock(duration) })}
     onkeydown={key}
   ></div>
   {#if tip !== null}

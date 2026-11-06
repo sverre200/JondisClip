@@ -32,6 +32,10 @@ export interface Settings {
   drive_keep_folders: boolean;
   /** Window theme id (see lib/theme.ts) */
   theme: string;
+  /** "en" | "nb" | "nn" (window and tray) */
+  language: string;
+  /** "ymd" | "dmy" | "mdy": app dates and new clip file names */
+  date_format: string;
 }
 
 export interface DriveCheck {
@@ -222,6 +226,8 @@ export interface MicReport {
   speech_detected: boolean;
   verdict: "good" | "quiet" | "hot" | "clipping" | "no_speech";
   tips: string[];
+  /** a tip says to turn the mic's own gain knob up (then don't offer digital gain) */
+  knob_up: boolean;
   suggested_gain_db: number;
 }
 
@@ -454,6 +460,8 @@ const mockState: Snapshot = {
     drive_dir: "",
     drive_keep_folders: true,
     theme: "crimson",
+    language: "en",
+    date_format: "ymd",
   },
   default_save_dir: "C:\\Users\\you\\Videos\\JondisClip",
   replay_presets: [30, 60, 120, 180, 300, 600, 900],
@@ -713,7 +721,7 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
         report: {
           seconds: 8, mode: "mono", raw_peak_db: -14.2, adc_clipped: 0, raw_speech_db: -33.5, speech_db: -15.5,
           peak_db: -0.9, noise_floor_db: -64.8, limited_ms: 0, low_freq_db: -27.1, speech_detected: true,
-          verdict: "good", suggested_gain_db: 14,
+          verdict: "good", suggested_gain_db: 14, knob_up: false,
           tips: [
             "Your voice reaches the computer at -34 dBFS. Turn the G-Track's MIC GAIN knob up (aim for about 14 dB more) and set Microphone gain here back to 0 dB.",
           ],

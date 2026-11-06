@@ -1,22 +1,23 @@
 <script lang="ts">
   import type { TrayView } from "./api";
+  import { t } from "./i18n.svelte";
 
   let { tray }: { tray: TrayView | null } = $props();
 
   const view = $derived.by(() => {
-    if (!tray) return { tone: "idle", text: "Checking…" };
-    if (!tray.running || !tray.status) return { tone: "off", text: "Not running" };
+    if (!tray) return { tone: "idle", text: t("Checking…") };
+    if (!tray.running || !tray.status) return { tone: "off", text: t("Not running") };
     switch (tray.status.state) {
       case "recording":
-        return { tone: "live", text: "Recording" };
+        return { tone: "live", text: t("Recording") };
       case "paused":
-        return { tone: "idle", text: "Paused" };
+        return { tone: "idle", text: t("Paused") };
       case "sleeping":
-        return { tone: "idle", text: "Sleeping" };
+        return { tone: "idle", text: t("Sleeping") };
       case "low_disk":
-        return { tone: "warn", text: "Paused · low disk space" };
+        return { tone: "warn", text: t("Paused · low disk space") };
       default:
-        return { tone: "warn", text: "Restarting" };
+        return { tone: "warn", text: t("Restarting") };
     }
   });
 </script>

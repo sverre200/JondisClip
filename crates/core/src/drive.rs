@@ -167,13 +167,14 @@ pub fn write_test(dir: &Path) -> Result<(), String> {
     match (res, removed) {
         (Err(e), _) => Err(match e.kind() {
             std::io::ErrorKind::PermissionDenied => {
-                "JondisClip isn't allowed to write there.".into()
+                crate::tr!("JondisClip isn't allowed to write there.")
             }
-            _ => format!("Writing there failed: {e}"),
+            _ => crate::tr!("Writing there failed: {error}", error = e),
         }),
-        (Ok(()), Err(e)) if e.kind() != std::io::ErrorKind::NotFound => {
-            Err(format!("A test file couldn't be removed again: {e}"))
-        }
+        (Ok(()), Err(e)) if e.kind() != std::io::ErrorKind::NotFound => Err(crate::tr!(
+            "A test file couldn't be removed again: {error}",
+            error = e
+        )),
         _ => Ok(()),
     }
 }
@@ -188,22 +189,25 @@ pub fn check_folder(
     is_dir: &dyn Fn(&Path) -> bool,
 ) -> Result<(), String> {
     if drive.as_os_str().is_empty() {
-        return Err("Choose your Google Drive folder in Settings → Google Drive first.".into());
+        return Err(crate::tr!(
+            "Choose your Google Drive folder in Settings → Google Drive first."
+        ));
     }
     if !is_dir(drive) {
-        return Err(format!(
-            "Google Drive isn't available ({} not found). Is Google Drive for desktop running and signed in?",
-            drive.display()
+        return Err(crate::tr!(
+            "Google Drive isn't available ({path} not found). Is Google Drive for desktop running and signed in?",
+            path = drive.display()
         ));
     }
     if overlaps(drive, save_dir) {
-        return Err(
+        return Err(crate::tr!(
             "The Drive folder overlaps your clips folder. Choose a separate folder for Drive."
-                .into(),
-        );
+        ));
     }
     if overlaps(drive, own_dir) {
-        return Err("The Drive folder can't be inside JondisClip's own folders.".into());
+        return Err(crate::tr!(
+            "The Drive folder can't be inside JondisClip's own folders."
+        ));
     }
     Ok(())
 }

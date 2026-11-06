@@ -56,7 +56,8 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
   - Design in the browser with the mock API: `npm --prefix ui run dev` (`.claude/launch.json` → `ui-dev`). Use only tokens from `ui/src/tokens.css`.
   - Before `cargo build -p jondisclip-ui`, run `npm --prefix ui run build`. The exe embeds `ui/dist`.
   - Build `jondisclip-export` as well (`cargo build --release -p jondisclip -p jondisclip-ui -p jondisclip-export`). The window looks for the exporter next to its own exe.
-  - `npm --prefix ui run check` must pass.
+  - `npm --prefix ui run check` must pass. It also checks the Norwegian dictionaries (ADR-0018).
+  - User-visible text goes through `t()`/`tn()` in the UI and `jondisclip_core::tr!` in Rust, with bokmål and nynorsk added in `ui/src/lib/i18n/{nb,nn}.ts` and `crates/core/src/i18n_table.rs`. Logs stay English.
   - Quit the tray before rebuilding, because Windows locks the running exe.
 - Rust: `cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` must pass. Hot-path crates use no `unwrap()` and return typed errors (`thiserror`).
 - Frontend: TypeScript strict, verified visually in the browser pane against the Vite dev server.

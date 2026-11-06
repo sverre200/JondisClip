@@ -135,6 +135,12 @@ impl Attention {
 }
 
 fn main() {
+    // Error messages follow the language setting (ADR-0018).
+    if let Ok(text) = std::fs::read_to_string(jondisclip_core::paths::settings_file()) {
+        jondisclip_core::settings::apply_language(
+            &jondisclip_core::settings::Settings::from_toml(&text).0,
+        );
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let job = match parse(&args) {
         Ok(j) => j,
@@ -163,7 +169,7 @@ fn main() {
     match result {
         Ok(o) => emit(serde_json::json!({ "done": o, "seconds": started.elapsed().as_secs_f64() })),
         Err(e) => {
-            emit(serde_json::json!({ "error": e.to_string() }));
+            emit(serde_json::json!({ "error": e.user_message() }));
             std::process::exit(1);
         }
     }

@@ -392,8 +392,10 @@ struct NameParts<'a> {
     title: Option<&'a str>,
     /// As written (may be empty: "Other").
     app: &'a str,
-    /// `YYYY-MM-DD HH-MM-SS`
+    /// As written: `YYYY-MM-DD HH-MM-SS`, `DD.MM.YYYY …` or `MM-DD-YYYY …`
     stamp: &'a str,
+    /// The same moment as `YYYY-MM-DD HH:MM:SS` (sorts as text).
+    ymd: String,
     edit: Option<u32>,
 }
 
@@ -409,20 +411,11 @@ fn name_parts(file_name: &str) -> Option<NameParts<'_>> {
     // possibly another " (n)" from the recorder.
     let (stem, edit) = split_edit(strip_dup(stem));
     let stem = strip_dup(stem);
-    // The stamp is the last 19 bytes: "YYYY-MM-DD HH-MM-SS" (ASCII).
+    // The stamp is the last 19 bytes (ASCII): "YYYY-MM-DD HH-MM-SS",
+    // "DD.MM.YYYY HH-MM-SS" or "MM-DD-YYYY HH-MM-SS" (the date format setting).
     let n = stem.len().checked_sub(19)?;
     let (app, stamp) = (stem.get(..n)?, stem.get(n..)?);
-    let b = stamp.as_bytes();
-    let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
-    if !digits.iter().all(|&i| b[i].is_ascii_digit())
-        || b[4] != b'-'
-        || b[7] != b'-'
-        || b[10] != b' '
-        || b[13] != b'-'
-        || b[16] != b'-'
-    {
-        return None;
-    }
+    let ymd = stamp_ymd(stamp)?;
     let app = app.strip_suffix(' ').unwrap_or(app);
     // A title in front (set in JondisClip). Game names don't contain the
     // separator; titles may, so split at the last one.
@@ -434,8 +427,51 @@ fn name_parts(file_name: &str) -> Option<NameParts<'_>> {
         title,
         app: app.trim(),
         stamp,
+        ymd,
         edit,
     })
+}
+
+/// A file-name stamp in any of the three date formats → `YYYY-MM-DD HH:MM:SS`.
+fn stamp_ymd(stamp: &str) -> Option<String> {
+    let b = stamp.as_bytes();
+    if b.len() != 19 || !stamp.is_ascii() {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<u32> {
+        let s = &stamp[r];
+        if s.bytes().all(|c| c.is_ascii_digit()) {
+            s.parse().ok()
+        } else {
+            None
+        }
+    };
+    let (y, m, d) = match (b[2], b[4], b[5], b[7]) {
+        (_, b'-', _, b'-') => (num(0..4)?, num(5..7)?, num(8..10)?),
+        (b'.', _, b'.', _) => (num(6..10)?, num(3..5)?, num(0..2)?),
+        (b'-', _, b'-', _) => (num(6..10)?, num(0..2)?, num(3..5)?),
+        _ => return None,
+    };
+    if b[10] != b' ' || b[13] != b'-' || b[16] != b'-' {
+        return None;
+    }
+    let (h, mi, s) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || h > 23 || mi > 59 || s > 60 {
+        return None;
+    }
+    Some(format!("{y:04}-{m:02}-{d:02} {h:02}:{mi:02}:{s:02}"))
+}
+
+/// A recording time as written in new file names, per the date format
+/// setting: "ymd" `2026-11-06 21-03-11`, "dmy" `06.11.2026 21-03-11`,
+/// "mdy" `11-06-2026 21-03-11`. The time always uses dashes (no `:` in
+/// Windows file names).
+pub fn file_stamp(date_format: &str, y: u16, mo: u16, d: u16, h: u16, mi: u16, s: u16) -> String {
+    match date_format {
+        "dmy" => format!("{d:02}.{mo:02}.{y:04} {h:02}-{mi:02}-{s:02}"),
+        "mdy" => format!("{mo:02}-{d:02}-{y:04} {h:02}-{mi:02}-{s:02}"),
+        _ => format!("{y:04}-{mo:02}-{d:02} {h:02}-{mi:02}-{s:02}"),
+    }
 }
 
 /// `"DayZ 2026-11-04 14-35-41 (2).mp4"` → `("DayZ", "2026-11-04 14:35:41")`.
@@ -443,11 +479,7 @@ fn name_parts(file_name: &str) -> Option<NameParts<'_>> {
 pub fn parse_name(file_name: &str) -> Option<(String, String)> {
     let p = name_parts(file_name)?;
     let app = if p.app.is_empty() { "Other" } else { p.app };
-    let s = p.stamp;
-    Some((
-        app.to_owned(),
-        format!("{} {}:{}:{}", &s[..10], &s[11..13], &s[14..16], &s[17..19]),
-    ))
+    Some((app.to_owned(), p.ymd))
 }
 
 /// The title in front of a recorder name (`"Raid — DayZ 2026-….mp4"` →
@@ -1214,6 +1246,30 @@ pub(crate) mod tests {
         assert_eq!(p("DayZ 2026-11-04 14-35-41 (two).mp4"), None);
         assert_eq!(p("ø.mp4"), None); // shorter than a stamp, multi-byte: no panic
         assert_eq!(p("ææææææææææææææææææææ.mp4"), None);
+    }
+
+    #[test]
+    fn every_date_format_reads_back_the_same_time() {
+        let want = Some(("DayZ".to_string(), "2026-11-04 14:35:41".to_string()));
+        for f in ["ymd", "dmy", "mdy"] {
+            let name = format!("DayZ {} edit.mp4", file_stamp(f, 2026, 11, 4, 14, 35, 41));
+            assert_eq!(parse_name(&name), want, "{name}");
+            assert!(is_edit_name(&name));
+            let titled = titled_name(&name, Some("Raid"));
+            assert_eq!(parse_name(&titled), want, "{titled}");
+            assert_eq!(parse_title(&titled).as_deref(), Some("Raid"));
+        }
+        assert_eq!(
+            file_stamp("dmy", 2026, 11, 4, 9, 5, 1),
+            "04.11.2026 09-05-01"
+        );
+        assert_eq!(
+            file_stamp("mdy", 2026, 11, 4, 9, 5, 1),
+            "11-04-2026 09-05-01"
+        );
+        // Not dates: month 13, mixed separators.
+        assert_eq!(parse_name("DayZ 13-04-2026 14-35-41.mp4"), None);
+        assert_eq!(parse_name("DayZ 04.11-2026 14-35-41.mp4"), None);
     }
 
     #[test]

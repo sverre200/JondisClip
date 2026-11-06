@@ -79,7 +79,7 @@ pub fn copy_file(path: &Path, owner: Option<isize>) -> Result<(), String> {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         if !opened {
-            return Err("the clipboard is busy; try again".into());
+            return Err(jondisclip_core::tr!("the clipboard is busy; try again"));
         }
         let result = (|| {
             EmptyClipboard().map_err(|e| e.to_string())?;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "./i18n.svelte";
   import { onMount, tick, type Snippet } from "svelte";
   import Button from "./Button.svelte";
 
@@ -86,7 +87,7 @@
     {#if after}<div class="after">{@render after()}</div>{/if}
     {#if error}<p class="err" role="alert">{error}</p>{/if}
     <div class="buttons">
-      <Button variant="ghost" onclick={oncancel}>Cancel</Button>
+      <Button variant="ghost" onclick={oncancel}>{t("Cancel")}</Button>
       <Button variant={danger ? "danger" : "primary"} onclick={() => onconfirm(value)}>{confirmLabel}</Button>
     </div>
   </div>

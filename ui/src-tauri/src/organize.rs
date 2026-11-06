@@ -20,6 +20,7 @@ use jondisclip_core::paths;
 use serde::{Deserialize, Serialize};
 
 use crate::library;
+use jondisclip_core::tr;
 
 /// One organisation change (metadata and file operations) at a time.
 static LOCK: Mutex<()> = Mutex::new(());
@@ -326,12 +327,13 @@ fn rename_for_title(src: &Path, title: Option<&str>) -> Result<PathBuf, String> 
     }
     crate::export::move_no_replace(src, &dst).map_err(|e| match e.raw_os_error() {
         Some(32) | Some(33) => {
-            format!(
-                "{name} is in use (playing or being exported?), so its file keeps the old name."
+            tr!(
+                "{name} is in use (playing or being exported?), so its file keeps the old name.",
+                name = name
             )
         }
-        Some(5) => format!("Windows denied renaming {name} (permissions)."),
-        _ => format!("couldn't rename {name}: {e}"),
+        Some(5) => tr!("Windows denied renaming {name} (permissions).", name = name),
+        _ => tr!("couldn't rename {name}: {error}", name = name, error = e),
     })?;
     Ok(dst)
 }
@@ -339,10 +341,13 @@ fn rename_for_title(src: &Path, title: Option<&str>) -> Result<PathBuf, String> 
 /// `p` resolved, and inside `root`.
 fn inside(root: &Path, p: &Path) -> Result<PathBuf, String> {
     let r = std::fs::canonicalize(root)
-        .map_err(|e| format!("The clips folder isn't available: {e}"))?;
+        .map_err(|e| tr!("The clips folder isn't available: {error}", error = e))?;
     let c = std::fs::canonicalize(p).map_err(|e| format!("{}: {e}", p.display()))?;
     if !c.starts_with(&r) {
-        return Err(format!("{} is outside the clips folder", p.display()));
+        return Err(tr!(
+            "{path} is outside the clips folder",
+            path = p.display()
+        ));
     }
     Ok(c)
 }
@@ -370,7 +375,13 @@ pub fn move_clip(src: &Path, dir: &Path) -> Result<PathBuf, String> {
     if src.parent().is_some_and(|p| same_dir(p, dir)) {
         return Ok(src.to_path_buf());
     }
-    std::fs::create_dir_all(dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| {
+        tr!(
+            "couldn't create {path}: {error}",
+            path = dir.display(),
+            error = e
+        )
+    })?;
     let dst = lib::free_path(dir, &name, &|p| {
         p.exists() || p.with_extension("mp4.partial").exists()
     });
@@ -380,13 +391,19 @@ pub fn move_clip(src: &Path, dir: &Path) -> Result<PathBuf, String> {
         Err(e) if e.raw_os_error() == Some(17) => cross_volume(src, &dst),
         Err(e) => Err(match e.raw_os_error() {
             Some(32) | Some(33) => {
-                format!("{name} is in use (playing or being exported?). Close it and try again.")
+                tr!(
+                    "{name} is in use (playing or being exported?). Close it and try again.",
+                    name = name
+                )
             }
-            Some(5) => format!("Windows denied moving {name} (permissions)."),
+            Some(5) => tr!("Windows denied moving {name} (permissions).", name = name),
             Some(80) | Some(183) => {
-                format!("{} already exists; nothing was overwritten.", dst.display())
+                tr!(
+                    "{path} already exists; nothing was overwritten.",
+                    path = dst.display()
+                )
             }
-            _ => format!("couldn't move {name}: {e}"),
+            _ => tr!("couldn't move {name}: {error}", name = name, error = e),
         }),
     }
 }
@@ -405,21 +422,22 @@ fn cross_volume(src: &Path, dst: &Path) -> Result<PathBuf, String> {
         e
     };
     let size = std::fs::metadata(src).map_err(|e| e.to_string())?.len();
-    std::fs::copy(src, &tmp).map_err(|e| fail(format!("couldn't copy: {e}")))?;
+    std::fs::copy(src, &tmp).map_err(|e| fail(tr!("couldn't copy: {error}", error = e)))?;
     let ok = std::fs::metadata(&tmp).map(|m| m.len()).ok() == Some(size)
         && lib::fingerprint(&tmp, size).ok() == lib::fingerprint(src, size).ok();
     if !ok {
-        return Err(fail(
-            "the copy didn't verify; the original is untouched".into(),
-        ));
+        return Err(fail(tr!(
+            "the copy didn't verify; the original is untouched"
+        )));
     }
     crate::export::move_no_replace(&tmp, dst)
-        .map_err(|e| fail(format!("couldn't finish the copy: {e}")))?;
+        .map_err(|e| fail(tr!("couldn't finish the copy: {error}", error = e)))?;
     // Explicit move, copy verified: now the original may go.
     if let Err(e) = std::fs::remove_file(src) {
-        return Err(format!(
-            "Copied to {}, but the original couldn't be removed ({e}); you now have both.",
-            dst.display()
+        return Err(tr!(
+            "Copied to {path}, but the original couldn't be removed ({error}); you now have both.",
+            path = dst.display(),
+            error = e
         ));
     }
     Ok(dst.to_path_buf())
@@ -445,9 +463,9 @@ fn clip_path(id: &str) -> Result<PathBuf, String> {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     if lib::clip_id(&p.to_string_lossy(), m.len(), mtime) != id {
-        return Err(format!(
-            "{} changed since the library was loaded. Refresh and try again.",
-            p.display()
+        return Err(tr!(
+            "{path} changed since the library was loaded. Refresh and try again.",
+            path = p.display()
         ));
     }
     Ok(p)
@@ -468,19 +486,19 @@ pub struct MoveResult {
 /// Moves clips into user folder `to` (None: back to their game folders).
 fn move_items(root: &Path, items: &[Item], to: Option<&str>) -> Result<MoveResult, String> {
     if crate::export::busy() {
-        return Err("Wait for the running export to finish first.".into());
+        return Err(tr!("Wait for the running export to finish first."));
     }
     let org = store().load()?;
     let dest = match to {
         Some(name) => {
             let f = org
                 .folder(name)
-                .ok_or("That folder no longer exists. Refresh and try again.")?;
+                .ok_or_else(|| tr!("That folder no longer exists. Refresh and try again."))?;
             let d = root.join(&f.name);
             if !d.is_dir() {
-                return Err(format!(
-                    "{} isn't on disk any more. Refresh and try again.",
-                    d.display()
+                return Err(tr!(
+                    "{path} isn't on disk any more. Refresh and try again.",
+                    path = d.display()
                 ));
             }
             Some(d)
@@ -577,9 +595,9 @@ pub async fn folder_create(
     blocking(move || {
         let root = root();
         if !root.is_dir() {
-            return Err(format!(
-                "The clips folder {} isn't available.",
-                root.display()
+            return Err(tr!(
+                "The clips folder {path} isn't available.",
+                path = root.display()
             ));
         }
         let leaf = folder_name(&name).map_err(|e| e.to_string())?;
@@ -589,12 +607,12 @@ pub async fn folder_create(
             Some(p) => {
                 let f = probe
                     .folder(p)
-                    .ok_or("That folder no longer exists. Refresh and try again.")?;
+                    .ok_or_else(|| tr!("That folder no longer exists. Refresh and try again."))?;
                 let d = root.join(&f.name);
                 if !d.is_dir() {
-                    return Err(format!(
-                        "{} isn't on disk any more. Refresh and try again.",
-                        d.display()
+                    return Err(tr!(
+                        "{path} isn't on disk any more. Refresh and try again.",
+                        path = d.display()
                     ));
                 }
                 (
@@ -625,14 +643,15 @@ pub async fn folder_create(
                     };
                     meta(|o| o.add_folder(&full, &color)).map(drop)
                 }
-                _ => Err(format!(
-                    "There's already something called \"{leaf}\" in {}.",
-                    in_dir.display()
+                _ => Err(tr!(
+                    "There's already something called \"{name}\" in {path}.",
+                    name = leaf,
+                    path = in_dir.display()
                 )),
             };
         }
         std::fs::create_dir(in_dir.join(&leaf))
-            .map_err(|e| format!("couldn't create the folder: {e}"))?;
+            .map_err(|e| tr!("couldn't create the folder: {error}", error = e))?;
         meta(|o| o.add_folder(&full, &color)).map(drop)
     })
     .await
@@ -641,11 +660,10 @@ pub async fn folder_create(
 fn dir_move_error(e: std::io::Error) -> String {
     match e.raw_os_error() {
         Some(5) | Some(32) => {
-            "A clip in this folder is in use (playing or exporting?). Close it and try again."
-                .to_string()
+            tr!("A clip in this folder is in use (playing or exporting?). Close it and try again.")
         }
-        Some(17) => "Folders can't be moved to another drive.".to_string(),
-        _ => format!("couldn't move the folder: {e}"),
+        Some(17) => tr!("Folders can't be moved to another drive."),
+        _ => tr!("couldn't move the folder: {error}", error = e),
     }
 }
 
@@ -657,19 +675,22 @@ pub async fn folder_rename(name: String, to: String) -> Result<(), String> {
         let root = root();
         let leaf = folder_name(&to).map_err(|e| e.to_string())?;
         let org = store().load()?;
-        let f = org.folder(&name).ok_or("That folder no longer exists.")?;
+        let f = org
+            .folder(&name)
+            .ok_or_else(|| tr!("That folder no longer exists."))?;
         let from = root.join(&f.name);
         if !from.is_dir() {
-            return Err(format!(
-                "{} isn't on disk any more. Refresh and try again.",
-                from.display()
+            return Err(tr!(
+                "{path} isn't on disk any more. Refresh and try again.",
+                path = from.display()
             ));
         }
         let in_dir = parent_dir(&root, &f.name);
         if !leaf.eq_ignore_ascii_case(leaf_of(&f.name)) && entry_exists(&in_dir, &leaf) {
-            return Err(format!(
-                "There's already something called \"{leaf}\" in {}.",
-                in_dir.display()
+            return Err(tr!(
+                "There's already something called \"{name}\" in {path}.",
+                name = leaf,
+                path = in_dir.display()
             ));
         }
         let new_full = match parent_of(&f.name) {
@@ -689,20 +710,22 @@ pub async fn folder_rename(name: String, to: String) -> Result<(), String> {
 pub async fn folder_move(name: String, parent: Option<String>) -> Result<(), String> {
     blocking(move || {
         if crate::export::busy() {
-            return Err("Wait for the running export to finish first.".into());
+            return Err(tr!("Wait for the running export to finish first."));
         }
         let root = root();
         let org = store().load()?;
-        let f = org.folder(&name).ok_or("That folder no longer exists.")?;
+        let f = org
+            .folder(&name)
+            .ok_or_else(|| tr!("That folder no longer exists."))?;
         let old = f.name.clone();
         let leaf = leaf_of(&old).to_string();
         let dest_parent = match parent.as_deref().filter(|p| !p.is_empty()) {
             Some(p) => {
                 let pf = org
                     .folder(p)
-                    .ok_or("That folder no longer exists. Refresh and try again.")?;
+                    .ok_or_else(|| tr!("That folder no longer exists. Refresh and try again."))?;
                 if pf.name.eq_ignore_ascii_case(&old) || is_within(&pf.name, &old) {
-                    return Err("A folder can't go inside itself.".into());
+                    return Err(tr!("A folder can't go inside itself."));
                 }
                 Some(pf.name.clone())
             }
@@ -723,22 +746,26 @@ pub async fn folder_move(name: String, parent: Option<String>) -> Result<(), Str
             .max()
             .unwrap_or(0);
         if depth_of(&new_full) + deepest > lib::MAX_DEPTH {
-            return Err(format!("Folders go up to {} levels deep.", lib::MAX_DEPTH));
+            return Err(tr!("Folders go up to {n} levels deep.", n = lib::MAX_DEPTH));
         }
         if dest_parent.is_none() && org.game_dirs.contains(&leaf.to_lowercase()) {
-            return Err(format!(
-                "\"{leaf}\" is a game folder name at the top level. Rename the folder first."
+            return Err(tr!(
+                "\"{name}\" is a game folder name at the top level. Rename the folder first.",
+                name = leaf
             ));
         }
         let from = root.join(&old);
         let to_dir = parent_dir(&root, &new_full);
         if !from.is_dir() || !to_dir.is_dir() {
-            return Err("That folder isn't on disk any more. Refresh and try again.".into());
+            return Err(tr!(
+                "That folder isn't on disk any more. Refresh and try again."
+            ));
         }
         if entry_exists(&to_dir, &leaf) {
-            return Err(format!(
-                "There's already something called \"{leaf}\" in {}.",
-                to_dir.display()
+            return Err(tr!(
+                "There's already something called \"{name}\" in {path}.",
+                name = leaf,
+                path = to_dir.display()
             ));
         }
         crate::export::move_no_replace(&from, &to_dir.join(&leaf)).map_err(dir_move_error)?;
@@ -753,7 +780,9 @@ pub async fn folder_reveal(name: String) -> Result<(), String> {
     blocking(move || {
         let root = root();
         let org = store().load()?;
-        let f = org.folder(&name).ok_or("That folder no longer exists.")?;
+        let f = org
+            .folder(&name)
+            .ok_or_else(|| tr!("That folder no longer exists."))?;
         let dir = inside(&root, &root.join(&f.name))?;
         let plain = dir
             .to_string_lossy()
@@ -763,7 +792,7 @@ pub async fn folder_reveal(name: String) -> Result<(), String> {
             .arg(plain)
             .spawn()
             .map(drop)
-            .map_err(|e| format!("couldn't open File Explorer: {e}"))
+            .map_err(|e| tr!("couldn't open File Explorer: {error}", error = e))
     })
     .await
 }
@@ -818,11 +847,13 @@ fn remove_empty_dir(d: &Path) -> bool {
 pub async fn folder_delete(name: String) -> Result<DeleteFolderResult, String> {
     blocking(move || {
         if crate::export::busy() {
-            return Err("Wait for the running export to finish first.".into());
+            return Err(tr!("Wait for the running export to finish first."));
         }
         let root = root();
         let org = store().load()?;
-        let f = org.folder(&name).ok_or("That folder no longer exists.")?;
+        let f = org
+            .folder(&name)
+            .ok_or_else(|| tr!("That folder no longer exists."))?;
         let dir = root.join(&f.name);
         let mut moved = 0;
         let mut failed = Vec::new();
@@ -956,7 +987,7 @@ pub async fn clip_title(id: String, key: String, title: String) -> Result<(), St
         let src = inside(&root(), &clip_path(&id)?)?;
         rename_for_title(&src, org.titles.get(&key).map(String::as_str))
             .map(drop)
-            .map_err(|e| format!("Title saved, but {e}"))
+            .map_err(|e| tr!("Title saved, but {error}", error = e))
     })
     .await
 }
@@ -984,12 +1015,15 @@ pub async fn pending_resolve(
             let dir = root.join(&name);
             if !dir.is_dir() {
                 if dir.exists() {
-                    return Err(format!(
-                        "There's a file called {name} in your clips folder, so the folder can't be made."
+                    return Err(tr!(
+                        "There's a file called {name} in your clips folder, so the folder can't be made.",
+                        name = name
                     ));
                 }
                 std::fs::create_dir(&dir)
-                    .map_err(|e| format!("Couldn't make the folder {}: {e}", dir.display()))?;
+                    .map_err(|e| {
+                        tr!("Couldn't make the folder {path}: {error}", path = dir.display(), error = e)
+                    })?;
             }
             move_items(&root, &items, Some(&name))?
         } else {
@@ -1012,7 +1046,7 @@ pub async fn pending_resolve(
 #[tauri::command]
 pub async fn clips_delete(app: tauri::AppHandle, ids: Vec<String>) -> Result<usize, String> {
     if crate::export::busy() {
-        return Err("Wait for the running export to finish first.".into());
+        return Err(tr!("Wait for the running export to finish first."));
     }
     let paths: Vec<PathBuf> = ids
         .iter()
@@ -1055,17 +1089,19 @@ fn recycle(paths: &[PathBuf], owner: Option<isize>) -> Result<usize, String> {
         return Ok(gone);
     }
     let why = if op.fAnyOperationsAborted.as_bool() {
-        "cancelled"
+        tr!("cancelled")
     } else {
-        "a file was in use or couldn't be recycled"
+        tr!("a file was in use or couldn't be recycled")
     };
     let _ = r;
     Err(if gone == 0 {
-        format!("Nothing was deleted ({why}).")
+        tr!("Nothing was deleted ({why}).", why = why)
     } else {
-        format!(
-            "{gone} of {} clips were moved to the Recycle Bin ({why}).",
-            paths.len()
+        tr!(
+            "{gone} of {total} clips were moved to the Recycle Bin ({why}).",
+            gone = gone,
+            total = paths.len(),
+            why = why
         )
     })
 }

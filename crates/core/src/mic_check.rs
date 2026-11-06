@@ -42,6 +42,9 @@ pub struct MicReport {
     /// "good", "quiet", "hot", "clipping" or "no_speech".
     pub verdict: String,
     pub tips: Vec<String>,
+    /// A tip says to turn the mic's own gain knob up (the window then
+    /// doesn't offer JondisClip's gain instead).
+    pub knob_up: bool,
     /// Gain (dB) JondisClip would need to reach the target with the current
     /// physical setting.
     pub suggested_gain_db: f32,
@@ -160,17 +163,18 @@ pub fn analyze(raw: &[f32], gain_db: f32, low_cut: bool) -> (MicReport, Vec<f32>
     };
 
     // --- Verdict and advice ---
-    let mut tips = Vec::new();
+    let mut tips: Vec<String> = Vec::new();
+    let mut knob_up = false;
     let suggested_gain_db = if speech_detected {
         (TARGET_SPEECH_DB - raw_speech).clamp(-12.0, 24.0).round()
     } else {
         gain_db
     };
     let verdict = if adc_clipped > 0 {
-        tips.push("The microphone itself clipped, before JondisClip. Turn the G-Track's MIC GAIN knob down until this no longer appears. This distortion can't be fixed afterwards.".into());
+        tips.push(crate::tr!("The microphone itself clipped, before JondisClip. Turn the G-Track's MIC GAIN knob down until this no longer appears. This distortion can't be fixed afterwards."));
         "clipping"
     } else if !speech_detected {
-        tips.push("No speech found. Speak normally for the whole test, about 20-30 cm from the mic, into the front (logo side).".into());
+        tips.push(crate::tr!("No speech found. Speak normally for the whole test, about 20-30 cm from the mic, into the front (logo side)."));
         "no_speech"
     } else if speech_db < TARGET_SPEECH_DB - 6.0 {
         "quiet"
@@ -185,39 +189,56 @@ pub fn analyze(raw: &[f32], gain_db: f32, low_cut: bool) -> (MicReport, Vec<f32>
         let headroom = -db(f64::from(raw_peak)); // dB to full scale at the mic
         let needed = TARGET_SPEECH_DB - raw_speech; // dB from mic level to target
         if needed > 3.0 && headroom > needed + 3.0 {
-            tips.push(format!(
-                "Your voice reaches the computer at {raw_speech:.0} dBFS. Turn the G-Track's MIC GAIN knob up (aim for about {needed:.0} dB more) and set Microphone gain here back to 0 dB. A louder signal from the mic itself has less hiss than digital boost."
+            knob_up = true;
+            tips.push(crate::tr!(
+                "Your voice reaches the computer at {level} dBFS. Turn the G-Track's MIC GAIN knob up (aim for about {more} dB more) and set Microphone gain here back to 0 dB. A louder signal from the mic itself has less hiss than digital boost.",
+                level = format!("{raw_speech:.0}"),
+                more = format!("{needed:.0}")
             ));
         } else if needed > 3.0 {
-            tips.push(format!(
-                "Peaks from the mic are already close to full scale, so raise the level here instead: set Microphone gain to about {suggested_gain_db:+.0} dB."
+            tips.push(crate::tr!(
+                "Peaks from the mic are already close to full scale, so raise the level here instead: set Microphone gain to about {gain} dB.",
+                gain = format!("{suggested_gain_db:+.0}")
             ));
         } else if needed < -6.0 {
-            tips.push(format!(
-                "Your voice is louder than needed. Turn the MIC GAIN knob down a little (about {:.0} dB), or set Microphone gain to {suggested_gain_db:+.0} dB.",
-                -needed
+            tips.push(crate::tr!(
+                "Your voice is louder than needed. Turn the MIC GAIN knob down a little (about {less} dB), or set Microphone gain to {gain} dB.",
+                less = format!("{:.0}", -needed),
+                gain = format!("{suggested_gain_db:+.0}")
             ));
         }
         if gain_lin_db > 6.0 && needed < 3.0 {
-            tips.push(format!("Microphone gain here is {gain_lin_db:+.0} dB. With the knob set right, 0 dB is best."));
+            tips.push(crate::tr!(
+                "Microphone gain here is {gain} dB. With the knob set right, 0 dB is best.",
+                gain = format!("{gain_lin_db:+.0}")
+            ));
         }
         if limited_ms > 50.0 {
-            tips.push(format!("Peaks hit the safety limiter for {limited_ms:.0} ms. Back off a little from the mic, or lower the gain."));
+            tips.push(crate::tr!(
+                "Peaks hit the safety limiter for {ms} ms. Back off a little from the mic, or lower the gain.",
+                ms = format!("{limited_ms:.0}")
+            ));
         }
     }
     if noise_floor_db > -50.0 && speech_detected {
-        tips.push(format!(
-            "Background noise is fairly high ({noise_floor_db:.0} dBFS). Get closer to the mic and use less gain, and point the back of the mic towards fans or the PC (cardioid pattern rejects sound from behind)."
+        tips.push(crate::tr!(
+            "Background noise is fairly high ({level} dBFS). Get closer to the mic and use less gain, and point the back of the mic towards fans or the PC (cardioid pattern rejects sound from behind).",
+            level = format!("{noise_floor_db:.0}")
         ));
     }
     if !low_cut && low_freq_db > -20.0 && speech_detected {
-        tips.push(format!("Strong rumble below 60 Hz while you speak ({low_freq_db:.0} dB): proximity boom, desk bumps or breath pops. Turn on Low-cut filter."));
+        tips.push(crate::tr!(
+            "Strong rumble below 60 Hz while you speak ({level} dB): proximity boom, desk bumps or breath pops. Turn on Low-cut filter.",
+            level = format!("{low_freq_db:.0}")
+        ));
     }
     if mode == "two_track" {
-        tips.push("The G-Track Pro is in 2-Track mode (mic on the left channel only). JondisClip handles it, but MONO mode is simpler and recommended: press the mode button so MONO is lit.".into());
+        tips.push(crate::tr!("The G-Track Pro is in 2-Track mode (mic on the left channel only). JondisClip handles it, but MONO mode is simpler and recommended: press the mode button so MONO is lit."));
     }
     if verdict == "good" && tips.is_empty() {
-        tips.push("Your microphone is set up well. No changes needed.".into());
+        tips.push(crate::tr!(
+            "Your microphone is set up well. No changes needed."
+        ));
     }
 
     let report = MicReport {
@@ -234,6 +255,7 @@ pub fn analyze(raw: &[f32], gain_db: f32, low_cut: bool) -> (MicReport, Vec<f32>
         speech_detected,
         verdict: verdict.into(),
         tips,
+        knob_up,
         suggested_gain_db,
     };
     (report, processed)

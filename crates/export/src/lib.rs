@@ -80,6 +80,53 @@ pub enum ExportError {
     OverLimit { size: u64, limit: u64 },
 }
 
+impl ExportError {
+    /// The message the window shows, in the language setting (ADR-0018).
+    /// `Display` stays English for logs. FFmpeg's own error text isn't translated.
+    pub fn user_message(&self) -> String {
+        use jondisclip_core::tr;
+        match self {
+            Self::Ffmpeg { what, source } => tr!(
+                "FFmpeg couldn't {what}: {error}",
+                what = what,
+                error = source
+            ),
+            Self::Io(e) => tr!("couldn't write the file: {error}", error = e),
+            Self::NoVideo => tr!("the clip has no video"),
+            Self::EmptyRange => tr!("the selection is empty (start must be before end)"),
+            Self::Exists(p) => tr!(
+                "{path} already exists; originals and earlier exports are never overwritten",
+                path = p.display()
+            ),
+            Self::NoEncoder(e) => tr!(
+                "no hardware H.264 encoder could be opened ({error})",
+                error = e
+            ),
+            Self::NothingWritten => tr!("nothing was written for the selection"),
+            Self::BadTimestamps(t) => tr!(
+                "the video's timestamps go backwards at {time} s; the clip can't be cut cleanly",
+                time = format!("{t:.3}")
+            ),
+            Self::BFrames => tr!(
+                "this clip uses B-frames, so a lossless cut could break its last frames; use Exact"
+            ),
+            Self::EncoderBusy => {
+                tr!("the encoder stayed busy for too long (the GPU is fully loaded); try again")
+            }
+            Self::TooLongForLimit { max_seconds, limit } => tr!(
+                "too long for {mb} MB: trim it to under {s} s",
+                mb = format!("{:.0}", *limit as f64 / 1e6),
+                s = *max_seconds as u64
+            ),
+            Self::OverLimit { size, limit } => tr!(
+                "couldn't get it under the limit ({size} MB, limit {limit} MB); trim it shorter",
+                size = format!("{:.1}", *size as f64 / 1e6),
+                limit = format!("{:.1}", *limit as f64 / 1e6)
+            ),
+        }
+    }
+}
+
 fn is_again(e: &ffmpeg::Error) -> bool {
     matches!(e, ffmpeg::Error::Other { errno } if *errno == ffmpeg::util::error::EAGAIN)
 }

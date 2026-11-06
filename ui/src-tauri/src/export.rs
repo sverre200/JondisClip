@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
+use jondisclip_core::tr;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use windows::Win32::Foundation::HANDLE;
@@ -348,12 +349,16 @@ pub fn start(
     let valid =
         start.is_finite() && end.is_finite() && start >= 0.0 && end > start && start < duration;
     if !valid {
-        return Err("Choose a section to save: the start must be before the end.".into());
+        return Err(tr!(
+            "Choose a section to save: the start must be before the end."
+        ));
     }
     let end = end.min(duration);
     let mut slot = running().lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_some() {
-        return Err("An export is already running. Wait for it or cancel it first.".into());
+        return Err(tr!(
+            "An export is already running. Wait for it or cancel it first."
+        ));
     }
     let (output, estimate) = match &kind {
         Kind::TrimTo { exact, output } => (
@@ -371,17 +376,22 @@ pub fn start(
         ),
         Kind::Share { limit, title } => {
             let dir = share_dir();
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                tr!(
+                    "couldn't create {path}: {error}",
+                    path = dir.display(),
+                    error = e
+                )
+            })?;
             let (settings, _) = jondisclip_core::settings::Settings::from_toml(
                 &std::fs::read_to_string(jondisclip_core::paths::settings_file())
                     .unwrap_or_default(),
             );
             let save = settings.save_dir_or(&jondisclip_core::paths::default_save_dir());
             if overlaps(&dir, &save) {
-                return Err(format!(
-                    "The save folder overlaps JondisClip's share folder ({}); choose another save folder.",
-                    dir.display()
+                return Err(tr!(
+                    "The save folder overlaps JondisClip's share folder ({path}); choose another save folder.",
+                    path = dir.display()
                 ));
             }
             prune_share_dir(&dir, SHARE_KEEP);
@@ -393,7 +403,9 @@ pub fn start(
     check_space(&dir, estimate + estimate / 2)?;
     // Without the job object the exporter could outlive this window; refuse.
     let Some(job_object) = kill_on_close_job() else {
-        return Err("couldn't set up the export safely (job object); try again".into());
+        return Err(tr!(
+            "couldn't set up the export safely (job object); try again"
+        ));
     };
     let (cmd, last) = match &kind {
         Kind::Trim { exact } | Kind::TrimTo { exact, .. } => (
@@ -420,12 +432,14 @@ pub fn start(
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS)
         .spawn()
-        .map_err(|e| format!("couldn't start the exporter: {e}"))?;
+        .map_err(|e| tr!("couldn't start the exporter: {error}", error = e))?;
     if unsafe { AssignProcessToJobObject(job_object, HANDLE(child.as_raw_handle())) }.is_err() {
         let _ = child.kill();
         let _ = child.wait();
         remove_partial(&output);
-        return Err("couldn't set up the export safely (job object); try again".into());
+        return Err(tr!(
+            "couldn't set up the export safely (job object); try again"
+        ));
     }
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
     let job = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -464,10 +478,10 @@ fn check_space(dir: &Path, bytes: u64) -> Result<(), String> {
         if let Some(free) = free_space(&local)
             && free < bytes + 2 * 1024 * 1024 * 1024
         {
-            return Err(format!(
-                "Not enough free space on {} for Google Drive's local cache (about {} MB needed, plus 2 GB kept free for recording).",
-                local.display(),
-                bytes / 1_000_000 + 1
+            return Err(tr!(
+                "Not enough free space on {path} for Google Drive's local cache (about {mb} MB needed, plus 2 GB kept free for recording).",
+                path = local.display(),
+                mb = bytes / 1_000_000 + 1
             ));
         }
     }
@@ -475,11 +489,11 @@ fn check_space(dir: &Path, bytes: u64) -> Result<(), String> {
     if let Some(free) = free_space(dir)
         && free < bytes + reserve
     {
-        return Err(format!(
-            "Not enough free space on {} (about {} MB needed, plus {} kept free).",
-            dir.display(),
-            bytes / 1_000_000 + 1,
-            if reserve >= 1 << 30 { "2 GB" } else { "256 MB" }
+        return Err(tr!(
+            "Not enough free space on {path} (about {mb} MB needed, plus {reserve} kept free).",
+            path = dir.display(),
+            mb = bytes / 1_000_000 + 1,
+            reserve = if reserve >= 1 << 30 { "2 GB" } else { "256 MB" }
         ));
     }
     Ok(())
@@ -491,11 +505,19 @@ fn check_space(dir: &Path, bytes: u64) -> Result<(), String> {
 pub fn start_copy(app: AppHandle, src: PathBuf, dst: PathBuf) -> Result<Started, String> {
     let size = std::fs::metadata(&src).map_err(|e| e.to_string())?.len();
     let dir = dst.parent().map(Path::to_path_buf).unwrap_or_default();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        tr!(
+            "couldn't create {path}: {error}",
+            path = dir.display(),
+            error = e
+        )
+    })?;
     check_space(&dir, size)?;
     let mut slot = running().lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_some() {
-        return Err("An export is already running. Wait for it or cancel it first.".into());
+        return Err(tr!(
+            "An export is already running. Wait for it or cancel it first."
+        ));
     }
     let job = next_job();
     let flag: std::sync::Arc<std::sync::atomic::AtomicBool> = Default::default();
@@ -569,9 +591,9 @@ pub fn copy_file(
     use std::io::{Read, Write};
     let fail = |what: &str, e: std::io::Error| CopyError::Failed(format!("{what}: {e}"));
     if dst.exists() {
-        return Err(CopyError::Failed(format!(
-            "{} already exists",
-            dst.display()
+        return Err(CopyError::Failed(tr!(
+            "{path} already exists",
+            path = dst.display()
         )));
     }
     let tmp = dst.with_extension("mp4.partial");
@@ -585,11 +607,11 @@ pub fn copy_file(
             .read(true)
             .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
             .open(src)
-            .map_err(|e| fail("couldn't read the clip", e))?;
+            .map_err(|e| fail(&tr!("couldn't read the clip"), e))?;
         let src_mtime = input.metadata().ok().and_then(|m| m.modified().ok());
         let total = input
             .metadata()
-            .map_err(|e| fail("couldn't read the clip", e))?
+            .map_err(|e| fail(&tr!("couldn't read the clip"), e))?
             .len()
             .max(1);
         let mut output = std::fs::OpenOptions::new()
@@ -597,7 +619,7 @@ pub fn copy_file(
             .create_new(true)
             .custom_flags(FILE_FLAG_WRITE_THROUGH)
             .open(&tmp)
-            .map_err(|e| fail("couldn't write to the Drive folder", e))?;
+            .map_err(|e| fail(&tr!("couldn't write to the Drive folder"), e))?;
         let mut buf = vec![0u8; 4 * 1024 * 1024];
         let (mut done, mut last) = (0u64, std::time::Instant::now());
         loop {
@@ -606,13 +628,13 @@ pub fn copy_file(
             }
             let n = input
                 .read(&mut buf)
-                .map_err(|e| fail("couldn't read the clip", e))?;
+                .map_err(|e| fail(&tr!("couldn't read the clip"), e))?;
             if n == 0 {
                 break;
             }
             output
                 .write_all(&buf[..n])
-                .map_err(|e| fail("couldn't write to the Drive folder", e))?;
+                .map_err(|e| fail(&tr!("couldn't write to the Drive folder"), e))?;
             done += n as u64;
             if last.elapsed().as_millis() >= 100 {
                 last = std::time::Instant::now();
@@ -626,30 +648,32 @@ pub fn copy_file(
         }
         output
             .sync_all()
-            .map_err(|e| fail("couldn't finish the file", e))?;
+            .map_err(|e| fail(&tr!("couldn't finish the file"), e))?;
         drop(output);
         // Verify the copy (size, then content fingerprint read back from
         // disk) before it gets its real name.
         let size = std::fs::metadata(src)
-            .map_err(|e| fail("couldn't read the clip", e))?
+            .map_err(|e| fail(&tr!("couldn't read the clip"), e))?
             .len();
         let copied = std::fs::metadata(&tmp)
-            .map_err(|e| fail("couldn't check the copy", e))?
+            .map_err(|e| fail(&tr!("couldn't check the copy"), e))?
             .len();
         if copied != size || done != size {
-            return Err(CopyError::Failed(format!(
-                "The copy came out the wrong size ({copied} of {size} bytes). Nothing was saved; try again."
+            return Err(CopyError::Failed(tr!(
+                "The copy came out the wrong size ({copied} of {size} bytes). Nothing was saved; try again.",
+                copied = copied,
+                size = size
             )));
         }
         let fp = |p: &Path| jondisclip_core::library::fingerprint(p, size);
         match (fp(src), fp(&tmp)) {
             (Ok(a), Ok(b)) if a == b => {}
             (Ok(_), Ok(_)) => {
-                return Err(CopyError::Failed(
-                    "The copy didn't match the clip. Nothing was saved; try again.".into(),
-                ));
+                return Err(CopyError::Failed(tr!(
+                    "The copy didn't match the clip. Nothing was saved; try again."
+                )));
             }
-            (Err(e), _) | (_, Err(e)) => return Err(fail("couldn't check the copy", e)),
+            (Err(e), _) | (_, Err(e)) => return Err(fail(&tr!("couldn't check the copy"), e)),
         }
         // Never overwrite: a hard link fails if the name exists.
         match std::fs::hard_link(&tmp, dst) {
@@ -657,15 +681,15 @@ pub fn copy_file(
                 let _ = std::fs::remove_file(&tmp);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(CopyError::Failed(format!(
-                    "{} already exists",
-                    dst.display()
+                return Err(CopyError::Failed(tr!(
+                    "{path} already exists",
+                    path = dst.display()
                 )));
             }
             // No hard links (FAT/exFAT, Drive's virtual drive): an atomic
             // move that fails rather than replace an existing file.
             Err(_) => {
-                move_no_replace(&tmp, dst).map_err(|e| fail("couldn't finish the file", e))?
+                move_no_replace(&tmp, dst).map_err(|e| fail(&tr!("couldn't finish the file"), e))?
             }
         }
         progress(1.0);
@@ -731,7 +755,7 @@ fn watch(app: AppHandle, job: u32, stdout: std::process::ChildStdout) {
         Some(other) => other,
         None => Event::Error {
             job,
-            message: "The export stopped unexpectedly.".into(),
+            message: tr!("The export stopped unexpectedly."),
         },
     };
     if !matches!(ev, Event::Done { .. }) {

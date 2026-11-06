@@ -44,6 +44,7 @@ Open Settings in the library window, or right-click the tray icon.
 - Start with Windows: OFF at first.
 - Quality, resolution and frame rate
 - Theme colour
+- Language (English, Norsk bokmål, Norsk nynorsk) and date format
 
 Right-click the tray icon to pause recording, change the replay length,
 or quit.

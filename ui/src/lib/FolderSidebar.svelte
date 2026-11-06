@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+  import { t } from "./i18n.svelte";
   import { MAX_DEPTH, isWithin, type Folder } from "./api";
   import { drag, startDrag } from "./drag.svelte";
 
@@ -128,10 +129,10 @@
   }
 </script>
 
-<nav class="side" class:collapsed aria-label="Folders">
+<nav class="side" class:collapsed aria-label={t("Folders")}>
   <div class="head">
-    {#if !collapsed}<span class="title">Folders</span>{/if}
-    <button type="button" class="icon" onclick={ontoggle} title={collapsed ? "Show folders" : "Hide folders"} aria-label={collapsed ? "Show folders" : "Hide folders"} aria-expanded={!collapsed}>
+    {#if !collapsed}<span class="title">{t("Folders")}</span>{/if}
+    <button type="button" class="icon" onclick={ontoggle} title={collapsed ? t("Show folders") : t("Hide folders")} aria-label={collapsed ? t("Show folders") : t("Hide folders")} aria-expanded={!collapsed}>
       <svg viewBox="0 0 16 16" aria-hidden="true">
         {#if collapsed}<path d="m6 3.5 4.5 4.5L6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />{:else}<path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />{/if}
       </svg>
@@ -139,9 +140,9 @@
   </div>
 
   <div class="list" bind:this={list}>
-    <button type="button" class="row" class:on={view === "all"} aria-current={view === "all" ? "page" : undefined} title="All clips" onclick={() => onview("all")} onkeydown={(e) => key(e, null)}>
+    <button type="button" class="row" class:on={view === "all"} aria-current={view === "all" ? "page" : undefined} title={t("All clips")} onclick={() => onview("all")} onkeydown={(e) => key(e, null)}>
       <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="5" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4" /><rect x="9" y="2.5" width="5" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4" /><rect x="2" y="9.5" width="5" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4" /><rect x="9" y="9.5" width="5" height="5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4" /></svg>
-      {#if !collapsed}<span class="name">All clips</span><span class="n">{allCount}</span>{/if}
+      {#if !collapsed}<span class="name">{t("All clips")}</span><span class="n">{allCount}</span>{/if}
     </button>
     <button
       type="button"
@@ -150,12 +151,12 @@
       class:drop={over === null}
       data-drop-folder=""
       aria-current={view === "unsorted" ? "page" : undefined}
-      title="Not in a folder (drop clips here to take them out of their folder)"
+      title={t("Not in a folder (drop clips here to take them out of their folder)")}
       onclick={() => onview("unsorted")}
       onkeydown={(e) => key(e, null)}
     >
       <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11v8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z M2.5 4.5 4 2.5h8l1.5 2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" /></svg>
-      {#if !collapsed}<span class="name">Not in a folder</span><span class="n">{unsortedCount}</span>{/if}
+      {#if !collapsed}<span class="name">{t("Not in a folder")}</span><span class="n">{unsortedCount}</span>{/if}
     </button>
 
     {#if folders.length}<div class="sep"></div>{/if}
@@ -216,9 +217,9 @@
     {/if}
   </div>
 
-  <button type="button" class="row new" onclick={oncreate} title="New folder">
+  <button type="button" class="row new" onclick={oncreate} title={t("New folder")}>
     <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
-    {#if !collapsed}<span class="name">New folder</span>{/if}
+    {#if !collapsed}<span class="name">{t("New folder")}</span>{/if}
   </button>
 </nav>
 

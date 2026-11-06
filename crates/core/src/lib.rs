@@ -7,6 +7,7 @@ pub mod devices;
 pub mod discord;
 pub mod drive;
 pub mod hotkey;
+pub mod i18n;
 pub mod library;
 pub mod mic_check;
 pub mod organize;

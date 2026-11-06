@@ -104,7 +104,21 @@ pub fn sanitize(name: &str) -> String {
     s
 }
 
-/// Local time as "2026-11-04 21-03-11".
+/// Local time for a clip file name, in the date format setting.
+pub fn file_timestamp(date_format: &str) -> String {
+    let t = unsafe { GetLocalTime() };
+    jondisclip_core::library::file_stamp(
+        date_format,
+        t.wYear,
+        t.wMonth,
+        t.wDay,
+        t.wHour,
+        t.wMinute,
+        t.wSecond,
+    )
+}
+
+/// Local time as "2026-11-04 21-03-11" (logs).
 pub fn timestamp() -> String {
     let t = unsafe { GetLocalTime() };
     format!(

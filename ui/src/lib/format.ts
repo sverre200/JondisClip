@@ -1,4 +1,5 @@
 import type { Settings } from "./api";
+import { numericDate, shortNumericDate, t, weekday } from "./i18n.svelte";
 
 export function replayLabel(seconds: number): string {
   return seconds < 60 ? `${seconds} s` : `${seconds / 60} min`;
@@ -84,19 +85,13 @@ export function parseLocal(stamp: string): Date {
 const DAY = 86_400_000;
 const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 
-/** Group heading for a clip's day: "Today", "Yesterday", "Monday 2 November", "2 November 2025". */
+/** Group heading for a clip's day: "Today", "Yesterday", or "Wednesday, 04.11.2026" in the chosen date format. */
 export function dayLabel(stamp: string, now = new Date()): string {
   const d = parseLocal(stamp);
   const diff = Math.round((startOfDay(now) - startOfDay(d)) / DAY);
-  if (diff === 0) return "Today";
-  if (diff === 1) return "Yesterday";
-  const opts: Intl.DateTimeFormatOptions =
-    diff > 0 && diff < 7
-      ? { weekday: "long", day: "numeric", month: "long" }
-      : d.getFullYear() === now.getFullYear()
-        ? { day: "numeric", month: "long" }
-        : { day: "numeric", month: "long", year: "numeric" };
-  return d.toLocaleDateString(undefined, opts);
+  if (diff === 0) return t("Today");
+  if (diff === 1) return t("Yesterday");
+  return `${weekday(d)}, ${numericDate(d)}`;
 }
 
 /** "17:47" (local clock time of a stamp). */
@@ -104,21 +99,17 @@ export function timeOfDay(stamp: string): string {
   return stamp.slice(11, 16);
 }
 
-/** A clip card's date, kept short so titles keep their room: "4 Nov", or "4 Nov 2025" in another year. */
+/** A clip card's date, kept short so titles keep their room (no year when it's this year, except year-first). */
 export function shortDate(stamp: string, now = new Date()): string {
-  const d = parseLocal(stamp);
-  return d.toLocaleDateString(
-    undefined,
-    d.getFullYear() === now.getFullYear() ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" },
-  );
+  return shortNumericDate(parseLocal(stamp), now);
 }
 
-/** "Today 17:47", "Yesterday 09:02", "3 Nov 17:47". */
+/** "Today 17:47", "Yesterday 09:02", "04.11. 17:47". */
 export function whenShort(stamp: string, now = new Date()): string {
-  const day = dayLabel(stamp, now);
-  if (day === "Today" || day === "Yesterday") return `${day} ${timeOfDay(stamp)}`;
   const d = parseLocal(stamp);
-  return `${d.toLocaleDateString(undefined, { day: "numeric", month: "short" })} ${timeOfDay(stamp)}`;
+  const diff = Math.round((startOfDay(now) - startOfDay(d)) / DAY);
+  const day = diff === 0 ? t("Today") : diff === 1 ? t("Yesterday") : shortNumericDate(d, now);
+  return `${day} ${timeOfDay(stamp)}`;
 }
 
 /** Codec fourcc → name. */

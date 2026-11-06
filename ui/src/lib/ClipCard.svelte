@@ -3,6 +3,7 @@
   import { thumbUrl, type Clip } from "./api";
   import { bytes, clock, shortDate, timeOfDay } from "./format";
   import { requestThumb } from "./thumbs";
+  import { t } from "./i18n.svelte";
 
   let {
     clip,
@@ -105,6 +106,18 @@
   });
 
   const res = $derived(clip.probe ? `${clip.probe.height}p` : null);
+  const label = $derived(
+    [
+      clip.title ?? null,
+      clip.game,
+      `${shortDate(clip.recorded)} ${timeOfDay(clip.recorded)}`,
+      clip.probe ? clock(clip.probe.duration) : t("unreadable"),
+      clip.edit ? t("edit") : null,
+      clip.in_drive ? t("in Google Drive") : null,
+    ]
+      .filter(Boolean)
+      .join(", "),
+  );
 </script>
 
 <!-- Keys (Enter, F2, Delete, arrows…) are handled by the library grid. -->
@@ -118,7 +131,7 @@
   class:lifted
   {tabindex}
   aria-pressed={selected}
-  aria-label="{clip.title ? `${clip.title}, ` : ''}{clip.game}, {shortDate(clip.recorded)} {timeOfDay(clip.recorded)}, {clip.probe ? clock(clip.probe.duration) : 'unreadable'}{clip.edit ? ', edit' : ''}{clip.in_drive ? ', in Google Drive' : ''}"
+  aria-label={label}
   onclick={(e) => !renaming && onselect(e)}
   ondblclick={() => !renaming && onopen()}
   oncontextmenu={(e) => {
@@ -131,7 +144,7 @@
     {#if clip.error}
       <div class="ph warn">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3Zm0 6v5m0 3v.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-        <span>Can't read this clip</span>
+        <span>{t("Can't read this clip")}</span>
       </div>
     {:else if ready}
       <img src={thumbUrl(clip.thumb_key)} alt="" decoding="async" loading="lazy" draggable="false" />
@@ -143,9 +156,9 @@
       </div>
     {/if}
     {#if clip.probe}<span class="dur">{clock(clip.probe.duration)}</span>{/if}
-    {#if clip.edit}<span class="tag">Edit</span>{/if}
+    {#if clip.edit}<span class="tag">{t("Edit")}</span>{/if}
     {#if clip.in_drive}
-      <span class="drive" title="In your Google Drive folder · {clip.in_drive}">
+      <span class="drive" title={t("In your Google Drive folder · {path}", { path: clip.in_drive })}>
         <svg viewBox="0 0 20 16" width="15" height="12" aria-hidden="true">
           <path d="M5.5 14h9.2a4 4 0 0 0 .5-7.97A5.5 5.5 0 0 0 4.7 7.1 3.5 3.5 0 0 0 5.5 14Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
           <path d="m7.6 9.6 1.9 1.9 3.4-3.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
@@ -163,7 +176,7 @@
           class="rename"
           maxlength="120"
           placeholder={clip.game}
-          aria-label="Clip title"
+          aria-label={t("Clip title")}
           spellcheck="false"
           onkeydown={(e) => {
             e.stopPropagation();

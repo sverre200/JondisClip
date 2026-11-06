@@ -6,6 +6,7 @@
   import Button from "./lib/Button.svelte";
   import Segmented from "./lib/Segmented.svelte";
   import Timeline from "./lib/Timeline.svelte";
+  import { t } from "./lib/i18n.svelte";
 
   let {
     clip,
@@ -89,7 +90,7 @@
     const id = clip.id;
     const [s, e] = [trimStart, trimEnd];
     if (!(e > s)) return;
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       api
         .sharePlan(id, s, e)
         .then((p) => {
@@ -97,16 +98,17 @@
         })
         .catch(() => (sharePlan = null));
     }, 200);
-    return () => clearTimeout(t);
+    return () => clearTimeout(timer);
   });
   const shareHint = $derived.by(() => {
     if (!sharePlan) return "";
     if (!sharePlan.plan) {
       const m = sharePlan.max_seconds ?? 0;
-      return `Too long for ${sharePlan.limit_mb} MB: trim it to under ${clock(m)}`;
+      return t("Too long for {mb} MB: trim it to under {time}", { mb: sharePlan.limit_mb, time: clock(m) });
     }
     const p = sharePlan.plan;
-    return `Discord: ${p.height}p${p.fps} under ${sharePlan.limit_mb} MB${p.rough ? " (will look rough; trim it shorter)" : ""}`;
+    const base = t("Discord: {quality} under {mb} MB", { quality: `${p.height}p${p.fps}`, mb: sharePlan.limit_mb });
+    return p.rough ? `${base} ${t("(will look rough; trim it shorter)")}` : base;
   });
   let job = $state<Job>({ state: "idle" });
 
@@ -461,33 +463,33 @@
     const codec = clip.probe ? codecName(clip.probe.codec) : "";
     failed =
       code === 4 && codec && codec !== "H.264"
-        ? `This clip is ${codec}, which Windows can't preview without its codec extension.`
-        : "This clip couldn't be played here.";
+        ? t("This clip is {codec}, which Windows can't preview without its codec extension.", { codec })
+        : t("This clip couldn't be played here.");
     loading = false;
   }
 </script>
 
 <div class="player">
   <div class="bar">
-    <Button variant="ghost" onclick={onclose} disabled={job.state === "running"} title={job.state === "running" ? "Saving… cancel or wait first" : "Back to library (Esc)"}>
+    <Button variant="ghost" onclick={onclose} disabled={job.state === "running"} title={job.state === "running" ? t("Saving… cancel or wait first") : t("Back to library (Esc)")}>
       <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
-      Library
+      {t("Library")}
     </Button>
     <div class="title">
       <strong title={clip.title ?? clip.game}>{clip.title ?? clip.game}</strong>
       <span>{meta}</span>
     </div>
     <div class="nav">
-      <button type="button" class="icon-btn" aria-label="Previous clip (Page Up)" title="Previous clip (Page Up)" disabled={!hasPrev || job.state === "running"} onclick={() => onstep(-1)}>
+      <button type="button" class="icon-btn" aria-label={t("Previous clip (Page Up)")} title={t("Previous clip (Page Up)")} disabled={!hasPrev || job.state === "running"} onclick={() => onstep(-1)}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
       </button>
-      <button type="button" class="icon-btn" aria-label="Next clip (Page Down)" title="Next clip (Page Down)" disabled={!hasNext || job.state === "running"} onclick={() => onstep(1)}>
+      <button type="button" class="icon-btn" aria-label={t("Next clip (Page Down)")} title={t("Next clip (Page Down)")} disabled={!hasNext || job.state === "running"} onclick={() => onstep(1)}>
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
       </button>
     </div>
     <div class="actions">
-      <Button variant="ghost" onclick={() => api.showInFolder(clip.id).catch((e) => onerror(String(e)))}>Show in folder</Button>
-      <Button variant="ghost" onclick={() => api.openExternal(clip.id).catch((e) => onerror(String(e)))}>Open in player</Button>
+      <Button variant="ghost" onclick={() => api.showInFolder(clip.id).catch((e) => onerror(String(e)))}>{t("Show in folder")}</Button>
+      <Button variant="ghost" onclick={() => api.openExternal(clip.id).catch((e) => onerror(String(e)))}>{t("Open in player")}</Button>
     </div>
   </div>
 
@@ -516,15 +518,15 @@
     {#if failed}
       <div class="overlay">
         <p>{failed}</p>
-        <Button variant="primary" onclick={() => api.openExternal(clip.id).catch((e) => onerror(String(e)))}>Open in default player</Button>
+        <Button variant="primary" onclick={() => api.openExternal(clip.id).catch((e) => onerror(String(e)))}>{t("Open in default player")}</Button>
       </div>
     {:else if loading}
-      <div class="overlay quiet" aria-label="Loading video"><span class="spinner"></span></div>
+      <div class="overlay quiet" aria-label={t("Loading video")}><span class="spinner"></span></div>
     {/if}
   </div>
 
   <div class="controls">
-    <button type="button" class="play" aria-label={paused ? "Play (Space)" : "Pause (Space)"} title={paused ? "Play (Space)" : "Pause (Space)"} onclick={toggle} disabled={!!failed}>
+    <button type="button" class="play" aria-label={paused ? t("Play (Space)") : t("Pause (Space)")} title={paused ? t("Play (Space)") : t("Pause (Space)")} onclick={toggle} disabled={!!failed}>
       {#if paused}
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3v10l8-5z" fill="currentColor" /></svg>
       {:else}
@@ -538,8 +540,8 @@
     <button
       type="button"
       class="icon-btn"
-      aria-label={muted ? "Unmute (M)" : "Mute (M)"}
-      title={muted ? "Unmute (M)" : "Mute (M)"}
+      aria-label={muted ? t("Unmute (M)") : t("Mute (M)")}
+      title={muted ? t("Unmute (M)") : t("Mute (M)")}
       onclick={() => {
         if (!muted && volume === 0) setVolume(0.5);
         else muted = !muted;
@@ -559,20 +561,20 @@
       step="0.01"
       value={silent ? 0 : volume}
       style="--pct: {(silent ? 0 : volume) * 100}%"
-      aria-label="Playback volume (↑/↓)"
+      aria-label={t("Playback volume (↑/↓)")}
       aria-valuetext="{Math.round((silent ? 0 : volume) * 100)}%"
-      title="Playback volume {Math.round((silent ? 0 : volume) * 100)}% · only in this window, the clip isn't changed"
+      title={t("Playback volume {pct}% · only in this window, the clip isn't changed", { pct: Math.round((silent ? 0 : volume) * 100) })}
       oninput={(e) => setVolume(Number((e.currentTarget as HTMLInputElement).value))}
     />
   </div>
-  <div class="edit" aria-label="Trim and save">
+  <div class="edit" aria-label={t("Trim and save")}>
     <div class="sel-info">
       {#if trimmed}
         <strong>{clockPrecise(trimStart)} – {clockPrecise(trimEnd)}</strong>
         <span>{clockPrecise(trimEnd - plan.start)} · ≈ {bytes(estimate)}{shareHint ? ` · ${shareHint}` : ""}</span>
       {:else}
-        <strong>Trim</strong>
-        <span>Drag the handles at each end, or press I and O at the playhead{shareHint ? ` · ${shareHint}` : ""}</span>
+        <strong>{t("Trim")}</strong>
+        <span>{t("Drag the handles at each end, or press I and O at the playhead")}{shareHint ? ` · ${shareHint}` : ""}</span>
       {/if}
     </div>
 
@@ -580,14 +582,14 @@
       {#if job.state !== "idle" && job.state !== "error"}
         <!-- the cut mode only matters before saving -->
       {:else if trimmed && plan.onKeyframe}
-        <span class="badge ok" title="The start is on a keyframe, so the clip is copied exactly, with no quality loss">Lossless · exact</span>
+        <span class="badge ok" title={t("The start is on a keyframe, so the clip is copied exactly, with no quality loss")}>{t("Lossless · exact")}</span>
       {:else if trimmed}
         <Segmented
-          label="How to cut"
+          label={t("How to cut")}
           value={preferLossless ? "lossless" : "exact"}
           options={[
-            { value: "exact", label: "Exact", title: "Starts on the frame you chose. Video is re-encoded at high quality; audio is copied." },
-            { value: "lossless", label: `Lossless · ${plan.snapBy.toFixed(1)} s earlier`, title: "No quality loss, but the clip starts at the previous keyframe" },
+            { value: "exact", label: t("Exact"), title: t("Starts on the frame you chose. Video is re-encoded at high quality; audio is copied.") },
+            { value: "lossless", label: t("Lossless · {n} s earlier", { n: plan.snapBy.toFixed(1) }), title: t("No quality loss, but the clip starts at the previous keyframe") },
           ]}
           onchange={(v) => (preferLossless = v === "lossless")}
         />
@@ -596,71 +598,71 @@
 
     <div class="save">
       {#if job.state === "running"}
-        <span class="what">{job.share ? "Preparing for Discord…" : job.drive ? "Copying to Drive folder…" : "Saving…"}</span>
-        <div class="progress" role="progressbar" aria-label={job.share ? "Preparing for Discord" : "Saving clip"} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress * 100)}>
+        <span class="what">{job.share ? t("Preparing for Discord…") : job.drive ? t("Copying to Drive folder…") : t("Saving…")}</span>
+        <div class="progress" role="progressbar" aria-label={job.share ? t("Preparing for Discord") : t("Saving clip")} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.progress * 100)}>
           <div style:width="{Math.round(job.progress * 100)}%"></div>
         </div>
         <span class="pct">{Math.round(job.progress * 100)}%</span>
-        <Button variant="ghost" onclick={cancel}>Cancel</Button>
+        <Button variant="ghost" onclick={cancel}>{t("Cancel")}</Button>
       {:else if job.state === "done"}
         {@const saved = job}
         <span class="done" role="status">
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          Saved {clockPrecise(saved.duration)} · {bytes(saved.size)}{saved.lossless ? " · lossless" : ""}
+          {t("Saved {duration} · {size}", { duration: clockPrecise(saved.duration), size: bytes(saved.size) })}{saved.lossless ? ` · ${t("lossless")}` : ""}
         </span>
-        <Button variant="ghost" onclick={() => onopensaved(saved.path)}>Play it</Button>
-        <Button variant="ghost" onclick={resetTrim}>New trim</Button>
+        <Button variant="ghost" onclick={() => onopensaved(saved.path)}>{t("Play it")}</Button>
+        <Button variant="ghost" onclick={resetTrim}>{t("New trim")}</Button>
       {:else if job.state === "drive"}
         {@const dv = job}
         <span class="done" role="status" title={dv.path}>
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          {dv.already ? "Already in your Google Drive folder" : "Saved in your Google Drive folder"}<span class="sub">· uploads when Google Drive for desktop syncs</span>
+          {dv.already ? t("Already in your Google Drive folder") : t("Saved in your Google Drive folder")}<span class="sub">· {t("uploads when Google Drive for desktop syncs")}</span>
         </span>
-        <Button variant="ghost" onclick={() => api.driveReveal(dv.path).catch((e) => onerror(String(e)))}>Show file</Button>
-        <Button variant="ghost" onclick={() => (job = { state: "idle" })}>Done</Button>
+        <Button variant="ghost" onclick={() => api.driveReveal(dv.path).catch((e) => onerror(String(e)))}>{t("Show file")}</Button>
+        <Button variant="ghost" onclick={() => (job = { state: "idle" })}>{t("Done")}</Button>
       {:else if job.state === "shared"}
         {@const sh = job}
         {#if sh.clipboardError}
-          <span class="err" role="alert" title={sh.clipboardError}>Ready, but not on the clipboard: {sh.clipboardError}</span>
+          <span class="err" role="alert" title={sh.clipboardError}>{t("Ready, but not on the clipboard: {error}", { error: sh.clipboardError })}</span>
         {:else}
-          <span class="done" role="status" title="{sh.height}p{sh.fps} · {bytes(sh.size)}{sh.copied ? ' · no re-encode' : ''}">
+          <span class="done" role="status" title={`${sh.height}p${sh.fps} · ${bytes(sh.size)}${sh.copied ? ` · ${t("no re-encode")}` : ""}`}>
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            Copied: paste it in Discord with Ctrl+V · {sh.height}p{sh.fps} · {bytes(sh.size)}
+            {t("Copied: paste it in Discord with Ctrl+V")} · {sh.height}p{sh.fps} · {bytes(sh.size)}
           </span>
         {/if}
-        <Button variant="ghost" onclick={() => copyAgain(sh.path)}>Copy again</Button>
-        <Button variant="ghost" onclick={() => api.shareReveal(sh.path).catch((e) => onerror(String(e)))}>Show file</Button>
-        <Button variant="ghost" onclick={() => (job = { state: "idle" })}>Done</Button>
+        <Button variant="ghost" onclick={() => copyAgain(sh.path)}>{t("Copy again")}</Button>
+        <Button variant="ghost" onclick={() => api.shareReveal(sh.path).catch((e) => onerror(String(e)))}>{t("Show file")}</Button>
+        <Button variant="ghost" onclick={() => (job = { state: "idle" })}>{t("Done")}</Button>
       {:else}
         {#if job.state === "error"}<span class="err" role="alert" title={job.message}>{job.message}</span>{/if}
-        {#if trimmed}<Button variant="ghost" onclick={resetTrim}>Reset</Button>{/if}
-        <Button onclick={save} disabled={!trimmed || !!failed} title="Save the selection as a new clip next to the original (Ctrl+S). The original is kept.">
-          Save clip
+        {#if trimmed}<Button variant="ghost" onclick={resetTrim}>{t("Reset")}</Button>{/if}
+        <Button onclick={save} disabled={!trimmed || !!failed} title={t("Save the selection as a new clip next to the original (Ctrl+S). The original is kept.")}>
+          {t("Save clip")}
         </Button>
         {#if drive?.dir}
           <Button
             onclick={saveToDrive}
             disabled={!!failed}
             title={trimmed
-              ? "Save the selection into your Google Drive folder. Google Drive for desktop uploads it from there."
-              : "Copy this clip into your Google Drive folder (checked after copying). Google Drive for desktop uploads it from there."}
+              ? t("Save the selection into your Google Drive folder. Google Drive for desktop uploads it from there.")
+              : t("Copy this clip into your Google Drive folder (checked after copying). Google Drive for desktop uploads it from there.")}
           >
-            Save to Drive
+            {t("Save to Drive")}
           </Button>
         {/if}
         <Button
           variant="primary"
           onclick={shareToDiscord}
           disabled={!!failed || !sharePlan?.plan}
-          title={sharePlan?.plan ? `Makes a copy under ${sharePlan.limit_mb} MB and puts the file on the clipboard. Paste it in any Discord chat.` : shareHint}
+          title={sharePlan?.plan ? t("Makes a copy under {mb} MB and puts the file on the clipboard. Paste it in any Discord chat.", { mb: sharePlan.limit_mb }) : shareHint}
         >
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2v8M4.5 5.5 8 2l3.5 3.5M3 10v3h10v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          Share to Discord
+          {t("Share to Discord")}
         </Button>
       {/if}
     </div>
   </div>
-  <p class="keys">Space play/pause · I/O set start/end · middle-drag moves the selection · Ctrl+S save · ←/→ 5 s · J/L 10 s · ,/. frame · ↑/↓ volume · Page Up/Down other clips · Esc back</p>
+  <p class="keys">{t("Space play/pause · I/O set start/end · middle-drag moves the selection · Ctrl+S save · ←/→ 5 s · J/L 10 s · ,/. frame · ↑/↓ volume · Page Up/Down other clips · Esc back")}</p>
 </div>
 
 <style>

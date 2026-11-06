@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "./i18n.svelte";
   import Button from "./Button.svelte";
   import Keycaps from "./Keycaps.svelte";
   import { heldModifiers, hotkeyFromEvent } from "./format";
@@ -70,7 +71,7 @@
       class="capture"
       role="textbox"
       tabindex="0"
-      aria-label="Press the new hotkey. Escape cancels."
+      aria-label={t("Press the new hotkey. Escape cancels.")}
       {onkeydown}
       {onkeyup}
       onblur={stop}
@@ -78,21 +79,21 @@
       {#if held.length}
         <Keycaps hotkey={held.join("+") + "+…"} dim />
       {:else}
-        <span class="prompt">Press keys…</span>
+        <span class="prompt">{t("Press keys…")}</span>
       {/if}
     </div>
-    <Button variant="ghost" onclick={stop}>Cancel</Button>
+    <Button variant="ghost" onclick={stop}>{t("Cancel")}</Button>
   {:else}
     <Keycaps hotkey={value} />
-    <Button onclick={start}>Change</Button>
+    <Button onclick={start}>{t("Change")}</Button>
   {/if}
 </div>
 {#if error}
   <p class="msg error" role="alert">{error}</p>
 {:else if capturing}
-  <p class="msg">Use a modifier (Ctrl, Alt, Shift, Win) with a key, or a single F-key. Esc cancels.</p>
+  <p class="msg">{t("Use a modifier (Ctrl, Alt, Shift, Win) with a key, or a single F-key. Esc cancels.")}</p>
 {:else if conflict}
-  <p class="msg warn" role="alert">Another program is using {value}. Choose a different hotkey.</p>
+  <p class="msg warn" role="alert">{t("Another program is using {key}. Choose a different hotkey.", { key: value })}</p>
 {/if}
 </div>
 

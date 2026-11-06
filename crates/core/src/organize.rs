@@ -78,7 +78,7 @@ impl std::fmt::Display for OrgError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OrgError::Invalid(s) => f.write_str(s),
-            OrgError::NotFound => f.write_str("that folder no longer exists"),
+            OrgError::NotFound => f.write_str(&crate::tr!("that folder no longer exists")),
         }
     }
 }
@@ -103,20 +103,24 @@ pub fn is_key(k: &str) -> bool {
 pub fn folder_name(raw: &str) -> Result<String, OrgError> {
     let name = clean(raw);
     if name.is_empty() {
-        return Err(OrgError::Invalid("Give the folder a name.".into()));
+        return Err(OrgError::Invalid(crate::tr!("Give the folder a name.")));
     }
     if name.chars().count() > MAX_FOLDER_NAME {
-        return Err(OrgError::Invalid(format!(
-            "Folder names can be up to {MAX_FOLDER_NAME} characters."
+        return Err(OrgError::Invalid(crate::tr!(
+            "Folder names can be up to {n} characters.",
+            n = MAX_FOLDER_NAME
         )));
     }
     if let Some(c) = name.chars().find(|c| r#"<>:"/\|?*"#.contains(*c)) {
-        return Err(OrgError::Invalid(format!("Folder names can't contain {c}")));
+        return Err(OrgError::Invalid(crate::tr!(
+            "Folder names can't contain {char}",
+            char = c
+        )));
     }
     if name.ends_with('.') {
-        return Err(OrgError::Invalid(
-            "Folder names can't end with a dot.".into(),
-        ));
+        return Err(OrgError::Invalid(crate::tr!(
+            "Folder names can't end with a dot."
+        )));
     }
     let base = name.split('.').next().unwrap_or("").trim().to_uppercase();
     let reserved = [
@@ -124,8 +128,9 @@ pub fn folder_name(raw: &str) -> Result<String, OrgError> {
         "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     if reserved.contains(&base.as_str()) {
-        return Err(OrgError::Invalid(format!(
-            "\"{name}\" is reserved by Windows."
+        return Err(OrgError::Invalid(crate::tr!(
+            "\"{name}\" is reserved by Windows.",
+            name = name
         )));
     }
     Ok(name)
@@ -136,9 +141,9 @@ pub fn folder_name(raw: &str) -> Result<String, OrgError> {
 pub fn folder_path(raw: &str) -> Result<String, OrgError> {
     let parts: Vec<&str> = raw.split(['\\', '/']).collect();
     if parts.len() > crate::library::MAX_DEPTH {
-        return Err(OrgError::Invalid(format!(
-            "Folders go up to {} levels deep.",
-            crate::library::MAX_DEPTH
+        return Err(OrgError::Invalid(crate::tr!(
+            "Folders go up to {n} levels deep.",
+            n = crate::library::MAX_DEPTH
         )));
     }
     let names = parts
@@ -228,9 +233,9 @@ impl Organize {
         let name = folder_path(name)?;
         let color = Self::check_color(color)?;
         if self.find(&name).is_some() {
-            return Err(OrgError::Invalid(format!(
-                "There's already a folder called \"{}\" there.",
-                leaf_of(&name)
+            return Err(OrgError::Invalid(crate::tr!(
+                "There's already a folder called \"{name}\" there.",
+                name = leaf_of(&name)
             )));
         }
         if let Some(parent) = parent_of(&name)
@@ -257,9 +262,9 @@ impl Organize {
         if let Some(j) = self.find(&to)
             && !self.folders[j].name.eq_ignore_ascii_case(&from)
         {
-            return Err(OrgError::Invalid(format!(
-                "There's already a folder called \"{}\" there.",
-                leaf_of(&to)
+            return Err(OrgError::Invalid(crate::tr!(
+                "There's already a folder called \"{name}\" there.",
+                name = leaf_of(&to)
             )));
         }
         let moved = |name: &str| -> Option<String> {
@@ -387,8 +392,9 @@ impl Organize {
         }
         let t = clean(title);
         if t.chars().count() > MAX_TITLE {
-            return Err(OrgError::Invalid(format!(
-                "Titles can be up to {MAX_TITLE} characters."
+            return Err(OrgError::Invalid(crate::tr!(
+                "Titles can be up to {n} characters.",
+                n = MAX_TITLE
             )));
         }
         if t.is_empty() {
@@ -663,12 +669,20 @@ impl Store {
                         return match Organize::from_json(&b) {
                             Ok(o) if o.version > VERSION => Read::Newer(o.version),
                             Ok(o) => Read::Ok(o.normalize()),
-                            Err(e) => Read::Damaged(format!("{} is damaged: {e}", p.display())),
+                            Err(e) => Read::Damaged(crate::tr!(
+                                "{path} is damaged: {error}",
+                                path = p.display(),
+                                error = e
+                            )),
                         };
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Read::Missing,
                     Err(e) => {
-                        last = format!("couldn't read {}: {e}", p.display());
+                        last = crate::tr!(
+                            "couldn't read {path}: {error}",
+                            path = p.display(),
+                            error = e
+                        );
                         if attempt < 5 {
                             std::thread::sleep(std::time::Duration::from_millis(50));
                         }
@@ -678,14 +692,15 @@ impl Store {
             Read::Busy(last)
         };
         let newer = |v: u32| {
-            format!(
-                "Your folders were saved by a newer JondisClip (format {v}); this version won't change them."
+            crate::tr!(
+                "Your folders were saved by a newer JondisClip (format {v}); this version won't change them.",
+                v = v
             )
         };
         match read(&self.path) {
             Read::Ok(o) => Ok((o, true)),
             Read::Newer(v) => Err(newer(v)),
-            Read::Busy(e) => Err(format!("{e}. Try again in a moment.")),
+            Read::Busy(e) => Err(crate::tr!("{error}. Try again in a moment.", error = e)),
             Read::Missing => match read(&self.backup()) {
                 Read::Ok(o) => Ok((o, false)),
                 Read::Newer(v) => Err(newer(v)),
@@ -723,14 +738,14 @@ impl Store {
         })();
         if let Err(e) = written {
             let _ = std::fs::remove_file(&tmp);
-            return Err(format!("couldn't save the library: {e}"));
+            return Err(crate::tr!("couldn't save the library: {error}", error = e));
         }
         if rotate && self.path.exists() {
             let _ = std::fs::copy(&self.path, self.backup());
         }
         std::fs::rename(&tmp, &self.path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            format!("couldn't save the library: {e}")
+            crate::tr!("couldn't save the library: {error}", error = e)
         })
     }
 

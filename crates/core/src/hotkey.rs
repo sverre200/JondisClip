@@ -31,11 +31,14 @@ pub enum HotkeyError {
 impl fmt::Display for HotkeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Empty => write!(f, "hotkey is empty"),
-            Self::UnknownKey(k) => write!(f, "unknown key \"{k}\""),
-            Self::NoKey => write!(f, "hotkey has modifiers but no key"),
-            Self::TwoKeys => write!(f, "hotkey has more than one key"),
-            Self::NeedsModifier(k) => write!(f, "\"{k}\" needs Ctrl, Alt, Shift or Win"),
+            Self::Empty => f.write_str(&crate::tr!("hotkey is empty")),
+            Self::UnknownKey(k) => f.write_str(&crate::tr!("unknown key \"{key}\"", key = k)),
+            Self::NoKey => f.write_str(&crate::tr!("hotkey has modifiers but no key")),
+            Self::TwoKeys => f.write_str(&crate::tr!("hotkey has more than one key")),
+            Self::NeedsModifier(k) => f.write_str(&crate::tr!(
+                "\"{key}\" needs Ctrl, Alt, Shift or Win",
+                key = k
+            )),
         }
     }
 }

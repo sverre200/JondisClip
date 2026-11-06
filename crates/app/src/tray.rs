@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
+use jondisclip_core::tr;
 use jondisclip_engine::encoder::Codec;
 use jondisclip_engine::recorder::{Recorder, default_buffer_dir};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -198,6 +199,7 @@ pub fn load_settings(path: &Path) -> Settings {
 
 pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), String> {
     let settings = load_settings(&settings_path);
+    jondisclip_core::settings::apply_language(&settings);
     let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| e.to_string())?;
     let class = WNDCLASSW {
         lpfnWndProc: Some(wndproc),
@@ -310,8 +312,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_APP_SECOND_INSTANCE => {
             with_app(|a| {
                 a.balloon(
-                    "JondisClip is already running",
-                    "Right-click the tray icon for options.",
+                    &tr!("JondisClip is already running"),
+                    &tr!("Right-click the tray icon for options."),
                     false,
                 )
             });
@@ -461,15 +463,20 @@ impl App {
                     format!(" · {codec} {}×{} {} fps", i.width, i.height, i.fps)
                 });
                 format!(
-                    "Buffering last {}{}",
-                    replay_label(self.settings.replay_seconds),
+                    "{}{}",
+                    tr!(
+                        "Buffering last {length}",
+                        length = replay_label(self.settings.replay_seconds)
+                    ),
                     detail.unwrap_or_default()
                 )
             }
-            Status::Paused => "Paused".into(),
-            Status::Suspended => "Sleeping".into(),
-            Status::LowDisk => "Paused: low disk space".into(),
-            Status::Restarting { reason, .. } => format!("Restarting ({reason})"),
+            Status::Paused => tr!("Paused"),
+            Status::Suspended => tr!("Sleeping"),
+            Status::LowDisk => tr!("Paused: low disk space"),
+            Status::Restarting { reason, .. } => {
+                tr!("Restarting ({reason})", reason = reason_label(reason))
+            }
         }
     }
 
@@ -478,7 +485,7 @@ impl App {
         let state = self.icon_state();
         let mut tip = format!("JondisClip · {}", self.status_text());
         if !self.hotkey_ok {
-            tip.push_str(" · hotkey unavailable");
+            tip.push_str(&format!(" · {}", tr!("hotkey unavailable")));
         }
         if self
             .shown
@@ -540,8 +547,11 @@ impl App {
             warning!("hotkey {hk} is already in use by another program");
             if notify {
                 self.balloon(
-                    "Save hotkey unavailable",
-                    &format!("{hk} is used by another program. Choose another hotkey in settings."),
+                    &tr!("Save hotkey unavailable"),
+                    &tr!(
+                        "{key} is used by another program. Choose another hotkey in settings.",
+                        key = hk
+                    ),
                     true,
                 );
             }
@@ -571,8 +581,8 @@ impl App {
                 if let Some(e) = &i.audio_error {
                     warning!("audio unavailable: {e}");
                     self.balloon(
-                        "Recording without audio",
-                        "Audio capture couldn't start. Video is still recorded.",
+                        &tr!("Recording without audio"),
+                        &tr!("Audio capture couldn't start. Video is still recorded."),
                         true,
                     );
                 }
@@ -586,8 +596,8 @@ impl App {
                 error!("recorder failed to start: {e} (retry in {delay} s)");
                 if self.failures == 3 {
                     self.balloon(
-                        "JondisClip can't record",
-                        &format!("{e}. Retrying automatically."),
+                        &tr!("JondisClip can't record"),
+                        &tr!("{error}. Retrying automatically.", error = e),
                         true,
                     );
                 }
@@ -683,8 +693,8 @@ impl App {
                 self.stop_recorder();
                 self.status = Status::LowDisk;
                 self.balloon(
-                    "Buffering paused: low disk space",
-                    "Free up some space and JondisClip will resume automatically.",
+                    &tr!("Buffering paused: low disk space"),
+                    &tr!("Free up some space and JondisClip will resume automatically."),
                     true,
                 );
             }
@@ -710,6 +720,7 @@ impl App {
     }
 
     fn apply_settings(&mut self, new: Settings) {
+        jondisclip_core::settings::apply_language(&new);
         let old = std::mem::replace(&mut self.settings, new);
         if old.hotkey != self.settings.hotkey {
             self.register_hotkey(true);
@@ -768,8 +779,8 @@ impl App {
     fn save_clip(&mut self) {
         if self.quit_requested.is_some() {
             self.balloon(
-                "Clip not saved",
-                "JondisClip is quitting after the clip it's still saving.",
+                &tr!("Clip not saved"),
+                &tr!("JondisClip is quitting after the clip it's still saving."),
                 true,
             );
             return;
@@ -788,22 +799,33 @@ impl App {
                 }
             }
             self.balloon(
-                "Clip not saved",
-                &format!("JondisClip isn't buffering ({}).", self.status_text()),
+                &tr!("Clip not saved"),
+                &tr!(
+                    "JondisClip isn't buffering ({status}).",
+                    status = self.status_text()
+                ),
                 true,
             );
             return;
         };
         let app = naming::foreground_app().unwrap_or_else(|| "Desktop".into());
         let dir = self.settings.save_dir_or(&self.default_save_dir);
-        let path = naming::clip_path(&dir, &app, &naming::timestamp());
+        let path = naming::clip_path(
+            &dir,
+            &app,
+            &naming::file_timestamp(&self.settings.date_format),
+        );
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
             error!("cannot create {}: {e}", parent.display());
             self.balloon(
-                "Clip not saved",
-                &format!("Can't write to {}: {e}", parent.display()),
+                &tr!("Clip not saved"),
+                &tr!(
+                    "Can't write to {path}: {error}",
+                    path = parent.display(),
+                    error = e
+                ),
                 true,
             );
             return;
@@ -875,8 +897,8 @@ impl App {
         self.status = Status::Paused;
         self.refresh();
         self.balloon(
-            "Finishing your clip",
-            "JondisClip quits as soon as the clip is saved.",
+            &tr!("Finishing your clip"),
+            &tr!("JondisClip quits as soon as the clip is saved."),
             false,
         );
     }
@@ -897,7 +919,11 @@ impl App {
                         .unwrap_or_default();
                     info!("saved {:?}", files);
                     self.balloon(
-                        &format!("Clip saved · {} · {}", o.app, replay_label(o.seconds)),
+                        &tr!(
+                            "Clip saved · {game} · {length}",
+                            game = o.app,
+                            length = replay_label(o.seconds)
+                        ),
                         &name,
                         false,
                     );
@@ -910,7 +936,7 @@ impl App {
                         }
                     }
                     self.saved_flash_until = None;
-                    self.balloon("Couldn't save clip", &e, true);
+                    self.balloon(&tr!("Couldn't save clip"), &e, true);
                 }
             }
         }
@@ -955,8 +981,11 @@ impl App {
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let save_label = format!(
-                "Save last {}\t{}",
-                replay_label(self.settings.replay_seconds),
+                "{}\t{}",
+                tr!(
+                    "Save last {length}",
+                    length = replay_label(self.settings.replay_seconds)
+                ),
                 self.settings.hotkey()
             );
             let save_flags = if self.recorder.is_some() {
@@ -966,17 +995,17 @@ impl App {
             };
             let _ = AppendMenuW(menu, save_flags, ID_SAVE as usize, &menu_text(&save_label));
             let pause_label = if matches!(self.status, Status::Paused) {
-                "Resume buffering"
+                tr!("Resume buffering")
             } else {
-                "Pause buffering"
+                tr!("Pause buffering")
             };
-            let _ = AppendMenuW(menu, MF_STRING, ID_PAUSE as usize, &menu_text(pause_label));
+            let _ = AppendMenuW(menu, MF_STRING, ID_PAUSE as usize, &menu_text(&pause_label));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(
                 menu,
                 MF_STRING | MF_POPUP,
                 replay.0 as usize,
-                &menu_text("Replay length"),
+                &menu_text(&tr!("Replay length")),
             );
             let mic_flags = if self.settings.microphone {
                 MF_STRING | MF_CHECKED
@@ -987,33 +1016,33 @@ impl App {
                 menu,
                 mic_flags,
                 ID_MIC as usize,
-                &menu_text("Record microphone"),
+                &menu_text(&tr!("Record microphone")),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
                 ID_LIBRARY as usize,
-                &menu_text("Clip library"),
+                &menu_text(&tr!("Clip library")),
             );
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
                 ID_OPEN_FOLDER as usize,
-                &menu_text("Open clips folder"),
+                &menu_text(&tr!("Open clips folder")),
             );
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
                 ID_EDIT_SETTINGS as usize,
-                &menu_text("Settings…"),
+                &menu_text(&tr!("Settings…")),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
                 ID_QUIT as usize,
-                &menu_text("Quit JondisClip"),
+                &menu_text(&tr!("Quit JondisClip")),
             );
             if self.recorder.is_some() {
                 let _ = SetMenuDefaultItem(menu, ID_SAVE, 0);
@@ -1132,14 +1161,14 @@ impl App {
                 }
                 if let Err(e) = cmd.spawn() {
                     error!("could not start {}: {e}", ui.display());
-                    self.balloon("Couldn't open JondisClip", &e.to_string(), true);
+                    self.balloon(&tr!("Couldn't open JondisClip"), &e.to_string(), true);
                 }
             }
             _ => {
                 warning!("jondisclip-ui.exe not found next to the tray app");
                 self.balloon(
-                    "JondisClip window missing",
-                    "jondisclip-ui.exe wasn't found next to jondisclip.exe.",
+                    &tr!("JondisClip window missing"),
+                    &tr!("jondisclip-ui.exe wasn't found next to jondisclip.exe."),
                     true,
                 );
             }
@@ -1166,6 +1195,18 @@ impl App {
 }
 
 /// First clause of an error, short enough for a tooltip.
+/// A restart reason for the tooltip and menu. The known ones are translated;
+/// errors from the recorder stay as they are (they're also in the log).
+fn reason_label(r: &str) -> String {
+    match r {
+        "resuming from sleep" => tr!("resuming from sleep"),
+        "display changed" => tr!("display changed"),
+        "settings changed" => tr!("settings changed"),
+        "microphone setting changed" => tr!("microphone setting changed"),
+        other => other.to_string(),
+    }
+}
+
 fn short_reason(e: &str) -> String {
     let s = e.split(['\n', ';']).next().unwrap_or(e).trim();
     if s.chars().count() > 60 {

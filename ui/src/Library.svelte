@@ -3,6 +3,7 @@
   import { api, FOLDER_COLORS, MAX_DEPTH, isWithin, thumbUrl, type Clip, type ExportEvent, type Folder, type FolderColor, type Item, type LibraryView, type MoveResult, type PendingFolder } from "./lib/api";
   import { bytes, clock, dayLabel, fromWithin, whenShort } from "./lib/format";
   import Banner from "./lib/Banner.svelte";
+  import { t, tn } from "./lib/i18n.svelte";
   import Button from "./lib/Button.svelte";
   import ClipCard from "./lib/ClipCard.svelte";
   import ContextMenu, { type MenuEntry, type MenuItem } from "./lib/ContextMenu.svelte";
@@ -84,7 +85,7 @@
     try {
       const plan = await api.sharePlan(c.id, 0, c.probe.duration);
       if (!plan.plan) {
-        onerror(`${nameOf(c)} is too long for ${plan.limit_mb} MB. Open it and trim it to under ${clock(plan.max_seconds ?? 0)}.`);
+        onerror(t("{name} is too long for {mb} MB. Open it and trim it to under {time}.", { name: nameOf(c), mb: plan.limit_mb, time: clock(plan.max_seconds ?? 0) }));
         return;
       }
       job = { kind: "share", clip: c, id: null, progress: 0 };
@@ -104,7 +105,7 @@
       if (r.already || r.job === null) {
         job = null;
         await api.clipDriveMark(c.key, r.output).catch(() => {});
-        tell(`${nameOf(c)} is already in your Google Drive folder`, 4000);
+        tell(t("{name} is already in your Google Drive folder", { name: nameOf(c) }), 4000);
         await refresh();
       } else if (job) job = { ...job, id: r.job };
     } catch (e) {
@@ -121,11 +122,11 @@
       job = null;
       if (j.kind === "share") {
         const err = e.clipboard && "Err" in e.clipboard ? e.clipboard.Err : null;
-        if (err) onerror(`The Discord copy of ${nameOf(j.clip)} is ready but couldn't go on the clipboard: ${err}`);
-        else tell(`Copied ${nameOf(j.clip)}: paste it in Discord with Ctrl+V · ${e.share ? `${e.share.height}p${e.share.fps} · ` : ""}${bytes(e.size)}`, 6000);
+        if (err) onerror(t("The Discord copy of {name} is ready but couldn't go on the clipboard: {error}", { name: nameOf(j.clip), error: err }));
+        else tell(`${t("Copied {name}: paste it in Discord with Ctrl+V", { name: nameOf(j.clip) })} · ${e.share ? `${e.share.height}p${e.share.fps} · ` : ""}${bytes(e.size)}`, 6000);
       } else {
         await api.clipDriveMark(j.clip.key, e.path).catch(() => {});
-        tell(`Saved ${nameOf(j.clip)} in your Google Drive folder · uploads when Google Drive for desktop syncs`, 6000);
+        tell(t("Saved {name} in your Google Drive folder · uploads when Google Drive for desktop syncs", { name: nameOf(j.clip) }), 6000);
         await refresh();
       }
     } else if (e.kind === "error") {
@@ -150,8 +151,11 @@
 
   /** Reports a file move: what moved, and what couldn't (nothing is lost). */
   function moved(r: MoveResult, where: string) {
-    if (r.failed.length) onerror(`${r.moved ? `Moved ${r.moved}, but ` : ""}${r.failed.length === 1 ? "1 clip" : `${r.failed.length} clips`} couldn't be moved: ${r.failed[0]}`);
-    else if (r.moved) tell(r.moved === 1 ? `Moved to ${where}` : `Moved ${r.moved} clips to ${where}`);
+    if (r.failed.length)
+      onerror(
+        `${r.moved ? `${t("Moved {n}, but", { n: r.moved })} ` : ""}${tn(r.failed.length, "1 clip couldn't be moved: {error}", "{n} clips couldn't be moved: {error}", { error: r.failed[0] ?? "" })}`,
+      );
+    else if (r.moved) tell(tn(r.moved, "Moved to {where}", "Moved {n} clips to {where}", { where }));
   }
 
   // One scan at a time; a request during a scan runs once after it.
@@ -171,7 +175,7 @@
       org = { folders: r.folders, pending: r.pending };
       afterLoad?.();
       afterLoad = null;
-      loadError = r.rootOk ? null : `The clips folder ${r.view.root} can't be reached. Is the drive connected?`;
+      loadError = r.rootOk ? null : t("The clips folder {path} can't be reached. Is the drive connected?", { path: r.view.root });
       onscanned?.(clips);
       const byKey = new Map(r.view.clips.filter((c) => c.key).map((c) => [c.key, c.id]));
       const ids = new Set(r.view.clips.map((c) => c.id));
@@ -401,7 +405,7 @@
 
   function open(c: Clip) {
     if (c.error) {
-      onerror(`This clip can't be read: ${c.error}`);
+      onerror(t("This clip can't be read: {error}", { error: c.error }));
       return;
     }
     onopen(c, shown);
@@ -415,7 +419,7 @@
   // ---- actions
 
   /** A clip whose file couldn't be read yet has no key: can't be organised. */
-  const busyMsg = "That clip couldn't be read just now (in use?). Refresh and try again.";
+  const busyMsg = $derived(t("That clip couldn't be read just now (in use?). Refresh and try again."));
 
   const items = (cs: Clip[]): Item[] => cs.map((c) => ({ id: c.id, key: c.key }));
 
@@ -425,7 +429,7 @@
     const todo = cs.filter((c) => (folderOf.get(c.id)?.id ?? null) !== (folder?.id ?? null));
     if (!todo.length) return;
     try {
-      moved(await api.clipsMove(items(todo), folder?.name ?? null), folder?.name ?? "its game folder");
+      moved(await api.clipsMove(items(todo), folder?.name ?? null), folder?.name ?? t("its game folder"));
     } catch (e) {
       onerror(String(e));
     }
@@ -451,14 +455,14 @@
   async function copyFile(c: Clip) {
     try {
       await api.clipCopyFile(c.id);
-      tell("Copied: paste it anywhere with Ctrl+V");
+      tell(t("Copied: paste it anywhere with Ctrl+V"));
     } catch (e) {
       onerror(String(e));
     }
   }
 
   function askDelete(cs: Clip[]) {
-    const label = cs.length === 1 ? `“${cs[0]!.title ?? cs[0]!.file_name}”` : `${cs.length} clips`;
+    const label = cs.length === 1 ? `“${cs[0]!.title ?? cs[0]!.file_name}”` : t("{n} clips", { n: cs.length });
     dialog = { kind: "delete-clips", ids: cs.map((c) => c.id), label };
   }
 
@@ -466,7 +470,7 @@
     dialog = null;
     try {
       const n = await api.clipsDelete(ids);
-      tell(n === 1 ? "Moved to the Recycle Bin" : `Moved ${n} clips to the Recycle Bin`);
+      tell(tn(n, "Moved to the Recycle Bin", "Moved {n} clips to the Recycle Bin"));
     } catch (e) {
       onerror(String(e));
     }
@@ -499,7 +503,7 @@
     const f = org.folders.find((x) => !before.has(x.id));
     const cs = clips.filter((c) => moveIds.includes(c.id));
     if (f && cs.length) await moveTo(cs, f);
-    else if (f) tell(`Created ${f.leaf}: drag clips onto it`);
+    else if (f) tell(t("Created {name}: drag clips onto it", { name: f.leaf }));
   }
 
   async function renameFolder(f: Folder, name: string) {
@@ -532,7 +536,7 @@
       cur = parent ? `${parent}\\${f.leaf}` : f.leaf;
       follow(id, cur);
       await refresh();
-      tell(parent ? `Moved ${f.leaf} into ${org.folders.find((x) => x.id === parent)?.leaf ?? parent}` : `Moved ${f.leaf} to the top level`);
+      tell(parent ? t("Moved {name} into {parent}", { name: f.leaf, parent: org.folders.find((x) => x.id === parent)?.leaf ?? parent }) : t("Moved {name} to the top level", { name: f.leaf }));
     }
     const ids = org.folders.map((x) => x.id).filter((x) => x.toLowerCase() !== cur.toLowerCase());
     const at = before ? ids.indexOf(before) : -1;
@@ -547,12 +551,14 @@
     if (folderView === f.id || isWithin(folderView, f.id)) folderView = f.parent ?? "all";
     try {
       const r = await api.folderDelete(f.name);
-      if (r.failed.length) onerror(`${r.failed.length === 1 ? "1 clip" : `${r.failed.length} clips`} couldn't be moved out, so the folder ${f.leaf} was kept: ${r.failed[0]}`);
+      const movedOut = r.moved ? `${tn(r.moved, "Moved its clip out.", "Moved its {n} clips out.")} ` : "";
+      if (r.failed.length)
+        onerror(tn(r.failed.length, "1 clip couldn't be moved out, so the folder {name} was kept: {error}", "{n} clips couldn't be moved out, so the folder {name} was kept: {error}", { name: f.leaf, error: r.failed[0] ?? "" }));
       else if (r.kept_dir && r.kept_reason === "in-use")
-        onerror(`${r.moved ? `Moved ${r.moved === 1 ? "its clip" : `its ${r.moved} clips`} out, but the` : "The"} empty folder ${f.leaf} couldn't be removed: another program has it open (a File Explorer window?). Close it and delete the folder again.`);
+        onerror(movedOut + t("The empty folder {name} couldn't be removed: another program has it open (a File Explorer window?). Close it and delete the folder again.", { name: f.leaf }));
       else if (r.kept_dir)
-        onerror(`${r.moved ? `Moved ${r.moved === 1 ? "its clip" : `its ${r.moved} clips`} out, but` : ""} ${f.leaf} still has other files (${r.kept_files.join(", ")}), so its Windows folder was kept.`.trim());
-      else tell(r.moved ? `Deleted ${f.leaf}. Its ${r.moved === 1 ? "clip is" : `${r.moved} clips are`} back in their game folders.` : `Deleted ${f.leaf}`);
+        onerror(movedOut + t("{name} still has other files ({files}), so its Windows folder was kept.", { name: f.leaf, files: r.kept_files.join(", ") }));
+      else tell(r.moved ? tn(r.moved, "Deleted {name}. Its clip is back in its game folder.", "Deleted {name}. Its {n} clips are back in their game folders.", { name: f.leaf }) : t("Deleted {name}", { name: f.leaf }));
     } catch (e) {
       onerror(String(e));
     }
@@ -576,8 +582,8 @@
   function moveMenu(cs: Clip[]): MenuItem[] {
     const here = cs.length === 1 ? folderOf.get(cs[0]!.id)?.id : undefined;
     const items: MenuItem[] = tree.map((f) => ({ label: pathLabel(f.id), dot: f.color, checked: f.id === here, action: () => moveTo(cs, f) }));
-    items.push({ label: "Not in a folder", checked: cs.length === 1 && !here, action: () => moveTo(cs, null) });
-    items.push({ label: "New folder…", action: () => newFolder(cs.map((c) => c.id), null) });
+    items.push({ label: t("Not in a folder"), checked: cs.length === 1 && !here, action: () => moveTo(cs, null) });
+    items.push({ label: t("New folder…"), action: () => newFolder(cs.map((c) => c.id), null) });
     return items;
   }
 
@@ -592,24 +598,24 @@
       x: e.clientX,
       y: e.clientY,
       items: [
-        { label: "Open", shortcut: "Enter", disabled: many || !!c.error, action: () => open(c) },
-        { label: "Rename", shortcut: "F2", disabled: many, action: () => rename(c) },
-        { label: many ? `Move ${cs.length} clips to` : "Move to folder", submenu: moveMenu(cs) },
+        { label: t("Open"), shortcut: "Enter", disabled: many || !!c.error, action: () => open(c) },
+        { label: t("Rename"), shortcut: "F2", disabled: many, action: () => rename(c) },
+        { label: many ? t("Move {n} clips to", { n: cs.length }) : t("Move to folder"), submenu: moveMenu(cs) },
         "separator",
-        { label: "Share to Discord", disabled: many || !!c.error || !!job, action: () => void shareClip(c) },
+        { label: t("Share to Discord"), disabled: many || !!c.error || !!job, action: () => void shareClip(c) },
         ...(driveDir
           ? [
               c.in_drive
-                ? { label: "Show in Drive", disabled: many, action: () => api.driveReveal(c.in_drive!).catch((err) => onerror(String(err))) }
-                : { label: "Save to Drive", disabled: many || !!c.error || !!job, action: () => void saveClipToDrive(c) },
+                ? { label: t("Show in Drive"), disabled: many, action: () => api.driveReveal(c.in_drive!).catch((err) => onerror(String(err))) }
+                : { label: t("Save to Drive"), disabled: many || !!c.error || !!job, action: () => void saveClipToDrive(c) },
             ]
           : []),
         "separator",
-        { label: "Show in folder", disabled: many, action: () => api.showInFolder(c.id).catch((err) => onerror(String(err))) },
-        { label: "Copy file", disabled: many, action: () => copyFile(c) },
-        { label: "Open in default player", disabled: many, action: () => api.openExternal(c.id).catch((err) => onerror(String(err))) },
+        { label: t("Show in folder"), disabled: many, action: () => api.showInFolder(c.id).catch((err) => onerror(String(err))) },
+        { label: t("Copy file"), disabled: many, action: () => copyFile(c) },
+        { label: t("Open in default player"), disabled: many, action: () => api.openExternal(c.id).catch((err) => onerror(String(err))) },
         "separator",
-        { label: many ? `Delete ${cs.length} clips…` : "Delete…", shortcut: "Del", danger: true, action: () => askDelete(cs) },
+        { label: many ? t("Delete {n} clips…", { n: cs.length }) : t("Delete…"), shortcut: "Del", danger: true, action: () => askDelete(cs) },
       ],
     };
   }
@@ -619,7 +625,7 @@
     // deepest subfolder must still fit within MAX_DEPTH.
     const span = Math.max(1, ...org.folders.filter((x) => isWithin(x.id, f.id)).map((x) => x.depth - f.depth + 1));
     const targets: MenuItem[] = [
-      { label: "Top level", checked: !f.parent, disabled: !f.parent, action: () => placeFolder(f.id, null, null) },
+      { label: t("Top level"), checked: !f.parent, disabled: !f.parent, action: () => placeFolder(f.id, null, null) },
       ...tree
         .filter((x) => x.id !== f.id && !isWithin(x.id, f.id) && x.depth + span <= MAX_DEPTH)
         .map((x) => ({ label: pathLabel(x.id), dot: x.color, checked: x.id === f.parent, disabled: x.id === f.parent, action: () => placeFolder(f.id, x.id, null) })),
@@ -629,18 +635,18 @@
       x: e.clientX,
       y: e.clientY,
       items: [
-        { label: "Open", action: () => (folderView = f.id) },
-        { label: "Show in File Explorer", action: () => api.folderReveal(f.name).catch((err) => onerror(String(err))) },
+        { label: t("Open"), action: () => (folderView = f.id) },
+        { label: t("Show in File Explorer"), action: () => api.folderReveal(f.name).catch((err) => onerror(String(err))) },
         "separator",
-        { label: "New subfolder…", disabled: f.depth >= MAX_DEPTH, action: () => newFolder([], f.id) },
-        { label: "Rename…", action: () => (dialog = { kind: "rename-folder", folder: f, error: null }) },
-        { label: "Move folder to", submenu: targets },
+        { label: t("New subfolder…"), disabled: f.depth >= MAX_DEPTH, action: () => newFolder([], f.id) },
+        { label: t("Rename…"), action: () => (dialog = { kind: "rename-folder", folder: f, error: null }) },
+        { label: t("Move folder to"), submenu: targets },
         {
-          label: "Color",
-          submenu: FOLDER_COLORS.map((c) => ({ label: c.label, dot: c.value, checked: f.color === c.value, action: () => orgDo(api.folderColor(f.name, c.value)) })),
+          label: t("Colour"),
+          submenu: FOLDER_COLORS.map((c) => ({ label: t(c.label), dot: c.value, checked: f.color === c.value, action: () => orgDo(api.folderColor(f.name, c.value)) })),
         },
         "separator",
-        { label: "Delete folder…", danger: true, action: () => (dialog = { kind: "delete-folder", folder: f, count: counts[f.id] ?? 0, subs }) },
+        { label: t("Delete folder…"), danger: true, action: () => (dialog = { kind: "delete-folder", folder: f, count: counts[f.id] ?? 0, subs }) },
       ],
     };
   }
@@ -651,9 +657,9 @@
   // a search or game filter on, a drop goes next to the visible neighbour;
   // hidden clips keep their places.
   const reorderBlocked = (): string | null => {
-    if (!currentFolder) return "Open a folder to arrange clips in your own order";
-    if (!orderFolder) return "Pick one folder in the chips above to arrange its clips";
-    if (sort !== "custom") return `Sorted by ${sorts.find((x) => x.value === sort)?.label.toLowerCase() ?? sort}. Choose Custom order to arrange`;
+    if (!currentFolder) return t("Open a folder to arrange clips in your own order");
+    if (!orderFolder) return t("Pick one folder in the chips above to arrange its clips");
+    if (sort !== "custom") return t("Sorted by {sort}. Choose Custom order to arrange", { sort: sorts.find((x) => x.value === sort)?.label.toLowerCase() ?? sort });
     return null;
   };
 
@@ -670,7 +676,7 @@
           kind: "clips",
           ids: cs.map((x) => x.id),
           keys: cs.map((x) => x.key),
-          label: cs.length > 1 ? `${cs.length} clips` : (c.title ?? c.game),
+          label: cs.length > 1 ? t("{n} clips", { n: cs.length }) : (c.title ?? c.game),
           thumb: c.error ? null : thumbUrl(c.thumb_key),
         };
       },
@@ -828,15 +834,15 @@
   }
 
   const sorts = $derived([
-    ...(currentFolder ? [{ value: "custom", label: "Custom order" }] : []),
-    { value: "newest", label: "Newest first" },
-    { value: "oldest", label: "Oldest first" },
-    { value: "name", label: "Name (A–Z)" },
-    { value: "longest", label: "Longest first" },
-    { value: "largest", label: "Largest first" },
+    ...(currentFolder ? [{ value: "custom", label: t("Custom order") }] : []),
+    { value: "newest", label: t("Newest first") },
+    { value: "oldest", label: t("Oldest first") },
+    { value: "name", label: t("Name (A–Z)") },
+    { value: "longest", label: t("Longest first") },
+    { value: "largest", label: t("Largest first") },
   ]);
   const total = $derived(shown.reduce((n, c) => n + c.size, 0));
-  const viewName = $derived(folderView === "all" ? "All clips" : folderView === "unsorted" ? "Not in a folder" : (currentFolder?.name ?? ""));
+  const viewName = $derived(folderView === "all" ? t("All clips") : folderView === "unsorted" ? t("Not in a folder") : (currentFolder?.name ?? ""));
 </script>
 
 <div class="lib">
@@ -857,17 +863,18 @@
   <div class="main">
   {#each org.pending as p (p.folder)}
     {#if p.ids.length}
-      <div class="pending" role="region" aria-label="Folder update">
+      {@const pt = tn(p.ids.length, "Folders are now real Windows folders. Move the clip in {folder} into one?", "Folders are now real Windows folders. Move the {n} clips in {folder} into one?").split("{folder}")}
+      <div class="pending" role="region" aria-label={t("Folder update")}>
         <span class="fdot" style:background="var(--folder-{p.color})"></span>
-        <span class="ptext">Folders are now real Windows folders. Move the {p.ids.length === 1 ? "clip" : `${p.ids.length} clips`} in <strong>{p.folder}</strong> into one?</span>
-        <Button variant="ghost" onclick={() => resolvePending(p, false)}>Leave them</Button>
-        <Button variant="primary" onclick={() => resolvePending(p, true)}>Move {p.ids.length === 1 ? "clip" : `${p.ids.length} clips`}</Button>
+        <span class="ptext">{pt[0]}<strong>{p.folder}</strong>{pt[1] ?? ""}</span>
+        <Button variant="ghost" onclick={() => resolvePending(p, false)}>{t("Leave them")}</Button>
+        <Button variant="primary" onclick={() => resolvePending(p, true)}>{tn(p.ids.length, "Move clip", "Move {n} clips")}</Button>
       </div>
     {/if}
   {/each}
   {#if !view || view.clips.length || loadError}
   <div class="toolbar">
-    <div class="chips" role="group" aria-label="Filter by folder">
+    <div class="chips" role="group" aria-label={t("Filter by folder")}>
       {#if currentFolder}
         <span class="where" title={pathLabel(currentFolder.id)}>
           <span class="fdot" style:background="var(--folder-{currentFolder.color})"></span>
@@ -878,12 +885,12 @@
           <span class="leaf">{currentFolder.leaf}</span>
         </span>
         {#if hasSubfolders}
-          <button type="button" class="chip" class:on={sub === "all"} aria-pressed={sub === "all"} onclick={() => (sub = "all")} title="This folder and everything in its subfolders">
-            All <span class="n">{counts[currentFolder.id] ?? 0}</span>
+          <button type="button" class="chip" class:on={sub === "all"} aria-pressed={sub === "all"} onclick={() => (sub = "all")} title={t("This folder and everything in its subfolders")}>
+            {t("All")} <span class="n">{counts[currentFolder.id] ?? 0}</span>
           </button>
           {#if own[currentFolder.id]}
-            <button type="button" class="chip" class:on={sub === "here"} aria-pressed={sub === "here"} onclick={() => (sub = "here")} title="Only the clips directly in {currentFolder.leaf}">
-              Only here <span class="n">{own[currentFolder.id]}</span>
+            <button type="button" class="chip" class:on={sub === "here"} aria-pressed={sub === "here"} onclick={() => (sub = "here")} title={t("Only the clips directly in {name}", { name: currentFolder.leaf })}>
+              {t("Only here")} <span class="n">{own[currentFolder.id]}</span>
             </button>
           {/if}
           {#each subfolders as s (s.id)}
@@ -897,18 +904,18 @@
     <div class="tools">
       <label class="search">
         <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg>
-        <input type="search" placeholder="Search clips" aria-label="Search clips" bind:value={query} spellcheck="false" />
+        <input type="search" placeholder={t("Search clips")} aria-label={t("Search clips")} bind:value={query} spellcheck="false" />
       </label>
       {#if games.length > 1 || game}
         <Select
-          label="Filter by game"
+          label={t("Filter by game")}
           value={game}
-          options={[{ value: "", label: `All games (${inView.length})` }, ...games.map(([name, n]) => ({ value: name, label: `${name} (${n})` }))]}
+          options={[{ value: "", label: t("All games ({n})", { n: inView.length }) }, ...games.map(([name, n]) => ({ value: name, label: `${name} (${n})` }))]}
           onchange={(v) => (game = v)}
         />
       {/if}
-      <Select label="Sort clips" value={sort} options={sorts} onchange={(v) => setSort(v as Sort)} />
-      <button type="button" class="icon-btn" title="Refresh" aria-label="Refresh library" onclick={refresh} disabled={refreshing}>
+      <Select label={t("Sort clips")} value={sort} options={sorts} onchange={(v) => setSort(v as Sort)} />
+      <button type="button" class="icon-btn" title={t("Refresh")} aria-label={t("Refresh library")} onclick={refresh} disabled={refreshing}>
         <svg class:spin={refreshing} viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.5v2.8h-2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
       </button>
     </div>
@@ -918,38 +925,39 @@
   {#if loadError}
     <div class="pad">
       <Banner tone="error">
-        Couldn't read the clips folder: {loadError}
-        {#snippet action()}<Button onclick={refresh}>Try again</Button>{/snippet}
+        {t("Couldn't read the clips folder: {error}", { error: loadError })}
+        {#snippet action()}<Button onclick={refresh}>{t("Try again")}</Button>{/snippet}
       </Banner>
     </div>
   {:else if !view}
-    <div class="grid pad" aria-busy="true" aria-label="Loading clips">
+    <div class="grid pad" aria-busy="true" aria-label={t("Loading clips")}>
       {#each Array(8) as _, i (i)}<div class="sk"><div class="sk-thumb"></div><div class="sk-line"></div></div>{/each}
     </div>
   {:else if !view.clips.length}
+    {@const hp = t("Press {key} while playing to save the last few minutes. Your clips show up here.").split("{key}")}
     <div class="empty">
       <svg viewBox="0 0 48 48" aria-hidden="true"><rect x="6" y="11" width="36" height="26" rx="5" fill="none" stroke="currentColor" stroke-width="2" /><circle cx="24" cy="24" r="6" fill="var(--accent)" /></svg>
-      <h2>No clips yet</h2>
-      <p>Press {#if hotkey}<kbd>{hotkey}</kbd>{:else}your save hotkey{/if} while playing to save the last few minutes. Your clips show up here.</p>
-      <Button onclick={() => api.openFolder(view?.root ?? "")}>Open clips folder</Button>
+      <h2>{t("No clips yet")}</h2>
+      <p>{hp[0]}{#if hotkey}<kbd>{hotkey}</kbd>{:else}{t("your save hotkey")}{/if}{hp[1] ?? ""}</p>
+      <Button onclick={() => api.openFolder(view?.root ?? "")}>{t("Open clips folder")}</Button>
     </div>
   {:else if !inView.length && currentFolder}
     <div class="empty">
       <svg viewBox="0 0 48 48" aria-hidden="true" style:color="var(--folder-{currentFolder.color})"><path d="M6 14a3 3 0 0 1 3-3h10l4 4.5h16a3 3 0 0 1 3 3V35a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3z" fill="currentColor" fill-opacity="0.15" stroke="currentColor" stroke-width="2" stroke-linejoin="round" /></svg>
-      <h2>{currentFolder.leaf} is empty</h2>
-      <p>Drag clips from All clips onto this folder in the sidebar, or right-click a clip and choose Move to folder.</p>
-      <Button onclick={() => (folderView = "all")}>Go to All clips</Button>
+      <h2>{t("{name} is empty", { name: currentFolder.leaf })}</h2>
+      <p>{t("Drag clips from All clips onto this folder in the sidebar, or right-click a clip and choose Move to folder.")}</p>
+      <Button onclick={() => (folderView = "all")}>{t("Go to All clips")}</Button>
     </div>
   {:else if !inView.length}
     <div class="empty">
-      <h2>Every clip is in a folder</h2>
-      <p>Clips you haven't sorted into a folder show up here.</p>
+      <h2>{t("Every clip is in a folder")}</h2>
+      <p>{t("Clips you haven't sorted into a folder show up here.")}</p>
     </div>
   {:else if !shown.length}
     <div class="empty">
-      <h2>No clips match</h2>
-      <p>Nothing matches “{query}”{game ? ` in ${game}` : ""}{folderView !== "all" ? ` in ${viewName}` : ""}.</p>
-      <Button onclick={() => ((query = ""), (game = ""))}>Clear filters</Button>
+      <h2>{t("No clips match")}</h2>
+      <p>{t("Nothing matches “{query}”", { query })}{game ? ` ${t("in {place}", { place: game })}` : ""}{folderView !== "all" ? ` ${t("in {place}", { place: viewName })}` : ""}.</p>
+      <Button onclick={() => ((query = ""), (game = ""))}>{t("Clear filters")}</Button>
     </div>
   {:else}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -957,7 +965,7 @@
       {#each groups as g (g.label)}
         <section class="group" class:flat={!g.label} aria-label={g.label ?? viewName}>
           {#if g.label}
-            <h2>{g.label} <span>{g.clips.length} {g.clips.length === 1 ? "clip" : "clips"}</span></h2>
+            <h2>{g.label} <span>{tn(g.clips.length, "1 clip", "{n} clips")}</span></h2>
           {/if}
           <div class="grid">
             {#each g.clips as c (c.id)}
@@ -973,26 +981,26 @@
                 onopen={() => open(c)}
                 oncontext={(e) => clipMenu(e, c)}
                 onpointerdown={(e) => cardDown(e, c)}
-                onrename={(t) => saveTitle(c, t)}
+                onrename={(title) => saveTitle(c, title)}
                 bind:el={cardEls[c.id]}
               />
             {/each}
           </div>
         </section>
       {/each}
-      <p class="foot">{shown.length} {shown.length === 1 ? "clip" : "clips"} · {bytes(total)} · <button type="button" class="link" onclick={() => api.openFolder(view?.root ?? "")}>{view.root}</button></p>
+      <p class="foot">{tn(shown.length, "1 clip", "{n} clips")} · {bytes(total)} · <button type="button" class="link" onclick={() => api.openFolder(view?.root ?? "")}>{view.root}</button></p>
     </div>
   {/if}
 
   {#if selectedClips.length > 1}
-    <div class="selbar" role="region" aria-label="Selected clips">
+    <div class="selbar" role="region" aria-label={t("Selected clips")}>
       <div class="sel-meta">
-        <strong>{selectedClips.length} clips selected</strong>
-        <span>{bytes(selectedClips.reduce((n, c) => n + c.size, 0))} · drag them onto a folder, or</span>
+        <strong>{t("{n} clips selected", { n: selectedClips.length })}</strong>
+        <span>{bytes(selectedClips.reduce((n, c) => n + c.size, 0))} · {t("drag them onto a folder, or")}</span>
       </div>
       <div class="sel-actions">
-        <Button variant="ghost" onclick={() => ((selection = []), (selectedId = null))}>Clear</Button>
-        <Button variant="ghost" onclick={() => askDelete(selectedClips)}>Delete…</Button>
+        <Button variant="ghost" onclick={() => ((selection = []), (selectedId = null))}>{t("Clear")}</Button>
+        <Button variant="ghost" onclick={() => askDelete(selectedClips)}>{t("Delete…")}</Button>
         <Button
           variant="primary"
           onclick={(e) => {
@@ -1000,27 +1008,27 @@
             menu = { x: r.left, y: r.top - 8 - 32 * (org.folders.length + 2), items: moveMenu(selectedClips) };
           }}
         >
-          Move to folder
+          {t("Move to folder")}
         </Button>
       </div>
     </div>
   {:else if primary}
     {@const selected = primary}
-    <div class="selbar" role="region" aria-label="Selected clip">
+    <div class="selbar" role="region" aria-label={t("Selected clip")}>
       <div class="sel-thumb">
         {#if !selected.error}<img src={thumbUrl(selected.thumb_key)} alt="" onerror={(e) => ((e.currentTarget as HTMLImageElement).style.visibility = "hidden")} />{/if}
       </div>
       <div class="sel-meta">
         <strong title={selected.title ?? selected.game}>{selected.title ?? selected.game}</strong>
-        <span>{#if selected.title}{selected.game} · {/if}{whenShort(selected.recorded)} · {selected.probe ? clock(selected.probe.duration) : "unreadable"} · {bytes(selected.size)}{#if folderOf.get(selected.id)} · {pathLabel(folderOf.get(selected.id)?.id ?? "")}{/if}</span>
+        <span>{#if selected.title}{selected.game} · {/if}{whenShort(selected.recorded)} · {selected.probe ? clock(selected.probe.duration) : t("unreadable")} · {bytes(selected.size)}{#if folderOf.get(selected.id)} · {pathLabel(folderOf.get(selected.id)?.id ?? "")}{/if}</span>
       </div>
       <div class="sel-actions">
-        <Button variant="ghost" onclick={() => rename(selected)} title="Rename (F2)">Rename</Button>
-        <Button variant="ghost" onclick={() => api.showInFolder(selected.id).catch((e) => onerror(String(e)))}>Show in folder</Button>
-        <Button variant="ghost" onclick={() => api.openExternal(selected.id).catch((e) => onerror(String(e)))}>Open in player</Button>
+        <Button variant="ghost" onclick={() => rename(selected)} title={t("Rename (F2)")}>{t("Rename")}</Button>
+        <Button variant="ghost" onclick={() => api.showInFolder(selected.id).catch((e) => onerror(String(e)))}>{t("Show in folder")}</Button>
+        <Button variant="ghost" onclick={() => api.openExternal(selected.id).catch((e) => onerror(String(e)))}>{t("Open in player")}</Button>
         <Button variant="primary" onclick={() => open(selected)} disabled={!!selected.error}>
           <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5 3.5v9l7-4.5z" fill="currentColor" /></svg>
-          Open
+          {t("Open")}
         </Button>
       </div>
     </div>
@@ -1034,31 +1042,31 @@
 {/if}
 {#if job}
   <div class="notice jobbar" class:raised={selectedClips.length > 1 || !!primary} role="status">
-    <span>{job.kind === "share" ? "Making a Discord copy of" : "Saving to Google Drive:"} {nameOf(job.clip)} · {Math.round(job.progress * 100)}%</span>
-    <button type="button" class="jobcancel" onclick={() => void api.exportCancel()}>Cancel</button>
+    <span>{job.kind === "share" ? t("Making a Discord copy of {name}", { name: nameOf(job.clip) }) : t("Saving to Google Drive: {name}", { name: nameOf(job.clip) })} · {Math.round(job.progress * 100)}%</span>
+    <button type="button" class="jobcancel" onclick={() => void api.exportCancel()}>{t("Cancel")}</button>
     <span class="jobprog" style:width="{job.progress * 100}%" aria-hidden="true"></span>
   </div>
 {:else if notice}<div class="notice" class:raised={selectedClips.length > 1 || !!primary} role="status">{notice}</div>{/if}
 {#if dialog?.kind === "new-folder"}
   {@const d = dialog}
   <Dialog
-    title={d.parent ? `New folder in ${org.folders.find((x) => x.id === d.parent)?.leaf ?? d.parent}` : "New folder"}
-    confirmLabel={d.moveIds.length ? "Create and move" : "Create"}
-    input={{ value: "", placeholder: d.parent ? "e.g. DayZ" : "e.g. DayZ Raids", max: 60 }}
+    title={d.parent ? t("New folder in {parent}", { parent: org.folders.find((x) => x.id === d.parent)?.leaf ?? d.parent }) : t("New folder")}
+    confirmLabel={d.moveIds.length ? t("Create and move") : t("Create")}
+    input={{ value: "", placeholder: d.parent ? t("e.g. DayZ") : t("e.g. DayZ Raids"), max: 60 }}
     error={d.error}
     onconfirm={(v) => createFolder(v, d.color, d.moveIds, d.parent)}
     oncancel={() => (dialog = null)}
   >
     {#snippet after()}
-      <div class="swatches" role="radiogroup" aria-label="Folder colour">
+      <div class="swatches" role="radiogroup" aria-label={t("Folder colour")}>
         {#each FOLDER_COLORS as c (c.value)}
           <button
             type="button"
             class="swatch"
             role="radio"
             aria-checked={d.color === c.value}
-            aria-label={c.label}
-            title={c.label}
+            aria-label={t(c.label)}
+            title={t(c.label)}
             style:--sw="var(--folder-{c.value})"
             onclick={() => (dialog = { ...d, color: c.value })}
           ></button>
@@ -1068,16 +1076,16 @@
   </Dialog>
 {:else if dialog?.kind === "rename-folder"}
   {@const d = dialog}
-  <Dialog title="Rename folder" confirmLabel="Rename" input={{ value: d.folder.leaf, max: 60 }} error={d.error} onconfirm={(v) => renameFolder(d.folder, v)} oncancel={() => (dialog = null)} />
+  <Dialog title={t("Rename folder")} confirmLabel={t("Rename")} input={{ value: d.folder.leaf, max: 60 }} error={d.error} onconfirm={(v) => renameFolder(d.folder, v)} oncancel={() => (dialog = null)} />
 {:else if dialog?.kind === "delete-folder"}
   {@const d = dialog}
-  <Dialog title="Delete “{d.folder.leaf}”?" confirmLabel="Delete folder" danger onconfirm={() => deleteFolder(d.folder)} oncancel={() => (dialog = null)}>
-    <p>{#if d.subs}Its {d.subs === 1 ? "subfolder goes" : `${d.subs} subfolders go`} too. {/if}{#if d.count}{d.subs ? "All" : "Its"} {d.count === 1 ? "clip is" : `${d.count} clips are`} moved back to {d.count === 1 ? "its game folder" : "their game folders"} first.{:else}It's empty.{/if} No recordings are deleted.</p>
+  <Dialog title={t("Delete “{name}”?", { name: d.folder.leaf })} confirmLabel={t("Delete folder")} danger onconfirm={() => deleteFolder(d.folder)} oncancel={() => (dialog = null)}>
+    <p>{#if d.subs}{tn(d.subs, "Its subfolder goes too.", "Its {n} subfolders go too.")} {/if}{#if d.count}{tn(d.count, "1 clip is moved back to its game folder first.", "{n} clips are moved back to their game folders first.")}{:else}{t("It's empty.")}{/if} {t("No recordings are deleted.")}</p>
   </Dialog>
 {:else if dialog?.kind === "delete-clips"}
   {@const d = dialog}
-  <Dialog title="Delete {d.label}?" confirmLabel="Move to Recycle Bin" danger onconfirm={() => doDelete(d.ids)} oncancel={() => (dialog = null)}>
-    <p>{d.ids.length === 1 ? "The recording is" : "The recordings are"} moved to the Windows Recycle Bin, so you can restore {d.ids.length === 1 ? "it" : "them"} from there. Titles and folders come back if you do.</p>
+  <Dialog title={t("Delete {what}?", { what: d.label })} confirmLabel={t("Move to Recycle Bin")} danger onconfirm={() => doDelete(d.ids)} oncancel={() => (dialog = null)}>
+    <p>{tn(d.ids.length, "The recording is moved to the Windows Recycle Bin, so you can restore it from there. Titles and folders come back if you do.", "The recordings are moved to the Windows Recycle Bin, so you can restore them from there. Titles and folders come back if you do.")}</p>
   </Dialog>
 {/if}
 

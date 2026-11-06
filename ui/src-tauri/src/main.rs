@@ -17,6 +17,7 @@ use jondisclip_core::hotkey::Hotkey;
 use jondisclip_core::paths;
 use jondisclip_core::settings::{FPS_PRESETS, REPLAY_PRESETS, Settings};
 use jondisclip_core::status::TrayStatus;
+use jondisclip_core::tr;
 use serde::Serialize;
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
@@ -75,10 +76,13 @@ fn tray_view() -> TrayView {
 }
 
 fn read_settings() -> (Settings, Vec<String>) {
-    match std::fs::read_to_string(paths::settings_file()) {
+    let r = match std::fs::read_to_string(paths::settings_file()) {
         Ok(text) => Settings::from_toml(&text),
         Err(_) => (Settings::default(), Vec::new()),
-    }
+    };
+    // Messages from this process follow the language setting (ADR-0018).
+    jondisclip_core::settings::apply_language(&r.0);
+    r
 }
 
 #[tauri::command]
@@ -249,20 +253,22 @@ fn update(
     }
     let save = validated.save_dir_or(&paths::default_save_dir());
     if jondisclip_core::drive::overlaps(&save, &validated.drive_dir) {
-        return Err(
+        return Err(tr!(
             "The clips folder and the Google Drive folder can't overlap. Choose separate folders."
-                .into(),
-        );
+        ));
     }
     if jondisclip_core::drive::overlaps(&validated.drive_dir, &paths::local_dir()) {
-        return Err("The Google Drive folder can't be inside JondisClip's own folders.".into());
+        return Err(tr!(
+            "The Google Drive folder can't be inside JondisClip's own folders."
+        ));
     }
     let path = paths::settings_file();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     std::fs::write(&path, validated.to_toml())
-        .map_err(|e| format!("couldn't save settings: {e}"))?;
+        .map_err(|e| tr!("couldn't save settings: {error}", error = e))?;
+    jondisclip_core::settings::apply_language(&validated);
     Ok(validated)
 }
 
@@ -654,7 +660,7 @@ async fn drive_check(dir: Option<String>) -> DriveCheck {
     .unwrap_or(DriveCheck {
         dir: String::new(),
         state: "problem",
-        message: Some("The check didn't finish.".into()),
+        message: Some(tr!("The check didn't finish.")),
     })
 }
 
@@ -665,7 +671,7 @@ async fn drive_open() -> Result<(), String> {
         let (settings, _) = read_settings();
         let dir = settings.drive_dir;
         if dir.as_os_str().is_empty() || !dir.is_dir() {
-            return Err("The Google Drive folder isn't available right now.".to_string());
+            return Err(tr!("The Google Drive folder isn't available right now."));
         }
         let ours = dir.join("JondisClip");
         let open = if ours.is_dir() { ours } else { dir };
@@ -919,7 +925,7 @@ fn open_external(id: String) -> Result<(), String> {
     if r.0 as usize > 32 {
         Ok(())
     } else {
-        Err("Windows couldn't open the clip (no video player set?)".into())
+        Err(tr!("Windows couldn't open the clip (no video player set?)"))
     }
 }
 
