@@ -1,0 +1,25 @@
+Third-party software in JondisClip
+==================================
+
+FFmpeg
+------
+JondisClip uses the FFmpeg libraries (libavcodec, libavformat, libavutil,
+libswscale, libswresample), version 9.0, for video and audio encoding and
+file handling. This FFmpeg build is licensed under the GNU Lesser General
+Public License (LGPL) version 3; the full text is in FFmpeg-LGPL.txt.
+
+The libraries are included unmodified as separate DLLs (avcodec-63.dll,
+avformat-63.dll, avutil-61.dll, swscale-10.dll, swresample-7.dll). You
+may replace them with your own compatible build. This is an LGPL-only
+build, from https://github.com/BtbN/FFmpeg-Builds
+("ffmpeg-n9.0-latest-win64-lgpl-shared-9.0"). FFmpeg's source code is
+available at https://ffmpeg.org/download.html.
+
+FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
+
+Other components
+----------------
+JondisClip is written in Rust and uses open-source crates, mainly under
+the MIT and Apache-2.0 licences. Among them are Tauri, the windows crate,
+ffmpeg-next, serde and toml. The window's interface uses Svelte (MIT).
+Microsoft WebView2 is provided by Windows.

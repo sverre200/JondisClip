@@ -109,6 +109,9 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
 Copy to clipboard, Discord size-targeted export, a hint for the Drive sync folder. Native Drive upload only if it's still wanted.
 
 ## Phase 6: Hardening
+- [x] **Portable zip for friends** (2026-11-06): `tools/package.ps1` builds `dist\JondisClip-<version>-win64.zip`: the three exes with the C runtime linked in (`+crt-static`, so no Visual C++ redistributable), the 5 FFmpeg DLLs they import, a README and licence notices (FFmpeg LGPL v3). It builds into `target\package`, so it never locks the running app. Unsigned: SmartScreen asks once ("More info → Run anyway").
+  - Verified from the unzipped folder with `PATH` reduced to System32 and a throwaway profile: the tray records (AMF H.264, 3 audio tracks) and saves via the hotkey; Quit from the tray menu exits cleanly (recorder stopped, status file removed); Quit during a save waits, then exits with the clip complete and no `.partial`; the window plays a clip and Share to Discord works with the bundled exporter.
+  - **Not verified:** a PC without the dev tools, and NVIDIA/Intel GPUs.
 Real-game matrix (fullscreen, borderless, windowed, multi-monitor, HDR, 144 Hz), 8 h soak test, NVIDIA and Intel testers, installer (MSI/NSIS via Tauri), start with Windows, auto-update (optional, signed).
 
 ## Explicitly not in v1

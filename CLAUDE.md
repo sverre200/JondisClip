@@ -61,3 +61,4 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
 - Rust: `cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` must pass. Hot-path crates use no `unwrap()` and return typed errors (`thiserror`).
 - Frontend: TypeScript strict, verified visually in the browser pane against the Vite dev server.
 - Record important decisions as a new ADR (`docs/adr/NNNN-title.md`).
+- Shareable build: `powershell -ExecutionPolicy Bypass -File tools\package.ps1` → `dist\JondisClip-<version>-win64.zip` (portable, static C runtime, only the FFmpeg DLLs in use, README and licence notices from `tools\package\`).
