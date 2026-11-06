@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
-  import { api, FOLDER_COLORS, MAX_DEPTH, isWithin, thumbUrl, type Clip, type Folder, type FolderColor, type Item, type LibraryView, type MoveResult, type PendingFolder } from "./lib/api";
+  import { api, FOLDER_COLORS, MAX_DEPTH, isWithin, thumbUrl, type Clip, type ExportEvent, type Folder, type FolderColor, type Item, type LibraryView, type MoveResult, type PendingFolder } from "./lib/api";
   import { bytes, clock, dayLabel, fromWithin, whenShort } from "./lib/format";
   import Banner from "./lib/Banner.svelte";
   import Button from "./lib/Button.svelte";
@@ -60,10 +60,78 @@
   $effect(() => localStorage.setItem("jc.library.view", folderView));
   $effect(() => localStorage.setItem("jc.library.sidebar", collapsed ? "collapsed" : "open"));
 
-  function tell(msg: string) {
+  function tell(msg: string, ms = 2400) {
     notice = msg;
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => (notice = null), 2400);
+    noticeTimer = setTimeout(() => (notice = null), ms);
+  }
+
+  // ---- Share to Discord / Save to Drive from the menu (whole clip)
+
+  /** The running share or Drive copy started here (the editor runs its own). */
+  let job = $state<{ kind: "share" | "drive"; clip: Clip; id: number | null; progress: number } | null>(null);
+  /** The Drive folder setting (null: off), for the menu. */
+  let driveDir = $state<string | null>(null);
+  const loadDrive = () =>
+    api
+      .driveStatus()
+      .then((d) => (driveDir = d.dir || null))
+      .catch(() => {});
+  const nameOf = (c: Clip) => c.title ?? c.game;
+
+  async function shareClip(c: Clip) {
+    if (job || !c.probe) return;
+    try {
+      const plan = await api.sharePlan(c.id, 0, c.probe.duration);
+      if (!plan.plan) {
+        onerror(`${nameOf(c)} is too long for ${plan.limit_mb} MB. Open it and trim it to under ${clock(plan.max_seconds ?? 0)}.`);
+        return;
+      }
+      job = { kind: "share", clip: c, id: null, progress: 0 };
+      const r = await api.shareStart(c.id, 0, c.probe.duration, c.title ?? null);
+      if (job) job = { ...job, id: r.job };
+    } catch (e) {
+      job = null;
+      onerror(String(e));
+    }
+  }
+
+  async function saveClipToDrive(c: Clip) {
+    if (job || !c.probe) return;
+    job = { kind: "drive", clip: c, id: null, progress: 0 };
+    try {
+      const r = await api.driveSave(c.id, 0, c.probe.duration, true, false, c.title ?? null);
+      if (r.already || r.job === null) {
+        job = null;
+        await api.clipDriveMark(c.key, r.output).catch(() => {});
+        tell(`${nameOf(c)} is already in your Google Drive folder`, 4000);
+        await refresh();
+      } else if (job) job = { ...job, id: r.job };
+    } catch (e) {
+      job = null;
+      onerror(String(e));
+    }
+  }
+
+  async function onJobEvent(e: ExportEvent) {
+    const j = job;
+    if (!j || (j.id !== null && e.job !== j.id)) return;
+    if (e.kind === "progress") job = { ...j, progress: e.progress };
+    else if (e.kind === "done") {
+      job = null;
+      if (j.kind === "share") {
+        const err = e.clipboard && "Err" in e.clipboard ? e.clipboard.Err : null;
+        if (err) onerror(`The Discord copy of ${nameOf(j.clip)} is ready but couldn't go on the clipboard: ${err}`);
+        else tell(`Copied ${nameOf(j.clip)}: paste it in Discord with Ctrl+V · ${e.share ? `${e.share.height}p${e.share.fps} · ` : ""}${bytes(e.size)}`, 6000);
+      } else {
+        await api.clipDriveMark(j.clip.key, e.path).catch(() => {});
+        tell(`Saved ${nameOf(j.clip)} in your Google Drive folder · uploads when Google Drive for desktop syncs`, 6000);
+        await refresh();
+      }
+    } else if (e.kind === "error") {
+      job = null;
+      onerror(e.message);
+    } else job = null; // cancelled
   }
 
   /** Runs an organisation change, then reloads from disk (or shows why not). */
@@ -131,11 +199,22 @@
 
   onMount(() => {
     void refresh();
+    void loadDrive();
+    let unlisten: (() => void) | undefined;
+    let gone = false;
+    void api.onExport(onJobEvent).then((u) => (gone ? u() : (unlisten = u)));
     // Pick up clips saved while the window was open (cheap: unchanged files
     // aren't re-read). Only when the window comes back into focus, not on a timer.
-    const onFocus = () => void refresh();
+    const onFocus = () => {
+      void refresh();
+      void loadDrive();
+    };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    return () => {
+      gone = true;
+      unlisten?.();
+      window.removeEventListener("focus", onFocus);
+    };
   });
 
   // ---- derived views
@@ -497,6 +576,15 @@
         { label: "Open", shortcut: "Enter", disabled: many || !!c.error, action: () => open(c) },
         { label: "Rename", shortcut: "F2", disabled: many, action: () => rename(c) },
         { label: many ? `Move ${cs.length} clips to` : "Move to folder", submenu: moveMenu(cs) },
+        "separator",
+        { label: "Share to Discord", disabled: many || !!c.error || !!job, action: () => void shareClip(c) },
+        ...(driveDir
+          ? [
+              c.in_drive
+                ? { label: "Show in Drive", disabled: many, action: () => api.driveReveal(c.in_drive!).catch((err) => onerror(String(err))) }
+                : { label: "Save to Drive", disabled: many || !!c.error || !!job, action: () => void saveClipToDrive(c) },
+            ]
+          : []),
         "separator",
         { label: "Show in folder", disabled: many, action: () => api.showInFolder(c.id).catch((err) => onerror(String(err))) },
         { label: "Copy file", disabled: many, action: () => copyFile(c) },
@@ -911,7 +999,13 @@
 {#if menu}
   <ContextMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />
 {/if}
-{#if notice}<div class="notice" role="status">{notice}</div>{/if}
+{#if job}
+  <div class="notice jobbar" class:raised={selectedClips.length > 1 || !!primary} role="status">
+    <span>{job.kind === "share" ? "Making a Discord copy of" : "Saving to Google Drive:"} {nameOf(job.clip)} · {Math.round(job.progress * 100)}%</span>
+    <button type="button" class="jobcancel" onclick={() => void api.exportCancel()}>Cancel</button>
+    <span class="jobprog" style:width="{job.progress * 100}%" aria-hidden="true"></span>
+  </div>
+{:else if notice}<div class="notice" class:raised={selectedClips.length > 1 || !!primary} role="status">{notice}</div>{/if}
 {#if dialog?.kind === "new-folder"}
   {@const d = dialog}
   <Dialog
@@ -1066,6 +1160,40 @@
     background: var(--surface-raised);
     box-shadow: var(--shadow-pop);
     font-size: var(--fs-sm);
+  }
+  /* Above the selection bar when it's showing. */
+  .notice.raised {
+    bottom: calc(var(--s7) + 48px);
+  }
+  .jobbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding-right: var(--s2);
+    overflow: hidden;
+  }
+  .jobcancel {
+    height: 24px;
+    padding: 0 var(--s2);
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: var(--fs-xs);
+    font-weight: var(--fw-strong);
+    cursor: pointer;
+  }
+  .jobcancel:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+  .jobprog {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    background: var(--accent);
+    transition: width var(--t-med) var(--ease);
   }
   :global(body.dragging),
   :global(body.dragging *) {
