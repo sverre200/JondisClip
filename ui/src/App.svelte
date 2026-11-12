@@ -125,7 +125,20 @@
         <button type="button" class:on={page === "library"} aria-current={page === "library" ? "page" : undefined} onclick={() => (page = "library")}>{t("Library")}</button>
         <button type="button" class:on={page === "settings"} aria-current={page === "settings" ? "page" : undefined} onclick={() => (page = "settings")}>{t("Settings")}</button>
       </nav>
-      <div class="right"><StatusPill {tray} /></div>
+      <div class="right">
+        {#if tray?.running && tray.status?.update_version}
+          <!-- Always in view on both pages: the tray menu and Settings have the same offer. -->
+          <Button
+            variant="primary"
+            onclick={() => api.installUpdate().catch((e) => error(String(e)))}
+            disabled={!!tray.status.update_state}
+            title={t("Downloads the new version and restarts JondisClip. Recording continues while it downloads.")}
+          >
+            {tray.status.update_state ? t("Downloading…") : t("Update to {version}", { version: tray.status.update_version })}
+          </Button>
+        {/if}
+        <StatusPill {tray} />
+      </div>
     </header>
 
     {#if tray && !tray.running}
@@ -244,7 +257,9 @@
   }
   .right {
     display: flex;
+    align-items: center;
     justify-content: flex-end;
+    gap: var(--s3);
   }
   .banner-wrap {
     padding: var(--s3) var(--s5) 0;

@@ -373,5 +373,7 @@ export const nb: Record<string, string> = {
   "A newer version is ready to install.": "En nyere versjon er klar til å installeres.",
   "You have the latest version.": "Du har den nyeste versjonen.",
   "Couldn't reach GitHub. Check your internet connection and try again.": "Fikk ikke kontakt med GitHub. Sjekk internettforbindelsen og prøv igjen.",
-  "See whether a newer version is out.": "Se om det har kommet en nyere versjon."
+  "See whether a newer version is out.": "Se om det har kommet en nyere versjon.",
+  "Update to {version}": "Oppdater til {version}",
+  "Downloads the new version and restarts JondisClip. Recording continues while it downloads.": "Laster ned den nye versjonen og starter JondisClip på nytt. Opptaket fortsetter under nedlastingen."
 };

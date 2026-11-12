@@ -502,7 +502,8 @@ const mockState: Snapshot = {
       audio_error: null,
       mic_connected: null,
       version: "0.1.1",
-      update_version: null,
+      // The browser preview offers an update with ?update in the URL.
+      update_version: new URLSearchParams(globalThis.location?.search ?? "").has("update") ? "0.1.4" : null,
       update_state: null,
       update_check: null,
     },
