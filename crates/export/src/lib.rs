@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use ffmpeg::software::scaling;
 use ffmpeg::{
     Dictionary, Packet, Rational, codec, decoder, encoder, format, frame, media, picture,
 };
@@ -289,6 +290,11 @@ struct VideoEncoder {
     name: &'static str,
     tb: Rational,
     frame: frame::Video,
+    /// The encoder's input format when it differs from the decoder's (Intel
+    /// QSV only takes NV12): frames are converted into `converted` first.
+    convert_to: Option<format::Pixel>,
+    converter: Option<scaling::Context>,
+    converted: frame::Video,
     /// One frame in `tb` ticks.
     frame_ticks: i64,
     pacer: Pacer,
@@ -297,12 +303,50 @@ struct VideoEncoder {
 impl VideoEncoder {
     fn encode(&mut self, pts: i64, mux: &mut Mux, i: usize) -> Result<(), ExportError> {
         self.pacer.wait(secs(pts, self.tb));
-        self.frame.set_pts(Some(pts));
-        self.frame.set_kind(picture::Type::None);
+        if let Some(target) = self.convert_to {
+            if self.converter.is_none() {
+                // Same size, so this only repacks the chroma planes.
+                self.converter = Some(
+                    scaling::Context::get(
+                        self.frame.format(),
+                        self.frame.width(),
+                        self.frame.height(),
+                        target,
+                        self.frame.width(),
+                        self.frame.height(),
+                        scaling::Flags::BILINEAR,
+                    )
+                    .map_err(ff("convert"))?,
+                );
+            }
+            if let Some(c) = self.converter.as_mut() {
+                // An encoder may still hold a reference to the last frame's
+                // buffer: never draw into it (no-op when it doesn't).
+                unsafe {
+                    if !self.converted.is_empty() {
+                        ffmpeg::ffi::av_frame_make_writable(self.converted.as_mut_ptr());
+                    }
+                }
+                c.run(&self.frame, &mut self.converted)
+                    .map_err(ff("convert"))?;
+            }
+        }
+        let frame = if self.convert_to.is_some() {
+            &mut self.converted
+        } else {
+            &mut self.frame
+        };
+        frame.set_pts(Some(pts));
+        frame.set_kind(picture::Type::None);
         // EAGAIN means "take packets out first", e.g. when the GPU encoder's
         // input queue is full because the recorder is busy on it too.
         for attempt in 0..2000 {
-            match self.enc.send_frame(&self.frame) {
+            let frame = if self.convert_to.is_some() {
+                &self.converted
+            } else {
+                &self.frame
+            };
+            match self.enc.send_frame(frame) {
                 Ok(()) => return self.drain(mux, i).map(drop),
                 Err(e) if is_again(&e) => {
                     if self.drain(mux, i)? == 0 {
@@ -679,10 +723,14 @@ fn open_video_encoder(
     let source = if bit_rate > 0 { bit_rate as f64 } else { 20e6 };
     let bitrate = (source * 1.3) as usize;
     let mut errors = Vec::new();
-    for id in candidates(Codec::H264) {
-        match open_encoder(id, &dec, tb, fps, bitrate, global_header) {
+    for (id, software) in export_candidates() {
+        let input = encoder_input(id, dec.format());
+        match open_encoder(id, software, input, &dec, tb, fps, bitrate, global_header) {
             Ok(enc) => {
                 return Ok(VideoEncoder {
+                    convert_to: (input != dec.format()).then_some(input),
+                    converter: None,
+                    converted: frame::Video::empty(),
                     dec,
                     enc,
                     name: id.ffmpeg_name(),
@@ -692,14 +740,51 @@ fn open_video_encoder(
                     pacer: Pacer::default(),
                 });
             }
-            Err(e) => errors.push(format!("{}: {e}", id.ffmpeg_name())),
+            Err(e) => errors.push(format!(
+                "{}{}: {e}",
+                id.ffmpeg_name(),
+                if software { " (software)" } else { "" }
+            )),
         }
     }
     Err(ExportError::NoEncoder(errors.join("; ")))
 }
 
+/// Encoders to try for an export, best first: each GPU vendor's own, Media
+/// Foundation's hardware encoder, then Media Foundation's software encoder
+/// (`true`). The last one is part of Windows, so an export works on any PC,
+/// only slower.
+pub(crate) fn export_candidates() -> Vec<(EncoderId, bool)> {
+    let mut v: Vec<(EncoderId, bool)> = candidates(Codec::H264)
+        .into_iter()
+        .map(|id| (id, false))
+        .collect();
+    v.push((
+        EncoderId {
+            codec: Codec::H264,
+            vendor: Vendor::MediaFoundation,
+        },
+        true,
+    ));
+    v
+}
+
+/// The pixel format to feed `id` for frames decoded as `decoded`. AMF and
+/// NVENC take planar 4:2:0 as it comes from the decoder (the measured path);
+/// QSV only takes NV12, Media Foundation's hardware encoders refuse planar
+/// input on some drivers (seen on Intel Arc), and anything else (10-bit, 4:4:4)
+/// is converted to NV12 for every encoder.
+fn encoder_input(id: EncoderId, decoded: format::Pixel) -> format::Pixel {
+    let direct = matches!(id.vendor, Vendor::Amd | Vendor::Nvidia)
+        && matches!(decoded, format::Pixel::YUV420P | format::Pixel::NV12);
+    if direct { decoded } else { format::Pixel::NV12 }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn open_encoder(
     id: EncoderId,
+    software: bool,
+    input: format::Pixel,
     dec: &decoder::Video,
     tb: Rational,
     fps: i32,
@@ -712,7 +797,7 @@ fn open_encoder(
         .video()?;
     enc.set_width(dec.width());
     enc.set_height(dec.height());
-    enc.set_format(dec.format());
+    enc.set_format(input);
     enc.set_time_base(tb);
     enc.set_frame_rate(Some(Rational::new(fps, 1)));
     enc.set_bit_rate(bitrate);
@@ -740,7 +825,7 @@ fn open_encoder(
             opts.set("rc", "vbr");
         }
         Vendor::Intel => opts.set("preset", "slow"),
-        Vendor::MediaFoundation => opts.set("hw_encoding", "1"),
+        Vendor::MediaFoundation => opts.set("hw_encoding", if software { "0" } else { "1" }),
     }
     enc.open_as_with(codec, opts)
 }

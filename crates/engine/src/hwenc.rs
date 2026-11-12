@@ -28,7 +28,14 @@ pub enum HwEncError {
     NotCompiled(&'static str),
     #[error("GPU conversion failed: {0}")]
     Convert(#[from] windows::core::Error),
+    #[error("the encoder used more than {0} frame surfaces")]
+    TooManySurfaces(usize),
 }
+
+/// Most QSV pool surfaces we track. The pool holds the encoder's queue
+/// (`async_depth` 4) plus reference frames, far fewer than this; the limit
+/// keeps the lookup allocation-free and within the converter's view cache.
+const QSV_MAX_SURFACES: usize = 32;
 
 fn check(what: &'static str, ret: i32) -> Result<(), HwEncError> {
     if ret < 0 {
@@ -83,9 +90,11 @@ const MFX_MEMTYPE_VIDEO_MEMORY_PROCESSOR_TARGET: i32 = 0x0020;
 struct QsvMap {
     /// Reused for the one-time mapping of each new pool surface.
     map_frame: *mut ffi::AVFrame,
-    /// (mfxFrameSurface1 pointer, D3D11 texture, array index). The pool owns
-    /// the textures and keeps them alive for the encoder's lifetime.
-    textures: Vec<(usize, *mut std::ffi::c_void, u32)>,
+    /// (mfxFrameSurface1 pointer, D3D11 texture, array index). FFmpeg's pool
+    /// keeps its surfaces until the frames context is freed, so the pointer
+    /// is a stable key; we hold our own reference to each texture anyway, so
+    /// a cached entry can never point at freed memory.
+    textures: Vec<(usize, ID3D11Texture2D, u32)>,
 }
 
 // SAFETY: the FFmpeg contexts are owned exclusively by this value and used
@@ -257,7 +266,7 @@ impl HwEncoder {
             }
             Some(QsvMap {
                 map_frame,
-                textures: Vec::with_capacity(32),
+                textures: Vec::with_capacity(QSV_MAX_SURFACES),
             })
         } else {
             None
@@ -288,8 +297,11 @@ impl HwEncoder {
         // data[3] of a QSV frame is its mfxFrameSurface1. Pool surfaces are
         // reused, so each one is mapped to its D3D11 texture only once.
         let surface = unsafe { (*self.frame).data[3] } as usize;
-        if let Some(&(_, tex, index)) = map.textures.iter().find(|(s, _, _)| *s == surface) {
-            return Ok((tex, index));
+        if let Some((_, tex, index)) = map.textures.iter().find(|(s, _, _)| *s == surface) {
+            return Ok((tex.as_raw(), *index));
+        }
+        if map.textures.len() >= QSV_MAX_SURFACES {
+            return Err(HwEncError::TooManySurfaces(QSV_MAX_SURFACES));
         }
         let mf = map.map_frame;
         unsafe {
@@ -298,11 +310,14 @@ impl HwEncoder {
                 "av_hwframe_map(qsv->d3d11)",
                 ffi::av_hwframe_map(mf, self.frame, ffi::AV_HWFRAME_MAP_WRITE as i32),
             )?;
-            let tex = (*mf).data[0] as *mut std::ffi::c_void;
+            let raw = (*mf).data[0] as *mut std::ffi::c_void;
             let index = (*mf).data[1] as usize as u32;
+            // Clone = AddRef: the cache keeps the texture alive on its own.
+            let tex = ID3D11Texture2D::from_raw_borrowed(&raw).cloned();
             ffi::av_frame_unref(mf);
+            let tex = tex.ok_or(HwEncError::Null("QSV frame texture"))?;
             map.textures.push((surface, tex, index));
-            Ok((tex, index))
+            Ok((raw, index))
         }
     }
 

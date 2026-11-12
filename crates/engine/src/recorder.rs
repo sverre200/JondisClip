@@ -255,28 +255,43 @@ impl Recorder {
         let gpu = Gpu::create()?;
         let capture = Capture::primary_monitor(&gpu, cfg.fps)?;
         let (width, height) = output_size(capture.width, capture.height, cfg.output_height);
-        let id = encoder::select_for_adapter(cfg.codec, gpu.vendor_id).map_err(|errs| {
-            RecorderError::NoEncoder(
-                errs.iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            )
-        })?;
-        let bitrate = cfg.bitrate.unwrap_or_else(|| {
-            let base = EncodeSettings::default_bitrate(id.codec, width, height, cfg.fps);
-            (base as f64 * cfg.quality_scale.clamp(0.25, 4.0)) as u64
-        });
-        let settings = EncodeSettings {
-            id,
-            width,
-            height,
-            fps: cfg.fps,
-            bitrate,
-            gop_seconds: 1,
-            qp_floor: cfg.qp_floor,
+        // Open the real encoder at the real size, not just a probe: an encoder
+        // can pass a small probe and still refuse this resolution or these
+        // GPU surfaces. Order: the adapter's own encoder, then Media
+        // Foundation; the preferred codec first, then its fallbacks.
+        let mut errors = Vec::new();
+        let mut opened = None;
+        'search: for &codec in &encoder::codecs_for(cfg.codec, width, height) {
+            for id in encoder::candidates_for_adapter(codec, gpu.vendor_id) {
+                let bitrate = cfg.bitrate.unwrap_or_else(|| {
+                    let base = EncodeSettings::default_bitrate(id.codec, width, height, cfg.fps);
+                    (base as f64 * cfg.quality_scale.clamp(0.25, 4.0)) as u64
+                });
+                let settings = EncodeSettings {
+                    id,
+                    width,
+                    height,
+                    fps: cfg.fps,
+                    bitrate,
+                    gop_seconds: 1,
+                    qp_floor: cfg.qp_floor,
+                };
+                match HwEncoder::open(&gpu, settings) {
+                    Ok(enc) => {
+                        opened = Some((enc, id, bitrate));
+                        break 'search;
+                    }
+                    Err(e) => errors.push(format!("{}: {e}", id.ffmpeg_name())),
+                }
+            }
+        }
+        let Some((enc, id, bitrate)) = opened else {
+            return Err(RecorderError::NoEncoder(format!(
+                "{} at {width}×{height}: {}",
+                gpu.adapter_name,
+                errors.join("; ")
+            )));
         };
-        let enc = HwEncoder::open(&gpu, settings)?;
         let conv = Converter::new(&gpu, &capture.latest, width, height, cfg.fps)?;
 
         let stamp = SystemTime::now()

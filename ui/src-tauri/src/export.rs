@@ -147,7 +147,25 @@ pub fn prune_share_dir(dir: &Path, keep: std::time::Duration) -> usize {
 /// pruning one could delete recordings in the other.
 pub fn overlaps(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| {
-        let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        // Resolve the part of the path that exists and keep the rest as
+        // written. A folder that doesn't exist yet can't be resolved itself,
+        // and its parent may be spelled two ways: Windows gives long user
+        // names a short alias (C:\Users\SVERRE~1.RUL), which %TEMP% uses.
+        let mut rest = Vec::new();
+        let mut cur = p.to_path_buf();
+        let mut p = loop {
+            if let Ok(c) = std::fs::canonicalize(&cur) {
+                break c;
+            }
+            match (cur.file_name().map(ToOwned::to_owned), cur.parent()) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name);
+                    cur = parent.to_path_buf();
+                }
+                _ => break p.to_path_buf(),
+            }
+        };
+        p.extend(rest.iter().rev());
         PathBuf::from(
             p.to_string_lossy()
                 .trim_start_matches(r"\\?\")

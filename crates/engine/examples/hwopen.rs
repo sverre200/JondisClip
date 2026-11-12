@@ -1,9 +1,9 @@
 //! Opens the real D3D11 hardware encoder path (as the recorder does) and
 //! prints FFmpeg's own log, to diagnose "open encoder failed".
-//! Run: `cargo run -p jondisclip-engine --example hwopen -- [width height fps]`
+//! Run: `cargo run -p jondisclip-engine --example hwopen -- [width height fps] [hevc] [mf] [verbose]`
 use ffmpeg_next as ffmpeg;
 use jondisclip_engine::convert::Converter;
-use jondisclip_engine::encoder::{self, Codec};
+use jondisclip_engine::encoder::{self, Codec, Vendor};
 use jondisclip_engine::gpu::Gpu;
 use jondisclip_engine::hwenc::{EncodeSettings, HwEncoder};
 use windows::Win32::Graphics::Direct3D11::{
@@ -20,40 +20,55 @@ fn main() {
         [w, h, f] => (w, h, f),
         _ => (3440, 1440, 60),
     };
+    let word = |w: &str| std::env::args().any(|a| a == w);
     ffmpeg::init().expect("ffmpeg init");
-    ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Verbose);
+    ffmpeg::util::log::set_level(if word("verbose") {
+        ffmpeg::util::log::Level::Verbose
+    } else {
+        ffmpeg::util::log::Level::Error
+    });
     let gpu = Gpu::create().expect("gpu");
     println!(
         "adapter: {} (vendor {:#06x})",
         gpu.adapter_name, gpu.vendor_id
     );
-    let id = match encoder::select_for_adapter(Codec::H264, gpu.vendor_id) {
-        Ok(id) => id,
-        Err(errs) => {
-            for e in errs {
-                println!("probe: {e}");
+    // The same search the recorder does: preferred codec first, the adapter's
+    // own encoder before Media Foundation. "mf" skips the vendor's encoder.
+    let preferred = if word("hevc") {
+        Codec::Hevc
+    } else {
+        Codec::H264
+    };
+    let mut opened = None;
+    'search: for &codec in &encoder::codecs_for(preferred, width, height) {
+        for id in encoder::candidates_for_adapter(codec, gpu.vendor_id) {
+            if word("mf") && id.vendor != Vendor::MediaFoundation {
+                continue;
             }
-            return;
+            let s = EncodeSettings {
+                id,
+                width,
+                height,
+                fps,
+                bitrate: EncodeSettings::default_bitrate(id.codec, width, height, fps),
+                gop_seconds: 1,
+                qp_floor: None,
+            };
+            println!("trying {} at {width}x{height}@{fps}", id.ffmpeg_name());
+            match HwEncoder::open(&gpu, s) {
+                Ok(e) => {
+                    opened = Some((e, id));
+                    break 'search;
+                }
+                Err(e) => println!("OPEN FAILED: {} : {e}", id.ffmpeg_name()),
+            }
         }
+    }
+    let Some((mut enc, id)) = opened else {
+        println!("NO ENCODER");
+        return;
     };
-    println!("selected: {} at {width}x{height}@{fps}", id.ffmpeg_name());
-    let s = EncodeSettings {
-        id,
-        width,
-        height,
-        fps,
-        bitrate: EncodeSettings::default_bitrate(id.codec, width, height, fps),
-        gop_seconds: 1,
-        qp_floor: None,
-    };
-    let mut enc = match HwEncoder::open(&gpu, s) {
-        Ok(e) => e,
-        Err(e) => {
-            println!("OPEN FAILED: {e}");
-            return;
-        }
-    };
-    println!("OPEN OK");
+    println!("OPEN OK: {}", id.ffmpeg_name());
 
     // Encode 2 s through the real converter from a BGRA source, like capture does.
     let desc = D3D11_TEXTURE2D_DESC {

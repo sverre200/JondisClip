@@ -14,7 +14,7 @@ use ffmpeg::{
 };
 use ffmpeg_next as ffmpeg;
 use jondisclip_core::discord::{self, Plan, PlanError};
-use jondisclip_engine::encoder::{Codec, Vendor, candidates};
+use jondisclip_engine::encoder::Vendor;
 use serde::Serialize;
 
 use super::{ExportError, Mux, Pacer, ff, finalize, is_again, secs, to_ts};
@@ -442,7 +442,7 @@ fn encode_once(
     let (color_space, color_range) = (dec.color_space(), dec.color_range());
     let mut errors = Vec::new();
     let mut opened = None;
-    for id in candidates(Codec::H264) {
+    for (id, software) in crate::export_candidates() {
         let Some(codec) = encoder::find_by_name(id.ffmpeg_name()) else {
             continue;
         };
@@ -484,7 +484,7 @@ fn encode_once(
                 }
                 Vendor::Intel => opts.set("preset", "medium"),
                 Vendor::MediaFoundation => {
-                    opts.set("hw_encoding", "1");
+                    opts.set("hw_encoding", if software { "0" } else { "1" });
                     opts.set("rate_control", "cbr");
                 }
             }

@@ -119,6 +119,24 @@ pub fn candidates_for_adapter(codec: Codec, vendor_id: u32) -> Vec<EncoderId> {
     v
 }
 
+/// Largest frame hardware H.264 encoders take: 4096 pixels a side, and 36 864
+/// macroblocks (level 5.2, e.g. 4096×2304).
+pub fn fits_h264(width: u32, height: u32) -> bool {
+    width <= 4096 && height <= 4096 && width.div_ceil(16) * height.div_ceil(16) <= 36_864
+}
+
+/// Codecs the recorder tries for a preference at an output size, in order.
+/// H.264 gets HEVC as a fallback only when the frame is too large for H.264
+/// (a 5120×1440 or 5K screen at its own size). A failure at a size H.264 can
+/// do is reported instead of quietly switching codec.
+pub fn codecs_for(preferred: Codec, width: u32, height: u32) -> Vec<Codec> {
+    let mut v = codec_order(preferred).to_vec();
+    if preferred == Codec::H264 && !fits_h264(width, height) {
+        v.push(Codec::Hevc);
+    }
+    v
+}
+
 fn codec_order(preferred: Codec) -> &'static [Codec] {
     match preferred {
         Codec::H264 => &[Codec::H264],
@@ -157,4 +175,32 @@ pub fn select(preferred: Codec) -> Result<EncoderId, Vec<EncoderError>> {
         }
     }
     Err(errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hevc_is_only_a_fallback_for_frames_too_large_for_h264() {
+        for (w, h) in [
+            (1920, 1080),
+            (2560, 1440),
+            (3440, 1440),
+            (3840, 2160),
+            (4096, 2304),
+        ] {
+            assert!(fits_h264(w, h), "{w}x{h}");
+            assert_eq!(codecs_for(Codec::H264, w, h), [Codec::H264]);
+        }
+        for (w, h) in [(5120, 1440), (5120, 2880), (7680, 4320), (4096, 4096)] {
+            assert!(!fits_h264(w, h), "{w}x{h}");
+            assert_eq!(codecs_for(Codec::H264, w, h), [Codec::H264, Codec::Hevc]);
+        }
+        // An explicit HEVC or AV1 choice keeps its own order at any size.
+        assert_eq!(
+            codecs_for(Codec::Hevc, 5120, 1440),
+            [Codec::Hevc, Codec::H264]
+        );
+    }
 }
