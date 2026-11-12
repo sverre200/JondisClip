@@ -24,6 +24,7 @@ export interface Settings {
   microphone_low_cut: boolean;
   save_sound: boolean;
   start_with_windows: boolean;
+  check_for_updates: boolean;
   /** "Share to Discord" size limit, MB (1 MB = 1,000,000 bytes) */
   discord_limit_mb: number;
   /** Google Drive for desktop folder for Save to Drive ("" = off) */
@@ -197,6 +198,12 @@ export interface TrayStatus {
   audio_error: string | null;
   /** false while the chosen mic is unplugged; null when the mic is off */
   mic_connected: boolean | null;
+  /** the running tray's version, e.g. "0.1.1" */
+  version: string;
+  /** a newer version found on GitHub, if any */
+  update_version: string | null;
+  /** "downloading" or "installing" while an update is under way */
+  update_state: string | null;
 }
 
 export interface InputDevice {
@@ -370,6 +377,7 @@ export const api = {
   update: (patch: Partial<Settings>) => call<Settings>("update", { patch }),
   checkHotkey: (text: string) => call<string>("check_hotkey", { text }),
   openFolder: (path: string) => call<void>("open_folder", { path }),
+  installUpdate: () => call<void>("install_update"),
   startTray: () => call<void>("start_tray"),
   listMicrophones: () => call<InputDevice[]>("list_microphones"),
   micLevel: (device: string, gainDb: number) => call<MicLevel>("mic_level", { device, gainDb }),
@@ -459,6 +467,7 @@ const mockState: Snapshot = {
     microphone_low_cut: false,
     save_sound: true,
     start_with_windows: false,
+    check_for_updates: true,
     discord_limit_mb: 19,
     drive_dir: "",
     drive_keep_folders: true,
@@ -485,6 +494,9 @@ const mockState: Snapshot = {
       audio_tracks: ["Game"],
       audio_error: null,
       mic_connected: null,
+      version: "0.1.1",
+      update_version: null,
+      update_state: null,
     },
   },
 };
@@ -705,6 +717,9 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
     case "clip_copy_file":
       return undefined;
 
+    case "install_update":
+      if (mockState.tray.status) mockState.tray.status.update_state = "downloading";
+      return undefined;
     case "tray_status":
       return structuredClone(mockState.tray);
     case "update":

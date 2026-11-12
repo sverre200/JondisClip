@@ -62,4 +62,6 @@ Status: **Phase 1 → 2.** Stack accepted (ADR-0001, 2026-11-04). ADR-0007 (H.26
 - Rust: `cargo fmt`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace` must pass. Hot-path crates use no `unwrap()` and return typed errors (`thiserror`).
 - Frontend: TypeScript strict, verified visually in the browser pane against the Vite dev server.
 - Record important decisions as a new ADR (`docs/adr/NNNN-title.md`).
-- Shareable build: `powershell -ExecutionPolicy Bypass -File tools\package.ps1` → `dist\JondisClip-<version>-win64.zip` (portable, static C runtime, only the FFmpeg DLLs in use, README and licence notices from `tools\package\`).
+- Shareable build: `powershell -ExecutionPolicy Bypass -File tools\package.ps1` → `dist\JondisClip-<version>-win64.zip` (portable, static C runtime, only the FFmpeg DLLs in use, README and licence notices from `tools\package\`). The script loads the Visual C++ environment itself, so a plain PowerShell works.
+- Release to friends (ADR-0020): commit, then `powershell -ExecutionPolicy Bypass -File tools\release.ps1 <version>`. It bumps the version, packages, tags `v<version>`, pushes and creates the GitHub release. Running apps offer it as "Install update" within 6 hours. The repo is public (since 2026-11-12): never commit secrets.
+- Intel (QSV) recording works since 2026-11-12 (verified on an Arc 130V; `hwenc.rs` feeds the encoder QSV surfaces derived from the D3D11 device). NVENC is still unverified. `cargo run -p jondisclip-engine --example hwopen` tests the encoder path on any PC.

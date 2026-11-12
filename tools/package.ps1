@@ -11,6 +11,21 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+# Node.js, if this shell was opened before it was installed.
+if (-not (Get-Command npm -ErrorAction SilentlyContinue) -and (Test-Path "$env:ProgramFiles\nodejs")) {
+    $env:PATH = "$env:ProgramFiles\nodejs;$env:PATH"
+}
+# bindgen (libclang) needs the Visual C++ include paths. Outside a "Developer
+# PowerShell for VS" they aren't set, so load them from vcvars64.bat.
+if (-not $env:VCINSTALLDIR) {
+    $vcvars = Get-ChildItem "C:\Program Files*\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars64.bat" -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($vcvars) {
+        cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "Env:\$($Matches[1])" -Value $Matches[2] }
+        }
+    }
+}
 
 $version = (Select-String Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
 $name = "JondisClip-$version-win64"

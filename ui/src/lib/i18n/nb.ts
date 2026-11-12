@@ -352,5 +352,11 @@ export const nb: Record<string, string> = {
   "The recording is removed from your computer. It doesn't go to the Recycle Bin and can't be restored.": "Opptaket fjernes fra datamaskinen. Det havner ikke i papirkurven og kan ikke gjenopprettes.",
   "The recordings are removed from your computer. They don't go to the Recycle Bin and can't be restored.": "Opptakene fjernes fra datamaskinen. De havner ikke i papirkurven og kan ikke gjenopprettes.",
   "Recycle Bin": "Papirkurv",
-  "Open the Windows Recycle Bin: clips you delete go there, and can be restored": "Åpne papirkurven i Windows: klipp du sletter havner der, og kan gjenopprettes"
+  "Open the Windows Recycle Bin: clips you delete go there, and can be restored": "Åpne papirkurven i Windows: klipp du sletter havner der, og kan gjenopprettes",
+  "Check for updates": "Se etter oppdateringer",
+  "Asks GitHub for a newer version when JondisClip starts. Nothing is installed without your click.": "Spør GitHub om det finnes en nyere versjon når JondisClip starter. Ingenting installeres uten at du klikker.",
+  "Version {version} is available": "Versjon {version} er tilgjengelig",
+  "You have {current}. Recording continues while it downloads, then JondisClip restarts.": "Du har {current}. Opptaket fortsetter mens den lastes ned, og så starter JondisClip på nytt.",
+  "Install update": "Installer oppdatering",
+  "Downloading…": "Laster ned …"
 };

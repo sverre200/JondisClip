@@ -71,10 +71,20 @@ above as well if you want, and Videos\JondisClip if you don't want your
 clips.
 
 
+Updates
+-------
+JondisClip asks GitHub now and then whether a newer version exists. When
+there is one you get a notification. Right-click the tray icon and choose
+"Install update" (or use the button in Settings). It downloads, installs
+and restarts by itself; your clips and settings are kept. Nothing is
+installed without your click, and you can turn the check off in Settings.
+
+
 Privacy
 -------
 No account, no telemetry, nothing is uploaded. Clips only leave your PC
-when you share them yourself, or when you use Save to Drive.
+when you share them yourself, or when you use Save to Drive. The update
+check only asks for the latest version number; it sends nothing about you.
 
 Requires Windows 10 or 11, 64-bit. The library window uses Microsoft
 WebView2, which is part of Windows 11 and comes with Microsoft Edge on

@@ -480,6 +480,14 @@
       <Row label={t("Start with Windows")} hint={t("Start JondisClip in the tray when you sign in.")} id="t-boot">
         <Toggle id="t-boot" label={t("Start with Windows")} checked={settings.start_with_windows} onchange={(v) => change({ start_with_windows: v })} />
       </Row>
+      <Row label={t("Check for updates")} hint={t("Asks GitHub for a newer version when JondisClip starts. Nothing is installed without your click.")} id="t-updates">
+        <Toggle id="t-updates" label={t("Check for updates")} checked={settings.check_for_updates} onchange={(v) => change({ check_for_updates: v })} />
+      </Row>
+      {#if tray?.running && tray.status?.update_version}
+        <Row label={t("Version {version} is available", { version: tray.status.update_version })} hint={t("You have {current}. Recording continues while it downloads, then JondisClip restarts.", { current: tray.status.version })}>
+          <Button onclick={() => api.installUpdate()} disabled={!!tray.status.update_state}>{tray.status.update_state ? t("Downloading…") : t("Install update")}</Button>
+        </Row>
+      {/if}
     </section>
 
     <details>
@@ -494,7 +502,7 @@
       </Row>
     </details>
 
-    <footer>{t("Changes are saved automatically.")}</footer>
+    <footer>{t("Changes are saved automatically.")}{#if tray?.status?.version} · JondisClip {tray.status.version}{/if}</footer>
   {/if}
 </main>
 

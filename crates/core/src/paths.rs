@@ -26,6 +26,11 @@ pub fn status_file() -> PathBuf {
     local_dir().join("status.json")
 }
 
+/// `%LOCALAPPDATA%\JondisClip\update`: where an update is downloaded and unpacked.
+pub fn update_dir() -> PathBuf {
+    local_dir().join("update")
+}
+
 /// The user's Videos folder (respects relocation via Known Folders).
 pub fn videos_dir() -> PathBuf {
     unsafe {

@@ -47,6 +47,7 @@ use jondisclip_core::hotkey::MOD_NOREPEAT;
 use jondisclip_core::paths;
 use jondisclip_core::settings::{REPLAY_PRESETS, Settings, replay_label};
 use jondisclip_core::status::TrayStatus;
+use jondisclip_core::update::{self, Release};
 
 pub const WINDOW_CLASS: PCWSTR = w!("JondisClipTray");
 const WM_APP_TRAY: u32 = WM_APP + 1;
@@ -55,6 +56,11 @@ pub const WM_APP_SECOND_INSTANCE: u32 = WM_APP + 3;
 /// Posted to quit: the window must be destroyed outside `with_app`, or
 /// WM_DESTROY can't borrow the app and `shutdown` is skipped.
 const WM_APP_QUIT: u32 = WM_APP + 4;
+/// An update worker thread (check or download) has a result in `update_events`.
+const WM_APP_UPDATE: u32 = WM_APP + 5;
+/// Posted by the settings window's "Install update" button
+/// (`jondisclip_core::update::WM_INSTALL_UPDATE`).
+const WM_APP_INSTALL_UPDATE: u32 = jondisclip_core::update::WM_INSTALL_UPDATE;
 const HOTKEY_ID: i32 = 1;
 const TIMER_ID: usize = 1;
 const TRAY_UID: u32 = 1;
@@ -66,6 +72,7 @@ const ID_OPEN_FOLDER: u32 = 103;
 const ID_EDIT_SETTINGS: u32 = 104;
 const ID_QUIT: u32 = 105;
 const ID_LIBRARY: u32 = 106;
+const ID_UPDATE: u32 = 107;
 const ID_REPLAY_BASE: u32 = 200;
 
 /// Free space below which buffering pauses, and above which it resumes.
@@ -75,6 +82,25 @@ const RESTART_BACKOFF_S: [u64; 5] = [2, 5, 10, 30, 60];
 /// Longest Quit waits for clips still being written (a 5-minute clip took
 /// up to 41 s while DayZ was loading the disk).
 const QUIT_WAIT_MAX_S: u64 = 180;
+/// First update check this long after start, then every `UPDATE_RECHECK_S`.
+const UPDATE_FIRST_CHECK_S: u64 = 20;
+const UPDATE_RECHECK_S: u64 = 6 * 3600;
+
+/// Where the updater is (ADR-0020). Installing only ever starts from a click.
+#[derive(Debug, Clone, PartialEq)]
+enum UpdateState {
+    Idle,
+    Checking,
+    Available(Release),
+    Downloading(Release),
+    /// Downloaded and unpacked: installs as soon as no clip is being written.
+    Ready(Release, PathBuf),
+}
+
+enum UpdateEvent {
+    Checked(Result<Option<Release>, String>),
+    Downloaded(Result<PathBuf, String>),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Status {
@@ -114,6 +140,9 @@ struct App {
     failures: usize,
     tick: u64,
     taskbar_created: u32,
+    update: UpdateState,
+    update_events: Arc<Mutex<Vec<UpdateEvent>>>,
+    last_update_check: Option<Instant>,
 }
 
 thread_local! {
@@ -260,6 +289,9 @@ pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), Stri
         failures: 0,
         tick: 0,
         taskbar_created,
+        update: UpdateState::Idle,
+        update_events: Arc::new(Mutex::new(Vec::new())),
+        last_update_check: None,
     };
     APP.with(|a| *a.borrow_mut() = Some(app));
     with_app(|a| {
@@ -307,6 +339,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_SAVED => {
             with_app(App::on_saved);
+            LRESULT(0)
+        }
+        WM_APP_UPDATE => {
+            with_app(App::on_update_event);
+            LRESULT(0)
+        }
+        WM_APP_INSTALL_UPDATE => {
+            with_app(App::install_update);
             LRESULT(0)
         }
         WM_APP_SECOND_INSTANCE => {
@@ -677,7 +717,174 @@ impl App {
         if self.saved_flash_until.is_some_and(|t| Instant::now() >= t) {
             self.saved_flash_until = None;
         }
+        self.check_for_update();
+        if matches!(self.update, UpdateState::Ready(..)) {
+            self.finish_update();
+        }
         self.refresh();
+    }
+
+    // ---------- updates (ADR-0020) ----------
+
+    fn install_dir() -> Option<PathBuf> {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(Path::to_path_buf))
+    }
+
+    /// Runs `work` on its own thread and wakes the tray with its result.
+    fn update_worker(&self, name: &str, work: impl FnOnce() -> UpdateEvent + Send + 'static) {
+        let events = self.update_events.clone();
+        let hwnd_raw = self.hwnd.0 as isize;
+        let spawned = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                let event = work();
+                events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(event);
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(hwnd_raw as *mut _)),
+                        WM_APP_UPDATE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            });
+        if let Err(e) = spawned {
+            error!("could not start {name}: {e}");
+        }
+    }
+
+    /// Asks GitHub for a newer version shortly after start and then every few
+    /// hours, unless the setting is off or this is a developer build.
+    fn check_for_update(&mut self) {
+        if self.update != UpdateState::Idle || !self.settings.check_for_updates {
+            return;
+        }
+        let due = match self.last_update_check {
+            None => self.tick >= UPDATE_FIRST_CHECK_S,
+            Some(t) => t.elapsed().as_secs() >= UPDATE_RECHECK_S,
+        };
+        if !due {
+            return;
+        }
+        self.last_update_check = Some(Instant::now());
+        if Self::install_dir().is_none_or(|d| update::is_dev_install(&d)) {
+            return;
+        }
+        self.update = UpdateState::Checking;
+        self.update_worker("jc-update-check", || {
+            UpdateEvent::Checked(update::check(env!("CARGO_PKG_VERSION")))
+        });
+    }
+
+    fn on_update_event(&mut self) {
+        let events: Vec<UpdateEvent> = self.update_events.lock().map_or_else(
+            |e| std::mem::take(&mut *e.into_inner()),
+            |mut q| std::mem::take(&mut *q),
+        );
+        for event in events {
+            match (event, self.update.clone()) {
+                (UpdateEvent::Checked(Ok(Some(release))), UpdateState::Checking) => {
+                    info!("update available: {}", release.version);
+                    self.balloon(
+                        &tr!(
+                            "Update available: JondisClip {version}",
+                            version = release.version
+                        ),
+                        &tr!("Right-click the tray icon and choose Install update."),
+                        false,
+                    );
+                    self.update = UpdateState::Available(release);
+                }
+                (UpdateEvent::Checked(Ok(None)), UpdateState::Checking) => {
+                    self.update = UpdateState::Idle;
+                }
+                (UpdateEvent::Checked(Err(e)), UpdateState::Checking) => {
+                    // Offline or GitHub unreachable: not worth a notification.
+                    warning!("update check failed: {e}");
+                    self.update = UpdateState::Idle;
+                }
+                (UpdateEvent::Downloaded(Ok(staged)), UpdateState::Downloading(release)) => {
+                    info!("update {} downloaded", release.version);
+                    self.update = UpdateState::Ready(release, staged);
+                    self.finish_update();
+                }
+                (UpdateEvent::Downloaded(Err(e)), UpdateState::Downloading(release)) => {
+                    error!("update download failed: {e}");
+                    self.balloon(&tr!("Couldn't update JondisClip"), &e, true);
+                    self.update = UpdateState::Available(release);
+                }
+                _ => {}
+            }
+        }
+        self.refresh();
+    }
+
+    /// The user chose "Install update" (tray menu or settings window).
+    /// Recording continues while the new version downloads.
+    fn install_update(&mut self) {
+        let UpdateState::Available(release) = self.update.clone() else {
+            return;
+        };
+        info!("downloading update {}", release.version);
+        self.balloon(
+            &tr!(
+                "Downloading JondisClip {version}",
+                version = release.version
+            ),
+            &tr!(
+                "It installs and restarts by itself when it's ready. Recording continues meanwhile."
+            ),
+            false,
+        );
+        let wanted = release.clone();
+        self.update = UpdateState::Downloading(release);
+        self.update_worker("jc-update-download", move || {
+            UpdateEvent::Downloaded(update::download(&wanted, &paths::update_dir()))
+        });
+        self.refresh();
+    }
+
+    /// Swaps in the downloaded files and restarts, once no clip is being
+    /// written (non-negotiable 2). If the swap fails the old version carries on.
+    fn finish_update(&mut self) {
+        let UpdateState::Ready(release, staged) = self.update.clone() else {
+            return;
+        };
+        if self.pending_saves > 0 || self.quit_requested.is_some() {
+            return;
+        }
+        let Some(dir) = Self::install_dir() else {
+            return;
+        };
+        let was_recording = self.recorder.is_some();
+        self.stop_recorder();
+        let started = update::apply(&staged, &dir).and_then(|()| {
+            std::process::Command::new(dir.join("jondisclip.exe"))
+                .arg("--updated")
+                .spawn()
+                .map_err(|e| format!("could not start the new version: {e}"))
+        });
+        match started {
+            Ok(_) => {
+                info!("update {} installed: restarting", release.version);
+                self.status = Status::Paused;
+                self.update = UpdateState::Idle;
+                self.post_quit();
+            }
+            Err(e) => {
+                error!("update {} failed: {e}", release.version);
+                self.balloon(&tr!("Couldn't update JondisClip"), &e, true);
+                self.update = UpdateState::Available(release);
+                if was_recording {
+                    self.start_recorder();
+                }
+            }
+        }
     }
 
     fn check_disk(&mut self) {
@@ -979,6 +1186,25 @@ impl App {
                 0,
                 &menu_text(&header),
             );
+            match &self.update {
+                UpdateState::Available(r) => {
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_STRING,
+                        ID_UPDATE as usize,
+                        &menu_text(&tr!("Install update {version}", version = r.version)),
+                    );
+                }
+                UpdateState::Downloading(_) | UpdateState::Ready(..) => {
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_STRING | MF_DISABLED | MF_GRAYED,
+                        0,
+                        &menu_text(&tr!("Downloading update…")),
+                    );
+                }
+                UpdateState::Idle | UpdateState::Checking => {}
+            }
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let save_label = format!(
                 "{}\t{}",
@@ -1086,6 +1312,7 @@ impl App {
             }
             ID_EDIT_SETTINGS => self.open_ui(true),
             ID_LIBRARY => self.open_ui(false),
+            ID_UPDATE => self.install_update(),
             ID_QUIT => {
                 self.request_quit();
                 return;
@@ -1128,6 +1355,18 @@ impl App {
                 .unwrap_or_default(),
             audio_error: info.and_then(|i| i.audio_error.clone()),
             mic_connected: self.recorder.as_ref().and_then(|r| r.stats().mic_connected),
+            version: env!("CARGO_PKG_VERSION").into(),
+            update_version: match &self.update {
+                UpdateState::Available(r)
+                | UpdateState::Downloading(r)
+                | UpdateState::Ready(r, _) => Some(r.version.clone()),
+                UpdateState::Idle | UpdateState::Checking => None,
+            },
+            update_state: match &self.update {
+                UpdateState::Downloading(_) => Some("downloading".into()),
+                UpdateState::Ready(..) => Some("installing".into()),
+                _ => None,
+            },
         };
         if self.published.as_ref() == Some(&status) {
             return;

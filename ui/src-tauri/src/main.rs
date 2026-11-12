@@ -19,10 +19,10 @@ use jondisclip_core::settings::{FPS_PRESETS, REPLAY_PRESETS, Settings};
 use jondisclip_core::status::TrayStatus;
 use jondisclip_core::tr;
 use serde::Serialize;
-use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM};
 use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    FindWindowW, PostMessageW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
 };
 use windows::core::{HSTRING, w};
 
@@ -371,6 +371,23 @@ fn open_folder(path: String) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+/// Asks the running tray to download and install the update it found
+/// (ADR-0020). The tray does the work, so recording carries on meanwhile.
+#[tauri::command]
+fn install_update() -> Result<(), String> {
+    let class = HSTRING::from(jondisclip_core::update::TRAY_WINDOW_CLASS);
+    let hwnd = unsafe { FindWindowW(&class, None) }.map_err(|e| e.to_string())?;
+    unsafe {
+        PostMessageW(
+            Some(hwnd),
+            jondisclip_core::update::WM_INSTALL_UPDATE,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// Page to open first: `--settings` from the tray's "Settings…", else the library.
@@ -997,6 +1014,7 @@ fn main() {
             update,
             check_hotkey,
             open_folder,
+            install_update,
             start_tray,
             initial_page,
             take_page_request,

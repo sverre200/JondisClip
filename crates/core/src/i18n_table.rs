@@ -731,4 +731,40 @@ pub static TABLE: &[(&str, &str, &str)] = &[
         r#"Mikrofonen din er godt innstilt. Ingen endringer trengs."#,
         r#"Mikrofonen din er godt innstilt. Ingen endringar trengst."#,
     ),
+    // ---- updates (ADR-0020)
+    (
+        r#"Update available: JondisClip {version}"#,
+        r#"Oppdatering tilgjengelig: JondisClip {version}"#,
+        r#"Oppdatering tilgjengeleg: JondisClip {version}"#,
+    ),
+    (
+        r#"Right-click the tray icon and choose Install update."#,
+        r#"Høyreklikk ikonet i systemstatusfeltet og velg Installer oppdatering."#,
+        r#"Høgreklikk på ikonet i systemstatusfeltet og vel Installer oppdatering."#,
+    ),
+    (
+        r#"Install update {version}"#,
+        r#"Installer oppdatering {version}"#,
+        r#"Installer oppdatering {version}"#,
+    ),
+    (
+        r#"Downloading update…"#,
+        r#"Laster ned oppdatering …"#,
+        r#"Lastar ned oppdatering …"#,
+    ),
+    (
+        r#"Downloading JondisClip {version}"#,
+        r#"Laster ned JondisClip {version}"#,
+        r#"Lastar ned JondisClip {version}"#,
+    ),
+    (
+        r#"It installs and restarts by itself when it's ready. Recording continues meanwhile."#,
+        r#"Den installeres og starter på nytt av seg selv når den er klar. Opptaket fortsetter imens."#,
+        r#"Ho vert installert og startar på nytt av seg sjølv når ho er klar. Opptaket held fram imens."#,
+    ),
+    (
+        r#"Couldn't update JondisClip"#,
+        r#"Kunne ikke oppdatere JondisClip"#,
+        r#"Kunne ikkje oppdatere JondisClip"#,
+    ),
 ];

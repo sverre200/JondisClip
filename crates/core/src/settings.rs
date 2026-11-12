@@ -104,6 +104,9 @@ pub struct Settings {
     /// Short sound when a clip is saved (works in fullscreen games).
     pub save_sound: bool,
     pub start_with_windows: bool,
+    /// Ask GitHub now and then whether a newer JondisClip exists (ADR-0020).
+    /// Nothing is installed without a click.
+    pub check_for_updates: bool,
     /// "Share to Discord" keeps files under this many MB (1 MB = 1,000,000 bytes).
     pub discord_limit_mb: u32,
     /// Google Drive for desktop folder for "Save to Drive". Empty = off.
@@ -150,6 +153,7 @@ impl Default for Settings {
             microphone_low_cut: false,
             save_sound: true,
             start_with_windows: false,
+            check_for_updates: true,
             discord_limit_mb: DISCORD_LIMIT_DEFAULT,
             drive_dir: PathBuf::new(),
             drive_keep_folders: true,

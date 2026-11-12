@@ -24,6 +24,12 @@ pub struct TrayStatus {
     pub audio_error: Option<String>,
     /// Some(false) while the chosen microphone isn't connected (None = mic off).
     pub mic_connected: Option<bool>,
+    /// The running tray's version, e.g. "0.1.1".
+    pub version: String,
+    /// A newer version the tray found on GitHub, if any.
+    pub update_version: Option<String>,
+    /// "downloading" or "installing" while an update is under way.
+    pub update_state: Option<String>,
 }
 
 impl TrayStatus {

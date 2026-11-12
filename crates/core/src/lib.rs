@@ -14,3 +14,4 @@ pub mod organize;
 pub mod paths;
 pub mod settings;
 pub mod status;
+pub mod update;
