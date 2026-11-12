@@ -32,4 +32,4 @@ The owner shares JondisClip with friends as a portable zip. Their PCs have hardw
 
 ## Verification
 - Unit tests (`crates/core/src/update.rs`): version parsing and comparison, refusing assets from other hosts or with odd names, the rename-and-copy swap, and the `.old` cleanup.
-- End to end: see the note added below when the first update between two published versions has been installed from the tray.
+- End to end (2026-11-12, owner's PC, Intel Arc 130V): a 0.1.2 install offered 0.1.3 twenty seconds after start, and "Install update 0.1.3" in the tray menu downloaded it, stopped the recorder, swapped the files and restarted as 0.1.3 within one second (`update 0.1.3 installed: restarting`, then `JondisClip 0.1.3 starting (args: ["--updated"])` in the log). Recording resumed, and Check now then reported "current".
