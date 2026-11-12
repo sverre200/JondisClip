@@ -4,7 +4,7 @@ members = ["crates/core", "crates/engine", "crates/app", "crates/export", "ui/sr
 
 [workspace.package]
 edition = "2024"
-version = "0.1.2"
+version = "0.1.3"
 license = "Proprietary"
 publish = false
 
