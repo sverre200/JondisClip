@@ -14,8 +14,10 @@ Getting started
    Windows may say "Windows protected your PC", because the app isn't
    signed. Click "More info", then "Run anyway". You only need to do
    this once.
-3. JondisClip is now in the system tray (by the clock; check the ^ arrow).
-   It starts recording straight away.
+3. The first time, a welcome window opens where you choose your hotkey,
+   where clips are saved, and whether to record your microphone.
+   JondisClip is now in the system tray (by the clock; check the ^ arrow)
+   and starts recording straight away.
 4. Press Alt+F10 to save the last 5 minutes. You'll hear a short sound and
    get a notification when the clip is saved.
 
@@ -78,6 +80,7 @@ there is one you get a notification. Right-click the tray icon and choose
 "Install update" (or use the button in Settings). It downloads, installs
 and restarts by itself; your clips and settings are kept. Nothing is
 installed without your click, and you can turn the check off in Settings.
+Settings also has a "Check now" button.
 
 
 Privacy

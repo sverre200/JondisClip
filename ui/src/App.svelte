@@ -7,12 +7,15 @@
   import Library from "./Library.svelte";
   import Player from "./Player.svelte";
   import Settings from "./Settings.svelte";
+  import Welcome from "./Welcome.svelte";
   import { t } from "./lib/i18n.svelte";
 
   type Page = "library" | "settings";
   let page = $state<Page | null>(null);
   let tray = $state<TrayView | null>(null);
   let startingTray = $state(false);
+  // First run: the welcome screen covers the app until it's completed.
+  let welcome = $state(false);
   // The clip open in the player, and the list it was opened from (for prev/next).
   let playing = $state<{ clip: Clip; list: Clip[] } | null>(null);
   // Latest scan, so a saved edit can be opened as soon as the library sees it.
@@ -72,6 +75,10 @@
     (async () => {
       page = await api.initialPage().catch(() => "library" as const);
       void pollTray();
+      void api
+        .load()
+        .then((s) => (welcome = !s.settings.setup_done))
+        .catch(() => {});
       // Reveal once the shell is rendered, so the window never flashes blank.
       // This deliberately doesn't wait for requestAnimationFrame, which a
       // hidden window may never get. The Rust side also has a fallback.
@@ -170,6 +177,10 @@
     {/if}
   </div>
 </div>
+
+{#if welcome}
+  <Welcome {tray} ondone={() => (welcome = false)} />
+{/if}
 
 {#if toast}
   <div class="toast" role="alert">{toast}</div>

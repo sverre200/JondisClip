@@ -28,6 +28,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// window posts to it for "Install update" (`WM_APP + 6`).
 pub const TRAY_WINDOW_CLASS: &str = "JondisClipTray";
 pub const WM_INSTALL_UPDATE: u32 = 0x8000 + 6;
+/// The settings window's "Check now" button (`WM_APP + 7`).
+pub const WM_CHECK_UPDATE: u32 = 0x8000 + 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {

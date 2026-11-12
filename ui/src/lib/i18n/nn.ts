@@ -358,5 +358,20 @@ export const nn: Record<string, string> = {
   "Version {version} is available": "Versjon {version} er tilgjengeleg",
   "You have {current}. Recording continues while it downloads, then JondisClip restarts.": "Du har {current}. Opptaket held fram medan ho vert lasta ned, og så startar JondisClip på nytt.",
   "Install update": "Installer oppdatering",
-  "Downloading…": "Lastar ned …"
+  "Downloading…": "Lastar ned …",
+  "Welcome to JondisClip": "Velkomen til JondisClip",
+  "JondisClip keeps the last {length} of your screen and sound while you play. Press the hotkey to save them as a clip.": "JondisClip tek vare på dei siste {length} av skjermen og lyden medan du spelar. Trykk på snøggtasten for å lagre dei som eit klipp.",
+  "saves a clip. JondisClip stays in the system tray, by the clock.": "lagrar eit klipp. JondisClip ligg i systemstatusfeltet, ved klokka.",
+  "Record my microphone": "Ta opp mikrofonen min",
+  "Off: clips have game sound only. On: your voice is saved as its own track.": "Av: klippa har berre spellyd. På: stemma di vert lagra som eit eige spor.",
+  "You can change all of this later in Settings.": "Du kan endre alt dette seinare i Innstillingar.",
+  "Start clipping": "Byrj å klippe",
+  "Close": "Lukk",
+  "JondisClip {version}": "JondisClip {version}",
+  "Check now": "Sjekk no",
+  "Start JondisClip to check for updates.": "Start JondisClip for å sjå etter oppdateringar.",
+  "A newer version is ready to install.": "Ein nyare versjon er klar til å installerast.",
+  "You have the latest version.": "Du har den nyaste versjonen.",
+  "Couldn't reach GitHub. Check your internet connection and try again.": "Fekk ikkje kontakt med GitHub. Sjekk internettsambandet og prøv igjen.",
+  "See whether a newer version is out.": "Sjå om det har kome ein nyare versjon."
 };

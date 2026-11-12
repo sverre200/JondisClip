@@ -179,6 +179,15 @@
       level = { peak: -100, rms: -100, hold: -100, holdAt: 0, error: null };
     };
   });
+  const updateHint = $derived.by(() => {
+    if (!tray?.running) return t("Start JondisClip to check for updates.");
+    const s = tray.status;
+    if (s?.update_check === "checking") return t("Checking…");
+    if (s?.update_version) return t("A newer version is ready to install.");
+    if (s?.update_check === "current") return t("You have the latest version.");
+    if (s?.update_check === "failed") return t("Couldn't reach GitHub. Check your internet connection and try again.");
+    return t("See whether a newer version is out.");
+  });
   const hotkeyConflict = $derived(
     !!tray?.running && !!tray.status && !tray.status.hotkey_ok && tray.status.hotkey === settings?.hotkey,
   );
@@ -483,6 +492,9 @@
       <Row label={t("Check for updates")} hint={t("Asks GitHub for a newer version when JondisClip starts. Nothing is installed without your click.")} id="t-updates">
         <Toggle id="t-updates" label={t("Check for updates")} checked={settings.check_for_updates} onchange={(v) => change({ check_for_updates: v })} />
       </Row>
+      <Row label={tray?.status?.version ? t("JondisClip {version}", { version: tray.status.version }) : "JondisClip"} hint={updateHint}>
+        <Button onclick={() => api.checkUpdate().catch((e) => showToast(String(e), "error"))} disabled={!tray?.running || tray.status?.update_check === "checking"}>{t("Check now")}</Button>
+      </Row>
       {#if tray?.running && tray.status?.update_version}
         <Row label={t("Version {version} is available", { version: tray.status.update_version })} hint={t("You have {current}. Recording continues while it downloads, then JondisClip restarts.", { current: tray.status.version })}>
           <Button onclick={() => api.installUpdate()} disabled={!!tray.status.update_state}>{tray.status.update_state ? t("Downloading…") : t("Install update")}</Button>
@@ -502,7 +514,7 @@
       </Row>
     </details>
 
-    <footer>{t("Changes are saved automatically.")}{#if tray?.status?.version} · JondisClip {tray.status.version}{/if}</footer>
+    <footer>{t("Changes are saved automatically.")}</footer>
   {/if}
 </main>
 

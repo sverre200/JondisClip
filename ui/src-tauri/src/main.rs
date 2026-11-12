@@ -377,17 +377,20 @@ fn open_folder(path: String) -> Result<(), String> {
 /// (ADR-0020). The tray does the work, so recording carries on meanwhile.
 #[tauri::command]
 fn install_update() -> Result<(), String> {
+    post_to_tray(jondisclip_core::update::WM_INSTALL_UPDATE)
+}
+
+/// Asks the running tray to check GitHub for a newer version now. The
+/// outcome arrives in `status.json` (`update_check`, `update_version`).
+#[tauri::command]
+fn check_update() -> Result<(), String> {
+    post_to_tray(jondisclip_core::update::WM_CHECK_UPDATE)
+}
+
+fn post_to_tray(message: u32) -> Result<(), String> {
     let class = HSTRING::from(jondisclip_core::update::TRAY_WINDOW_CLASS);
     let hwnd = unsafe { FindWindowW(&class, None) }.map_err(|e| e.to_string())?;
-    unsafe {
-        PostMessageW(
-            Some(hwnd),
-            jondisclip_core::update::WM_INSTALL_UPDATE,
-            WPARAM(0),
-            LPARAM(0),
-        )
-    }
-    .map_err(|e| e.to_string())
+    unsafe { PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0)) }.map_err(|e| e.to_string())
 }
 
 /// Page to open first: `--settings` from the tray's "Settings…", else the library.
@@ -1015,6 +1018,7 @@ fn main() {
             check_hotkey,
             open_folder,
             install_update,
+            check_update,
             start_tray,
             initial_page,
             take_page_request,

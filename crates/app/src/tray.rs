@@ -61,6 +61,8 @@ const WM_APP_UPDATE: u32 = WM_APP + 5;
 /// Posted by the settings window's "Install update" button
 /// (`jondisclip_core::update::WM_INSTALL_UPDATE`).
 const WM_APP_INSTALL_UPDATE: u32 = jondisclip_core::update::WM_INSTALL_UPDATE;
+/// Posted by the settings window's "Check now" button.
+const WM_APP_CHECK_UPDATE: u32 = jondisclip_core::update::WM_CHECK_UPDATE;
 const HOTKEY_ID: i32 = 1;
 const TIMER_ID: usize = 1;
 const TRAY_UID: u32 = 1;
@@ -143,6 +145,8 @@ struct App {
     update: UpdateState,
     update_events: Arc<Mutex<Vec<UpdateEvent>>>,
     last_update_check: Option<Instant>,
+    /// Outcome of the last "Check now": "current" or "failed" (for the window).
+    update_check_result: Option<&'static str>,
 }
 
 thread_local! {
@@ -227,6 +231,8 @@ pub fn load_settings(path: &Path) -> Settings {
 }
 
 pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), String> {
+    // No settings file yet: this is the first start on this PC.
+    let first_run = !settings_path.exists();
     let settings = load_settings(&settings_path);
     jondisclip_core::settings::apply_language(&settings);
     let hinstance = unsafe { GetModuleHandleW(None) }.map_err(|e| e.to_string())?;
@@ -292,6 +298,7 @@ pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), Stri
         update: UpdateState::Idle,
         update_events: Arc::new(Mutex::new(Vec::new())),
         last_update_check: None,
+        update_check_result: None,
     };
     APP.with(|a| *a.borrow_mut() = Some(app));
     with_app(|a| {
@@ -302,6 +309,12 @@ pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), Stri
         }
         a.start_recorder();
         a.refresh();
+        if first_run {
+            // A new user only sees a tray icon otherwise. The window shows
+            // its welcome screen while `setup_done` is false (ADR-0022).
+            info!("first run: opening the welcome screen");
+            a.open_ui(false);
+        }
     });
     unsafe { SetTimer(Some(hwnd), TIMER_ID, 1000, None) };
 
@@ -347,6 +360,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_INSTALL_UPDATE => {
             with_app(App::install_update);
+            LRESULT(0)
+        }
+        WM_APP_CHECK_UPDATE => {
+            with_app(App::check_update_now);
             LRESULT(0)
         }
         WM_APP_SECOND_INSTANCE => {
@@ -775,6 +792,24 @@ impl App {
         if Self::install_dir().is_none_or(|d| update::is_dev_install(&d)) {
             return;
         }
+        self.start_update_check();
+    }
+
+    /// "Check now" in the settings window: checks at once, whatever the
+    /// automatic-check setting says, and reports the outcome in status.json.
+    fn check_update_now(&mut self) {
+        if self.update != UpdateState::Idle {
+            // Already checking, or an update is on offer: nothing new to learn.
+            return;
+        }
+        info!("update check requested");
+        self.last_update_check = Some(Instant::now());
+        self.start_update_check();
+        self.refresh();
+    }
+
+    fn start_update_check(&mut self) {
+        self.update_check_result = None;
         self.update = UpdateState::Checking;
         self.update_worker("jc-update-check", || {
             UpdateEvent::Checked(update::check(env!("CARGO_PKG_VERSION")))
@@ -801,11 +836,13 @@ impl App {
                     self.update = UpdateState::Available(release);
                 }
                 (UpdateEvent::Checked(Ok(None)), UpdateState::Checking) => {
+                    self.update_check_result = Some("current");
                     self.update = UpdateState::Idle;
                 }
                 (UpdateEvent::Checked(Err(e)), UpdateState::Checking) => {
                     // Offline or GitHub unreachable: not worth a notification.
                     warning!("update check failed: {e}");
+                    self.update_check_result = Some("failed");
                     self.update = UpdateState::Idle;
                 }
                 (UpdateEvent::Downloaded(Ok(staged)), UpdateState::Downloading(release)) => {
@@ -830,6 +867,10 @@ impl App {
         let UpdateState::Available(release) = self.update.clone() else {
             return;
         };
+        if Self::install_dir().is_none_or(|d| update::is_dev_install(&d)) {
+            warning!("not installing an update over a developer build");
+            return;
+        }
         info!("downloading update {}", release.version);
         self.balloon(
             &tr!(
@@ -1365,6 +1406,11 @@ impl App {
             update_state: match &self.update {
                 UpdateState::Downloading(_) => Some("downloading".into()),
                 UpdateState::Ready(..) => Some("installing".into()),
+                _ => None,
+            },
+            update_check: match &self.update {
+                UpdateState::Checking => Some("checking".into()),
+                UpdateState::Idle => self.update_check_result.map(Into::into),
                 _ => None,
             },
         };

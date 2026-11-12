@@ -25,6 +25,8 @@ export interface Settings {
   save_sound: boolean;
   start_with_windows: boolean;
   check_for_updates: boolean;
+  /** the first-run welcome screen has been completed */
+  setup_done: boolean;
   /** "Share to Discord" size limit, MB (1 MB = 1,000,000 bytes) */
   discord_limit_mb: number;
   /** Google Drive for desktop folder for Save to Drive ("" = off) */
@@ -204,6 +206,8 @@ export interface TrayStatus {
   update_version: string | null;
   /** "downloading" or "installing" while an update is under way */
   update_state: string | null;
+  /** the last "Check now": "checking", "current" or "failed" */
+  update_check: string | null;
 }
 
 export interface InputDevice {
@@ -378,6 +382,7 @@ export const api = {
   checkHotkey: (text: string) => call<string>("check_hotkey", { text }),
   openFolder: (path: string) => call<void>("open_folder", { path }),
   installUpdate: () => call<void>("install_update"),
+  checkUpdate: () => call<void>("check_update"),
   startTray: () => call<void>("start_tray"),
   listMicrophones: () => call<InputDevice[]>("list_microphones"),
   micLevel: (device: string, gainDb: number) => call<MicLevel>("mic_level", { device, gainDb }),
@@ -468,6 +473,8 @@ const mockState: Snapshot = {
     save_sound: true,
     start_with_windows: false,
     check_for_updates: true,
+    // The browser preview shows the welcome screen with ?welcome in the URL.
+    setup_done: !new URLSearchParams(globalThis.location?.search ?? "").has("welcome"),
     discord_limit_mb: 19,
     drive_dir: "",
     drive_keep_folders: true,
@@ -497,6 +504,7 @@ const mockState: Snapshot = {
       version: "0.1.1",
       update_version: null,
       update_state: null,
+      update_check: null,
     },
   },
 };
@@ -717,6 +725,13 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
     case "clip_copy_file":
       return undefined;
 
+    case "check_update":
+      if (mockState.tray.status) {
+        const s = mockState.tray.status;
+        s.update_check = "checking";
+        setTimeout(() => (s.update_check = "current"), 1200);
+      }
+      return undefined;
     case "install_update":
       if (mockState.tray.status) mockState.tray.status.update_state = "downloading";
       return undefined;
