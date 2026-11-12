@@ -71,8 +71,21 @@ pub struct HwEncoder {
     device_ref: *mut ffi::AVBufferRef,
     frames_ref: *mut ffi::AVBufferRef,
     frame: *mut ffi::AVFrame,
+    /// Intel only: maps QSV pool surfaces to their D3D11 textures.
+    qsv_map: Option<QsvMap>,
     pkt: Packet,
     pub time_base: Rational,
+}
+
+/// `MFX_MEMTYPE_VIDEO_MEMORY_PROCESSOR_TARGET` from oneVPL's `mfxstructures.h`.
+const MFX_MEMTYPE_VIDEO_MEMORY_PROCESSOR_TARGET: i32 = 0x0020;
+
+struct QsvMap {
+    /// Reused for the one-time mapping of each new pool surface.
+    map_frame: *mut ffi::AVFrame,
+    /// (mfxFrameSurface1 pointer, D3D11 texture, array index). The pool owns
+    /// the textures and keeps them alive for the encoder's lifetime.
+    textures: Vec<(usize, *mut std::ffi::c_void, u32)>,
 }
 
 // SAFETY: the FFmpeg contexts are owned exclusively by this value and used
@@ -88,6 +101,7 @@ impl HwEncoder {
         let name = s.id.ffmpeg_name();
         let codec = encoder::find_by_name(name).ok_or(HwEncError::NotCompiled(name))?;
         let time_base = Rational::new(1, s.fps as i32);
+        let qsv = s.id.vendor == Vendor::Intel;
 
         // SAFETY: standard FFmpeg hwcontext setup. FFmpeg takes ownership of
         // the device reference we hand it (`into_raw`).
@@ -108,19 +122,43 @@ impl HwEncoder {
                 ffi::av_buffer_unref(&mut device_ref);
                 return Err(e);
             }
+            if qsv {
+                // QSV encoders only take QSV surfaces, not D3D11 frames. Derive a
+                // QSV device from our D3D11 device: its surfaces are D3D11
+                // textures on the same device, so frames still never leave VRAM.
+                let mut qsv_ref = ptr::null_mut();
+                let ret = ffi::av_hwdevice_ctx_create_derived(
+                    &mut qsv_ref,
+                    ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_QSV,
+                    device_ref,
+                    0,
+                );
+                // The derived device holds its own reference to the D3D11 one.
+                ffi::av_buffer_unref(&mut device_ref);
+                check("av_hwdevice_ctx_create_derived(qsv)", ret)?;
+                device_ref = qsv_ref;
+            }
             let mut frames_ref = ffi::av_hwframe_ctx_alloc(device_ref);
             if frames_ref.is_null() {
                 ffi::av_buffer_unref(&mut device_ref);
                 return Err(HwEncError::Null("av_hwframe_ctx_alloc"));
             }
             let fc = (*frames_ref).data as *mut ffi::AVHWFramesContext;
-            (*fc).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
             (*fc).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
             (*fc).width = s.width as i32;
             (*fc).height = s.height as i32;
             (*fc).initial_pool_size = 0; // grow on demand to what the encoder actually holds
-            let fhw = (*fc).hwctx as *mut ffi::AVD3D11VAFramesContext;
-            (*fhw).BindFlags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
+            if qsv {
+                (*fc).format = ffi::AVPixelFormat::AV_PIX_FMT_QSV;
+                let fhw = (*fc).hwctx as *mut ffi::AVQSVFramesContext;
+                // Render-target textures, so the converter can blit into them.
+                (*fhw).frame_type = MFX_MEMTYPE_VIDEO_MEMORY_PROCESSOR_TARGET;
+            } else {
+                (*fc).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11;
+                let fhw = (*fc).hwctx as *mut ffi::AVD3D11VAFramesContext;
+                (*fhw).BindFlags =
+                    (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
+            }
             if let Err(e) = check("av_hwframe_ctx_init", ffi::av_hwframe_ctx_init(frames_ref)) {
                 ffi::av_buffer_unref(&mut frames_ref);
                 ffi::av_buffer_unref(&mut device_ref);
@@ -142,7 +180,7 @@ impl HwEncoder {
             })?;
         enc.set_width(s.width);
         enc.set_height(s.height);
-        enc.set_format(Pixel::D3D11);
+        enc.set_format(if qsv { Pixel::QSV } else { Pixel::D3D11 });
         enc.set_time_base(time_base);
         enc.set_frame_rate(Some(Rational::new(s.fps as i32, 1)));
         enc.set_bit_rate(s.bitrate as usize);
@@ -207,19 +245,65 @@ impl HwEncoder {
                 source,
             })?;
 
-        let frame = unsafe { ffi::av_frame_alloc() };
+        let mut frame = unsafe { ffi::av_frame_alloc() };
         if frame.is_null() {
             return Err(HwEncError::Null("av_frame_alloc"));
         }
+        let qsv_map = if qsv {
+            let map_frame = unsafe { ffi::av_frame_alloc() };
+            if map_frame.is_null() {
+                unsafe { ffi::av_frame_free(&mut frame) };
+                return Err(HwEncError::Null("av_frame_alloc"));
+            }
+            Some(QsvMap {
+                map_frame,
+                textures: Vec::with_capacity(32),
+            })
+        } else {
+            None
+        };
         this_cleanup.disarm();
         Ok(Self {
             enc,
             device_ref,
             frames_ref,
             frame,
+            qsv_map,
             pkt: Packet::empty(),
             time_base,
         })
+    }
+
+    /// The D3D11 texture and array index behind `self.frame`.
+    ///
+    /// # Safety
+    /// `self.frame` must hold a buffer from `self.frames_ref`.
+    unsafe fn frame_texture(&mut self) -> Result<(*mut std::ffi::c_void, u32), HwEncError> {
+        let Some(map) = self.qsv_map.as_mut() else {
+            // data[0]/[1] of a D3D11 frame are the texture and its array index (FFmpeg docs).
+            let tex = unsafe { (*self.frame).data[0] } as *mut std::ffi::c_void;
+            let index = unsafe { (*self.frame).data[1] } as usize as u32;
+            return Ok((tex, index));
+        };
+        // data[3] of a QSV frame is its mfxFrameSurface1. Pool surfaces are
+        // reused, so each one is mapped to its D3D11 texture only once.
+        let surface = unsafe { (*self.frame).data[3] } as usize;
+        if let Some(&(_, tex, index)) = map.textures.iter().find(|(s, _, _)| *s == surface) {
+            return Ok((tex, index));
+        }
+        let mf = map.map_frame;
+        unsafe {
+            (*mf).format = ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32;
+            check(
+                "av_hwframe_map(qsv->d3d11)",
+                ffi::av_hwframe_map(mf, self.frame, ffi::AV_HWFRAME_MAP_WRITE as i32),
+            )?;
+            let tex = (*mf).data[0] as *mut std::ffi::c_void;
+            let index = (*mf).data[1] as usize as u32;
+            ffi::av_frame_unref(mf);
+            map.textures.push((surface, tex, index));
+            Ok((tex, index))
+        }
     }
 
     /// Codec parameters for muxers (call after `open`).
@@ -237,15 +321,19 @@ impl HwEncoder {
         fill: impl FnOnce(&ID3D11Texture2D, u32) -> windows::core::Result<()>,
         mut sink: impl FnMut(Packet),
     ) -> Result<bool, HwEncError> {
-        // SAFETY: `frame` is ours and unreferenced between calls. data[0]/[1]
-        // of a D3D11 frame are the texture and its array index (FFmpeg docs).
+        // SAFETY: `frame` is ours and unreferenced between calls.
         let mut ret = unsafe {
             check(
                 "av_hwframe_get_buffer",
                 ffi::av_hwframe_get_buffer(self.frames_ref, self.frame, 0),
             )?;
-            let tex_ptr = (*self.frame).data[0] as *mut std::ffi::c_void;
-            let index = (*self.frame).data[1] as usize as u32;
+            let (tex_ptr, index) = match self.frame_texture() {
+                Ok(t) => t,
+                Err(e) => {
+                    ffi::av_frame_unref(self.frame);
+                    return Err(e);
+                }
+            };
             let filled = match ID3D11Texture2D::from_raw_borrowed(&tex_ptr) {
                 Some(tex) => fill(tex, index).map_err(HwEncError::from),
                 None => Err(HwEncError::Null("D3D11 frame texture")),
@@ -310,6 +398,9 @@ impl Drop for HwEncoder {
     fn drop(&mut self) {
         unsafe {
             ffi::av_frame_free(&mut self.frame);
+            if let Some(map) = self.qsv_map.as_mut() {
+                ffi::av_frame_free(&mut map.map_frame);
+            }
             ffi::av_buffer_unref(&mut self.frames_ref);
             ffi::av_buffer_unref(&mut self.device_ref);
         }
