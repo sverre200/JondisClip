@@ -24,8 +24,40 @@
   let openWhenScanned: string | null = null;
   const samePath = (a: string, b: string) => a.replaceAll("/", "\\").toLowerCase() === b.replaceAll("/", "\\").toLowerCase();
 
+  // A clip renamed in the player: after the rescan, the player follows the
+  // file (its id changed with its name) and keeps its place in the list.
+  let renamed: { id: string; key: string; path: string | null; done: () => void } | null = null;
+  const fileName = (p: string) => p.replaceAll("/", "\\").split("\\").pop()!.toLowerCase();
+  async function renamePlaying(title: string) {
+    if (!playing) return;
+    const c = playing.clip;
+    let path: string | null = null;
+    try {
+      path = await api.clipTitle(c.id, c.key, title);
+    } catch (e) {
+      error(String(e)); // the title may still be saved: rescan either way
+    }
+    await new Promise<void>((done) => {
+      renamed = { id: c.id, key: c.key, path, done };
+      refreshToken++;
+      setTimeout(done, 4000); // never leave the player waiting on a failed scan
+    });
+  }
+
   function scanned(list: Clip[]) {
     clips = list;
+    if (renamed) {
+      const r = renamed;
+      renamed = null;
+      // By path; or the same recording under the new file name (should the
+      // two spell the folder differently); or unchanged, if the rename failed.
+      const now =
+        (r.path && list.find((x) => samePath(x.path, r.path!))) ||
+        (r.path && list.find((x) => x.key === r.key && fileName(x.path) === fileName(r.path!))) ||
+        list.find((x) => x.id === r.id);
+      if (now && playing?.clip.id === r.id) playing = { clip: now, list: playing.list.map((x) => (x.id === r.id ? now : x)) };
+      r.done();
+    }
     if (openWhenScanned) {
       const c = list.find((x) => samePath(x.path, openWhenScanned!));
       if (c) playing = { clip: c, list };
@@ -57,6 +89,29 @@
       /* keep the last known state */
     }
   }
+
+  // The button reacts on the click; the tray's status takes over when it arrives.
+  let installing = $state(false);
+  async function installUpdate() {
+    installing = true;
+    try {
+      await api.installUpdate();
+      for (let i = 0; i < 12 && !tray?.status?.update_state; i++) {
+        await new Promise((r) => setTimeout(r, 250));
+        await pollTray();
+      }
+    } catch (e) {
+      error(String(e));
+    } finally {
+      installing = false;
+    }
+  }
+  // Follow a download closely, so the percentage moves.
+  $effect(() => {
+    if (!tray?.status?.update_state) return;
+    const timer = setInterval(pollTray, 500);
+    return () => clearInterval(timer);
+  });
 
   async function startTray() {
     startingTray = true;
@@ -130,11 +185,16 @@
           <!-- Always in view on both pages: the tray menu and Settings have the same offer. -->
           <Button
             variant="primary"
-            onclick={() => api.installUpdate().catch((e) => error(String(e)))}
-            disabled={!!tray.status.update_state}
+            onclick={installUpdate}
+            disabled={!!tray.status.update_state || installing}
             title={t("Downloads the new version and restarts JondisClip. Recording continues while it downloads.")}
           >
-            {tray.status.update_state ? t("Downloading…") : t("Update to {version}", { version: tray.status.update_version })}
+            {#if tray.status.update_state || installing}
+              <span class="spin" aria-hidden="true"></span>
+              {tray.status.update_state === "installing" ? t("Installing…") : tray.status.update_progress != null ? t("Downloading… {percent} %", { percent: tray.status.update_progress }) : t("Downloading…")}
+            {:else}
+              {t("Update to {version}", { version: tray.status.update_version })}
+            {/if}
           </Button>
         {/if}
         <StatusPill {tray} />
@@ -172,7 +232,7 @@
       </div>
     {/if}
     {#if page === "settings"}
-      <div class="scroll"><Settings {tray} /></div>
+      <div class="fill"><Settings {tray} onpoll={pollTray} /></div>
     {/if}
     {#if playing}
       <div class="fill">
@@ -182,6 +242,7 @@
           hasNext={playing.list.slice(playIndex + 1).some((c) => !c.error)}
           onclose={() => (playing = null)}
           onstep={step}
+          onrename={renamePlaying}
           onerror={error}
           onsaved={() => refreshToken++}
           onopensaved={openSaved}
@@ -261,6 +322,22 @@
     justify-content: flex-end;
     gap: var(--s3);
   }
+  .spin {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: var(--s2);
+    vertical-align: -1px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
   .banner-wrap {
     padding: var(--s3) var(--s5) 0;
   }
@@ -275,10 +352,6 @@
   }
   .fill[hidden] {
     display: none;
-  }
-  .scroll {
-    height: 100%;
-    overflow-y: auto;
   }
   .toast {
     position: fixed;

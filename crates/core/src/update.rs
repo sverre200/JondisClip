@@ -36,6 +36,8 @@ pub struct Release {
     /// Without the leading "v", e.g. "0.1.1".
     pub version: String,
     pub zip_url: String,
+    /// The zip's size in bytes, when GitHub says (for download progress).
+    pub size: Option<u64>,
 }
 
 /// "v0.1.1" or "0.1.1" as (major, minor, patch).
@@ -57,19 +59,34 @@ pub fn newer_release(json: &str, current: &str) -> Option<Release> {
     if latest <= parse_version(current)? {
         return None;
     }
-    let zip_url = v.get("assets")?.as_array()?.iter().find_map(|a| {
+    let (zip_url, size) = v.get("assets")?.as_array()?.iter().find_map(|a| {
         let url = a.get("browser_download_url")?.as_str()?;
         let name = url.strip_prefix(DOWNLOAD_PREFIX)?;
         // Only our own plain file names: nothing that curl could read as an option or a path.
         let plain = name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "/.-_".contains(c));
-        (plain && !name.contains("..") && name.ends_with(ASSET_SUFFIX)).then(|| url.to_string())
+        (plain && !name.contains("..") && name.ends_with(ASSET_SUFFIX)).then(|| {
+            let size = a.get("size").and_then(serde_json::Value::as_u64);
+            (url.to_string(), size.filter(|s| *s > 0))
+        })
     })?;
     Some(Release {
         version: format!("{}.{}.{}", latest.0, latest.1, latest.2),
         zip_url,
+        size,
     })
+}
+
+/// File the download is written to under the work folder.
+const ZIP_NAME: &str = "update.zip";
+
+/// How far the download of `release` into `work_dir` has come, 0 to 99
+/// (`None` when the size isn't known). Reads only the file's size.
+pub fn download_progress(release: &Release, work_dir: &Path) -> Option<u8> {
+    let total = release.size?;
+    let have = fs::metadata(work_dir.join(ZIP_NAME)).map_or(0, |m| m.len());
+    Some((have.saturating_mul(100) / total).min(99) as u8)
 }
 
 fn system_tool(name: &str) -> PathBuf {
@@ -121,7 +138,7 @@ pub fn check(current: &str) -> Result<Option<Release>, String> {
 pub fn download(release: &Release, work_dir: &Path) -> Result<PathBuf, String> {
     let _ = fs::remove_dir_all(work_dir);
     fs::create_dir_all(work_dir).map_err(|e| format!("{}: {e}", work_dir.display()))?;
-    let zip = work_dir.join("update.zip");
+    let zip = work_dir.join(ZIP_NAME);
     run(
         "curl.exe",
         &[
@@ -262,6 +279,33 @@ mod tests {
         for bad in ["", "1.2", "1.2.3.4", "v1.x.3", "latest"] {
             assert_eq!(parse_version(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn download_progress_follows_the_file_size() {
+        let dir = std::env::temp_dir().join(format!("jc-update-progress-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let json = LATEST.replace("win64.zip\"}", "win64.zip\", \"size\": 1000}");
+        let r = newer_release(&json, "0.1.0").unwrap();
+        assert_eq!(r.size, Some(1000));
+        assert_eq!(
+            download_progress(&r, &dir),
+            Some(0),
+            "nothing downloaded yet"
+        );
+        fs::write(dir.join(ZIP_NAME), vec![0u8; 420]).unwrap();
+        assert_eq!(download_progress(&r, &dir), Some(42));
+        fs::write(dir.join(ZIP_NAME), vec![0u8; 1000]).unwrap();
+        assert_eq!(
+            download_progress(&r, &dir),
+            Some(99),
+            "100 only once it's unpacked"
+        );
+        // No size from GitHub: no percentage, the UI shows an indeterminate bar.
+        let unknown = newer_release(LATEST, "0.1.0").unwrap();
+        assert_eq!(download_progress(&unknown, &dir), None);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

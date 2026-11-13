@@ -14,7 +14,7 @@ export function estimateBitrate(s: Settings, srcW: number, srcH: number): number
   const target = s.resolution === "source" ? srcH : Math.min(parseInt(s.resolution, 10), srcH);
   const h = target & ~1;
   const w = Math.floor((srcW * h) / srcH) & ~1;
-  const bpp = s.codec === "hevc" || s.codec === "av1" ? 0.12 : 0.17;
+  const bpp = s.codec === "hevc" || s.codec === "av1" ? 0.12 : 0.136;
   const scale = { performance: 0.7, balanced: 1.0, high: 1.5 }[s.quality];
   return w * h * s.fps * bpp * scale;
 }

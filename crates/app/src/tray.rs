@@ -43,6 +43,7 @@ use crate::autostart;
 use crate::icon::{self, IconState};
 use crate::log::{error, info, warning};
 use crate::naming;
+use crate::toast::{self, Toast};
 use jondisclip_core::hotkey::MOD_NOREPEAT;
 use jondisclip_core::paths;
 use jondisclip_core::settings::{REPLAY_PRESETS, Settings, replay_label};
@@ -63,6 +64,8 @@ const WM_APP_UPDATE: u32 = WM_APP + 5;
 const WM_APP_INSTALL_UPDATE: u32 = jondisclip_core::update::WM_INSTALL_UPDATE;
 /// Posted by the settings window's "Check now" button.
 const WM_APP_CHECK_UPDATE: u32 = jondisclip_core::update::WM_CHECK_UPDATE;
+/// A notification or one of its buttons was clicked (see `toast.rs`).
+const WM_APP_TOAST: u32 = WM_APP + 8;
 const HOTKEY_ID: i32 = 1;
 const TIMER_ID: usize = 1;
 const TRAY_UID: u32 = 1;
@@ -147,6 +150,10 @@ struct App {
     last_update_check: Option<Instant>,
     /// Outcome of the last "Check now": "current" or "failed" (for the window).
     update_check_result: Option<&'static str>,
+    /// Modern notifications; `None` when Windows can't provide them.
+    toasts: Option<toast::Toasts>,
+    /// A toast was refused once (logged a single time).
+    toast_failed: std::cell::Cell<bool>,
 }
 
 thread_local! {
@@ -274,6 +281,9 @@ pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), Stri
     ]
     .map(|s| icon::make(s, size).unwrap_or_default());
     let taskbar_created = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+    if !crate::menu_theme::allow_dark_menus() {
+        info!("dark tray menu not available on this Windows build");
+    }
 
     let app = App {
         hwnd,
@@ -299,6 +309,14 @@ pub fn run(settings_path: PathBuf, default_save_dir: PathBuf) -> Result<(), Stri
         update_events: Arc::new(Mutex::new(Vec::new())),
         last_update_check: None,
         update_check_result: None,
+        toasts: match toast::Toasts::new(hwnd, WM_APP_TOAST, &paths::local_dir()) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                warning!("modern notifications unavailable, using balloons: {e}");
+                None
+            }
+        },
+        toast_failed: std::cell::Cell::new(false),
     };
     APP.with(|a| *a.borrow_mut() = Some(app));
     with_app(|a| {
@@ -364,6 +382,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_CHECK_UPDATE => {
             with_app(App::check_update_now);
+            LRESULT(0)
+        }
+        WM_APP_TOAST => {
+            with_app(App::on_toast);
             LRESULT(0)
         }
         WM_APP_SECOND_INSTANCE => {
@@ -568,8 +590,64 @@ impl App {
         self.publish_status();
     }
 
-    /// A quiet notification. Windows holds it back during Focus/game mode.
+    /// A quiet notification; clicking it opens the library. Windows holds it
+    /// back during Do Not Disturb and fullscreen games.
     fn balloon(&self, title: &str, text: &str, warning: bool) {
+        self.notify(
+            &Toast {
+                title,
+                text,
+                launch: "open",
+                actions: Vec::new(),
+                tag: None,
+            },
+            warning,
+        );
+    }
+
+    /// Shows a toast (ADR-0023), or the old tray balloon when Windows won't.
+    fn notify(&self, t: &Toast, warning: bool) {
+        if let Some(toasts) = &self.toasts {
+            match toasts.show(t) {
+                Ok(()) => return,
+                Err(e) => {
+                    // Once is enough in the log; it's usually a setting.
+                    if !self.toast_failed.replace(true) {
+                        warning!("toast not shown, using a balloon: {e}");
+                    }
+                }
+            }
+        }
+        self.legacy_balloon(t.title, t.text, warning);
+    }
+
+    /// A notification or one of its buttons was clicked.
+    fn on_toast(&mut self) {
+        let Some(clicks) = self.toasts.as_ref().map(toast::Toasts::take) else {
+            return;
+        };
+        for arg in clicks {
+            info!("notification clicked: {arg}");
+            if let Some(path) = arg.strip_prefix("folder:") {
+                use std::os::windows::process::CommandExt;
+                // Only a clip this app saved: the argument comes from our own toast.
+                if let Err(e) = std::process::Command::new("explorer")
+                    .raw_arg(format!("/select,\"{}\"", path.replace('"', "")))
+                    .spawn()
+                {
+                    error!("could not open Explorer: {e}");
+                }
+            } else if arg == "update" {
+                self.install_update();
+            } else if arg == "settings" {
+                self.open_ui(true);
+            } else {
+                self.open_ui(false);
+            }
+        }
+    }
+
+    fn legacy_balloon(&self, title: &str, text: &str, warning: bool) {
         let mut nid = self.base_nid();
         nid.uFlags = NIF_INFO;
         wide_into(&mut nid.szInfoTitle, title);
@@ -825,12 +903,22 @@ impl App {
             match (event, self.update.clone()) {
                 (UpdateEvent::Checked(Ok(Some(release))), UpdateState::Checking) => {
                     info!("update available: {}", release.version);
-                    self.balloon(
-                        &tr!(
-                            "Update available: JondisClip {version}",
-                            version = release.version
-                        ),
-                        &tr!("Right-click the tray icon and choose Install update."),
+                    self.notify(
+                        &Toast {
+                            title: &tr!(
+                                "Update available: JondisClip {version}",
+                                version = release.version
+                            ),
+                            text: &tr!(
+                                "Install it here, from the tray menu or in Settings. Recording continues while it downloads."
+                            ),
+                            launch: "settings",
+                            actions: vec![toast::Action {
+                                label: tr!("Install update"),
+                                arg: "update".into(),
+                            }],
+                            tag: Some("update"),
+                        },
                         false,
                     );
                     self.update = UpdateState::Available(release);
@@ -1166,13 +1254,28 @@ impl App {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     info!("saved {:?}", files);
-                    self.balloon(
-                        &tr!(
-                            "Clip saved · {game} · {length}",
-                            game = o.app,
-                            length = replay_label(o.seconds)
-                        ),
-                        &name,
+                    let mut actions = vec![toast::Action {
+                        label: tr!("Open library"),
+                        arg: "open".into(),
+                    }];
+                    if let Some(f) = files.first() {
+                        actions.push(toast::Action {
+                            label: tr!("Show in folder"),
+                            arg: format!("folder:{}", f.display()),
+                        });
+                    }
+                    self.notify(
+                        &Toast {
+                            title: &tr!(
+                                "Clip saved · {game} · {length}",
+                                game = o.app,
+                                length = replay_label(o.seconds)
+                            ),
+                            text: &name,
+                            launch: "open",
+                            actions,
+                            tag: None,
+                        },
                         false,
                     );
                 }
@@ -1406,6 +1509,10 @@ impl App {
             update_state: match &self.update {
                 UpdateState::Downloading(_) => Some("downloading".into()),
                 UpdateState::Ready(..) => Some("installing".into()),
+                _ => None,
+            },
+            update_progress: match &self.update {
+                UpdateState::Downloading(r) => update::download_progress(r, &paths::update_dir()),
                 _ => None,
             },
             update_check: match &self.update {

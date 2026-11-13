@@ -56,8 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Debug aid: JC_QP_FLOOR=none|<n> overrides the quality floor.
         qp_floor: match std::env::var("JC_QP_FLOOR").as_deref() {
             Ok("none") => None,
-            Ok(n) => n.parse().ok().or(Some(18)),
-            Err(_) => Some(18),
+            Ok(n) => n.parse().ok().or(Some(20)),
+            Err(_) => Some(20),
         },
         audio: AudioConfig {
             mic,

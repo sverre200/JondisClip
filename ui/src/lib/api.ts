@@ -206,6 +206,8 @@ export interface TrayStatus {
   update_version: string | null;
   /** "downloading" or "installing" while an update is under way */
   update_state: string | null;
+  /** percent downloaded (0 to 99) while downloading, when the size is known */
+  update_progress: number | null;
   /** the last "Check now": "checking", "current" or "failed" */
   update_check: string | null;
 }
@@ -325,7 +327,8 @@ export const api = {
   /** Custom order inside a folder: metadata only, no file moves. */
   clipsArrange: (folder: string, present: string[], keys: string[], before: string | null) =>
     call<void>("clips_arrange", { folder, present, keys, before }),
-  clipTitle: (id: string, key: string, title: string) => call<void>("clip_title", { id, key, title }),
+  /** Sets (or with "", clears) the title. The file is renamed to match; returns its new path. */
+  clipTitle: (id: string, key: string, title: string) => call<string>("clip_title", { id, key, title }),
   /** Records a Save to Drive copy, so the library marks the clip. */
   clipDriveMark: (key: string, path: string) => call<void>("clip_drive_mark", { key, path }),
   pendingResolve: (folder: string, items: Item[], moveThem: boolean) => call<MoveResult>("pending_resolve", { folder, items, moveThem }),
@@ -505,6 +508,7 @@ const mockState: Snapshot = {
       // The browser preview offers an update with ?update in the URL.
       update_version: new URLSearchParams(globalThis.location?.search ?? "").has("update") ? "0.1.4" : null,
       update_state: null,
+      update_progress: null,
       update_check: null,
     },
   },
@@ -707,7 +711,8 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       const t = String(args?.title ?? "").trim();
       if (t) mockTitles[String(args?.key)] = t;
       else delete mockTitles[String(args?.key)];
-      return undefined;
+      // The mock keeps file names (and so ids) as they are.
+      return (mockLib ?? []).find((c) => c.id === args?.id)?.path ?? "";
     }
     case "clip_drive_mark":
       mockDrive[String(args?.key)] = String(args?.path);
@@ -734,7 +739,20 @@ async function mock(cmd: string, args?: Record<string, unknown>): Promise<unknow
       }
       return undefined;
     case "install_update":
-      if (mockState.tray.status) mockState.tray.status.update_state = "downloading";
+      if (mockState.tray.status) {
+        // A pretend download: 12 % every 400 ms, then "installing" forever.
+        const s = mockState.tray.status;
+        s.update_state = "downloading";
+        s.update_progress = 0;
+        const timer = setInterval(() => {
+          s.update_progress = Math.min(99, (s.update_progress ?? 0) + 12);
+          if (s.update_progress >= 99) {
+            clearInterval(timer);
+            s.update_state = "installing";
+            s.update_progress = null;
+          }
+        }, 400);
+      }
       return undefined;
     case "tray_status":
       return structuredClone(mockState.tray);

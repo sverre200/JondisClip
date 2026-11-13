@@ -63,10 +63,12 @@ pub struct EncodeSettings {
 
 impl EncodeSettings {
     /// Default bitrate for a resolution and frame rate (the "Balanced" preset).
-    /// HEVC needs roughly 30 % less than H.264 for the same quality.
+    /// 1080p60 H.264 is about 17 Mb/s. Measured on real game clips
+    /// (docs/perf/2026-11-12-file-size.md): this is 20 % below the earlier
+    /// 0.17 for about 2 VMAF in busy scenes, and HEVC at 0.12 scores the same.
     pub fn default_bitrate(codec: Codec, width: u32, height: u32, fps: u32) -> u64 {
         let bits_per_pixel = match codec {
-            Codec::H264 => 0.17,
+            Codec::H264 => 0.136,
             Codec::Hevc | Codec::Av1 => 0.12,
         };
         (f64::from(width) * f64::from(height) * f64::from(fps) * bits_per_pixel) as u64

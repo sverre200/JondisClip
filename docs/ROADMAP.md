@@ -98,6 +98,8 @@ PresentMon baseline vs buffering on 3 titles. Tune the queue sizes, thread prior
   - **Titles rename the file** (ADR-0017, 2026-11-06): `<title> — <Game> <stamp>.mp4`, so Explorer and file pickers show the name set in the app.
   - **Norwegian and date format** (ADR-0018, 2026-11-06): the window and tray in English, Norsk bokmål or Norsk nynorsk; dates in the app and new file names as 06.11.2026, 2026-11-06 or 11/06/2026.
   - **Permanent delete and Recycle Bin** (ADR-0019, 2026-11-06): Delete permanently… (Shift+Del, confirmed) next to Delete to the Recycle Bin, and a Recycle Bin row in the sidebar that opens it in File Explorer.
+  - **Settings pages, update feedback, toasts** (ADR-0023, 2026-11-12): Settings has a side menu with one page per group; the Updates page shows checking, the result and download progress live; notifications are Windows toasts with buttons; the tray menu follows dark mode.
+  - **Smaller files** (ADR-0024, 2026-11-12): Balanced H.264 is about 20 % smaller (17 instead of 21 Mb/s at 1080p60), and calm scenes about 18 % smaller again (quality floor up by 2), measured on real WoW clips.
   - **Name sort** and a sort remembered per view. Reordering works with a filter on (hidden clips keep their places). Alt+←/→ moves clips. Dragging under another sort is refused with a hint.
   - All verified in a sandbox profile on sample clips; real Google Drive was not tested.
   - **Subfolders** (up to 3 levels, ADR-0015 update), a window and taskbar icon in the theme colour, a fade-in when the window opens, and a middle-button drag (or Alt+←/→ on a handle) that moves the whole trim selection.

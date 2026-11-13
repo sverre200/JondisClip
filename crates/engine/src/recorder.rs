@@ -130,7 +130,7 @@ impl Default for RecorderConfig {
             codec: Codec::H264, // ADR-0007: plays everywhere without extra codecs
             bitrate: None,
             quality_scale: 1.0,
-            qp_floor: Some(18),
+            qp_floor: Some(20),
             replay: Duration::from_secs(300),
             segment_seconds: 2,
             buffer_dir: default_buffer_dir(),

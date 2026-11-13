@@ -60,13 +60,15 @@ impl Quality {
         }
     }
 
-    /// Quality floor (minimum QP). Measured on test footage: calm scenes use
-    /// 55-60 % fewer bits for about 1-2 VMAF, and busy scenes are unchanged.
+    /// Quality floor (minimum QP): calm scenes stop spending bits on detail
+    /// nobody sees, and busy scenes are unchanged. Raised by 2 on 2026-11-12
+    /// (docs/perf/2026-11-12-file-size.md): on real game clips 20 instead of
+    /// 18 is 18 % smaller in calm scenes for under 1 VMAF.
     pub fn qp_floor(self) -> u32 {
         match self {
-            Self::Performance => 21,
-            Self::Balanced => 18,
-            Self::High => 16,
+            Self::Performance => 22,
+            Self::Balanced => 20,
+            Self::High => 18,
         }
     }
 }

@@ -30,6 +30,9 @@ pub struct TrayStatus {
     pub update_version: Option<String>,
     /// "downloading" or "installing" while an update is under way.
     pub update_state: Option<String>,
+    /// Percent downloaded (0 to 99) while `update_state` is "downloading",
+    /// when the size is known.
+    pub update_progress: Option<u8>,
     /// The last check asked for with "Check now": "checking", "current"
     /// (no newer version) or "failed" (GitHub unreachable).
     pub update_check: Option<String>,

@@ -979,14 +979,16 @@ pub async fn clips_arrange(
 }
 
 #[tauri::command]
-pub async fn clip_title(id: String, key: String, title: String) -> Result<(), String> {
+pub async fn clip_title(id: String, key: String, title: String) -> Result<String, String> {
     blocking(move || {
         let (org, ()) = meta(|o| o.set_title(&key, &title))?;
         // The file name carries the title too, so Explorer (and anything the
-        // file is sent to) shows it.
+        // file is sent to) shows it. Returns where the file is now, so an
+        // open player can follow it.
         let src = inside(&root(), &clip_path(&id)?)?;
         rename_for_title(&src, org.titles.get(&key).map(String::as_str))
-            .map(drop)
+            // Plain, as the library lists it (not the long `\\?\` form `inside` returns).
+            .map(|p| crate::plain_path(&p))
             .map_err(|e| tr!("Title saved, but {error}", error = e))
     })
     .await

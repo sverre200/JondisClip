@@ -46,7 +46,7 @@ mod tests {
         let (s, _) = Settings::from_toml("quality = \"high\"\nmicrophone = true\n");
         let c = recorder_config(&s);
         assert!((c.quality_scale - 1.5).abs() < f64::EPSILON);
-        assert_eq!(c.qp_floor, Some(16));
+        assert_eq!(c.qp_floor, Some(18));
         assert!(c.audio.mic && c.audio.system);
     }
 }

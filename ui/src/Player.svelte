@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { api, clipUrl, type Clip, type DriveStatus, type ExportEvent, type SharePlan } from "./lib/api";
   import { bytes, clock, clockPrecise, codecName, fromWithin, whenShort } from "./lib/format";
   import { cutPlan, estimateSize } from "./lib/trim";
@@ -14,6 +14,7 @@
     hasNext,
     onclose,
     onstep,
+    onrename,
     onerror,
     onsaved,
     onopensaved,
@@ -24,6 +25,8 @@
     onclose: () => void;
     /** -1 previous clip, +1 next clip (in the library's current order) */
     onstep: (dir: -1 | 1) => void;
+    /** set the clip's title ("" clears it); resolves once the renamed clip is the one shown */
+    onrename: (title: string) => Promise<void>;
     onerror: (msg: string) => void;
     /** an edit was saved at `path` (the library should rescan) */
     onsaved: (path: string) => void;
@@ -147,18 +150,60 @@
   let loading = $state(true);
   let failed = $state<string | null>(null);
 
-  // A new clip: reset and autoplay.
+  // ---- rename (the title above the video; F2)
+  let renaming = $state(false);
+  let draft = $state("");
+  let titleField = $state<HTMLInputElement>();
+  let savingTitle = $state(false);
+  // Renaming renames the file, so the same recording comes back under a new
+  // id. This carries the position and the trim over to it.
+  let keep: { key: string; time: number; trimStart: number; trimEnd: number; paused: boolean } | null = null;
+  let resume: { time: number; paused: boolean } | null = null;
+
+  function startRename() {
+    if (!clip.key || job.state === "running" || savingTitle || renaming) return;
+    draft = clip.title ?? "";
+    renaming = true;
+    void tick().then(() => {
+      titleField?.focus();
+      titleField?.select();
+    });
+  }
+  async function finishRename(save: boolean) {
+    if (!renaming) return;
+    renaming = false;
+    const title = draft.trim();
+    if (!save || title === (clip.title ?? "")) return;
+    keep = { key: clip.key, time, trimStart, trimEnd, paused };
+    savingTitle = true;
+    try {
+      await onrename(title);
+    } finally {
+      savingTitle = false;
+      keep = null;
+    }
+  }
+
+  // A new clip: reset and autoplay. (Not on a rescan, which hands over a new
+  // object for the same file.)
+  let shownId = "";
   $effect(() => {
     const id = clip.id;
+    if (id === shownId) return;
+    shownId = id;
     untrack(() => reset(id));
   });
   function reset(id: string) {
-    time = 0;
+    const same = keep && keep.key === clip.key ? keep : null;
+    keep = null;
+    renaming = false;
+    time = same?.time ?? 0;
     duration = clip.probe?.duration ?? 0;
-    trimStart = 0;
-    trimEnd = duration;
+    trimStart = same?.trimStart ?? 0;
+    trimEnd = same ? Math.min(same.trimEnd, duration || same.trimEnd) : duration;
+    resume = same ? { time: same.time, paused: same.paused } : null;
     keyframes = [];
-    if (job.state !== "running") job = { state: "idle" };
+    if (job.state !== "running" && !same) job = { state: "idle" };
     buffered = 0;
     loading = true;
     failed = null;
@@ -294,6 +339,16 @@
     frameCb = { v, id: v.requestVideoFrameCallback(tick) };
   }
 
+  function loaded() {
+    watchEnd();
+    // The same recording after a rename: back to where it was.
+    if (resume && video) {
+      video.currentTime = Math.min(resume.time, video.duration || resume.time);
+      if (resume.paused) video.pause();
+    }
+    resume = null;
+  }
+
   function toggle() {
     if (!video || failed) return;
     if (video.paused) {
@@ -373,6 +428,9 @@
         case "o":
         case "O":
           markOut();
+          return true;
+        case "F2":
+          startRename();
           return true;
         case "Escape":
           if (job.state === "running") return true; // cancel explicitly instead
@@ -476,7 +534,28 @@
       {t("Library")}
     </Button>
     <div class="title">
-      <strong title={clip.title ?? clip.game}>{clip.title ?? clip.game}</strong>
+      {#if renaming}
+        <input
+          bind:this={titleField}
+          bind:value={draft}
+          class="rename"
+          maxlength="120"
+          placeholder={clip.game}
+          aria-label={t("Clip title")}
+          spellcheck="false"
+          onkeydown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") void finishRename(true);
+            else if (e.key === "Escape") void finishRename(false);
+          }}
+          onblur={() => void finishRename(true)}
+        />
+      {:else}
+        <button type="button" class="tname" title={t("Rename (F2)")} aria-label={t("Rename {name}", { name: clip.title ?? clip.game })} disabled={!clip.key || job.state === "running" || savingTitle} onclick={startRename}>
+          <strong>{clip.title ?? clip.game}</strong>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 13l.6-2.9 7-7 2.3 2.3-7 7zM9.5 4.2l2.3 2.3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        </button>
+      {/if}
       <span>{meta}</span>
     </div>
     <div class="nav">
@@ -508,7 +587,7 @@
         ondurationchange={durationChanged}
         onprogress={progress}
         oncanplay={() => (loading = false)}
-        onloadedmetadata={watchEnd}
+        onloadedmetadata={loaded}
         onwaiting={() => (loading = true)}
         onplaying={() => (loading = false)}
         onerror={mediaError}
@@ -685,6 +764,60 @@
     min-width: 0;
     flex: 1;
     font-size: var(--fs-sm);
+  }
+  .tname {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    max-width: 100%;
+    width: max-content;
+    margin: -2px calc(-1 * var(--s1));
+    padding: 2px var(--s1);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: text;
+  }
+  .tname strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tname svg {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    color: var(--text-faint);
+    opacity: 0;
+    transition: opacity var(--t-fast) var(--ease);
+  }
+  .tname:hover:not(:disabled) {
+    background: var(--surface-hover);
+  }
+  .tname:hover:not(:disabled) svg,
+  .tname:focus-visible svg {
+    opacity: 1;
+  }
+  .tname:disabled {
+    cursor: default;
+  }
+  .rename {
+    width: min(100%, 420px);
+    height: 24px;
+    margin: -3px calc(-1 * var(--s2));
+    padding: 0 var(--s2);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-weight: var(--fw-strong);
+    outline: none;
+    user-select: text;
   }
   .title span {
     color: var(--text-muted);

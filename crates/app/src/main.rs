@@ -6,7 +6,9 @@ mod autostart;
 mod config;
 mod icon;
 mod log;
+mod menu_theme;
 mod naming;
+mod toast;
 mod tray;
 
 use jondisclip_core::paths;

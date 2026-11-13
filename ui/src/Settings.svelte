@@ -13,10 +13,40 @@
   import Slider from "./lib/Slider.svelte";
   import Toggle from "./lib/Toggle.svelte";
   import { THEMES, applyTheme } from "./lib/theme";
-  import { LANGUAGES, setLocale, t } from "./lib/i18n.svelte";
+  import { LANGUAGES, intlLocale, setLocale, t } from "./lib/i18n.svelte";
 
-  // Tray status is polled by the shell (App.svelte) for both pages.
-  let { tray }: { tray: TrayView | null } = $props();
+  // Tray status is polled by the shell (App.svelte) for both pages; `onpoll`
+  // asks for it right now (while an update check or download is under way).
+  let { tray, onpoll }: { tray: TrayView | null; onpoll: () => Promise<void> } = $props();
+
+  // One page per group, chosen in the side menu (the last one is remembered).
+  type Tab = "recording" | "audio" | "sharing" | "appearance" | "general" | "updates";
+  const TAB_IDS: Tab[] = ["recording", "audio", "sharing", "appearance", "general", "updates"];
+  const savedTab = localStorage.getItem("jc.settings.tab") as Tab | null;
+  let tab = $state<Tab>(savedTab && TAB_IDS.includes(savedTab) ? savedTab : "recording");
+  $effect(() => localStorage.setItem("jc.settings.tab", tab));
+  const tabs: { id: Tab; label: string; icon: string }[] = $derived([
+    { id: "recording", label: t("Recording"), icon: "M8 2.5a5.5 5.5 0 1 0 0 11a5.5 5.5 0 0 0 0-11zM8 6a2 2 0 1 0 0 4a2 2 0 0 0 0-4z" },
+    { id: "audio", label: t("Audio"), icon: "M8 2a2 2 0 0 0-2 2v4a2 2 0 0 0 4 0V4a2 2 0 0 0-2-2zM3.5 8a4.5 4.5 0 0 0 9 0M8 12.5v2" },
+    { id: "sharing", label: t("Sharing"), icon: "M8 10V2.5M5 5l3-3 3 3M3 9.5v3a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-3" },
+    { id: "appearance", label: t("Appearance"), icon: "M8 2.5c2.5 3 4 4.9 4 6.9a4 4 0 0 1-8 0c0-2 1.5-3.9 4-6.9z" },
+    { id: "general", label: t("General"), icon: "M2.5 5h6M11.5 5h2M2.5 11h2M7.5 11h6M10 3.5v3M6 9.5v3" },
+    { id: "updates", label: t("Updates"), icon: "M8 2.5v7M5 7l3 3 3-3M3 12.5h10" },
+  ]);
+  let pane = $state<HTMLElement>();
+  function go(id: Tab) {
+    tab = id;
+    pane?.scrollTo({ top: 0 });
+  }
+  function navKey(e: KeyboardEvent) {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp" && e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    e.preventDefault();
+    const els = [...((e.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>("button") ?? [])];
+    const i = els.indexOf(e.currentTarget as HTMLButtonElement);
+    const next = els[(i + (e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : -1) + els.length) % els.length];
+    next?.focus();
+    next?.click();
+  }
 
   let snap = $state<Snapshot | null>(null);
   let settings = $state<Settings | null>(null);
@@ -161,7 +191,7 @@
   const micOn = $derived(settings?.microphone ?? false);
   const micDevice = $derived(settings?.microphone_device ?? "");
   $effect(() => {
-    if (!micOn) return;
+    if (!micOn || tab !== "audio") return;
     const device = micDevice;
     const timer = setInterval(async () => {
       try {
@@ -179,14 +209,97 @@
       level = { peak: -100, rms: -100, hold: -100, holdAt: 0, error: null };
     };
   });
-  const updateHint = $derived.by(() => {
-    if (!tray?.running) return t("Start JondisClip to check for updates.");
-    const s = tray.status;
-    if (s?.update_check === "checking") return t("Checking…");
-    if (s?.update_version) return t("A newer version is ready to install.");
-    if (s?.update_check === "current") return t("You have the latest version.");
-    if (s?.update_check === "failed") return t("Couldn't reach GitHub. Check your internet connection and try again.");
-    return t("See whether a newer version is out.");
+  // ---- updates: the card reacts at once, then follows the tray's status ----
+  // When "Check now" was clicked (0: no check started from here).
+  let checkAt = $state(0);
+  let sawChecking = false;
+  let checkedAt = $state<Date | null>(null);
+  let checkTimedOut = $state(false);
+  // "Install update" was clicked and the tray hasn't reported the download yet.
+  let installAt = $state(0);
+
+  async function checkNow() {
+    if (checkAt) return;
+    checkTimedOut = false;
+    checkedAt = null;
+    sawChecking = false;
+    checkAt = Date.now();
+    try {
+      await api.checkUpdate();
+    } catch (e) {
+      checkAt = 0;
+      showToast(String(e), "error");
+    }
+  }
+  async function install() {
+    if (installAt) return;
+    installAt = Date.now();
+    try {
+      await api.installUpdate();
+    } catch (e) {
+      installAt = 0;
+      showToast(String(e), "error");
+    }
+  }
+  // The shell polls every 1.5 s; while something is happening, ask 4× a second.
+  const busy = $derived(!!checkAt || !!installAt || !!tray?.status?.update_state);
+  $effect(() => {
+    if (!busy) return;
+    const timer = setInterval(async () => {
+      await onpoll();
+      const s = tray?.status;
+      if (checkAt) {
+        const age = Date.now() - checkAt;
+        if (s?.update_check === "checking") sawChecking = true;
+        const settled = !!s?.update_version || s?.update_check === "current" || s?.update_check === "failed";
+        // Long enough to be seen, and not the answer from an earlier check.
+        if (settled && age >= 700 && (sawChecking || age >= 2000)) {
+          checkAt = 0;
+          checkedAt = new Date();
+        } else if (age > 30_000) {
+          checkAt = 0;
+          checkTimedOut = true;
+        }
+      }
+      if (installAt && (s?.update_state || Date.now() - installAt > 5000)) installAt = 0;
+    }, 250);
+    return () => clearInterval(timer);
+  });
+
+  type UpdateKind = "off" | "checking" | "available" | "downloading" | "installing" | "current" | "failed" | "idle";
+  const up: { kind: UpdateKind; title: string; text: string; percent?: number | null } = $derived.by(() => {
+    const s = tray?.status;
+    if (!tray?.running || !s) return { kind: "off", title: "JondisClip", text: t("Start JondisClip to check for updates.") };
+    const mine = t("JondisClip {version}", { version: s.version });
+    if (s.update_state === "installing")
+      return { kind: "installing", title: t("Installing {version}…", { version: s.update_version ?? "" }), text: t("JondisClip restarts by itself in a moment.") };
+    if (s.update_version && (s.update_state === "downloading" || installAt)) {
+      const percent = s.update_progress ?? null;
+      return {
+        kind: "downloading",
+        title: t("Downloading {version}…", { version: s.update_version }),
+        text: percent === null ? t("Recording continues meanwhile.") : t("{percent} % downloaded. Recording continues meanwhile.", { percent }),
+        percent,
+      };
+    }
+    if (checkAt || s.update_check === "checking") return { kind: "checking", title: t("Checking for updates…"), text: t("Asking GitHub for the newest version.") };
+    if (s.update_version)
+      return {
+        kind: "available",
+        title: t("Version {version} is available", { version: s.update_version }),
+        text: t("You have {current}. Recording continues while it downloads, then JondisClip restarts.", { current: s.version }),
+      };
+    if (checkTimedOut || s.update_check === "failed")
+      return { kind: "failed", title: t("Couldn't check for updates"), text: t("Couldn't reach GitHub. Check your internet connection and try again.") };
+    if (s.update_check === "current")
+      return {
+        kind: "current",
+        title: t("You have the latest version"),
+        text: checkedAt
+          ? t("{version} · checked at {time}", { version: mine, time: checkedAt.toLocaleTimeString(intlLocale(), { hour: "2-digit", minute: "2-digit" }) })
+          : mine,
+      };
+    return { kind: "idle", title: mine, text: t("See whether a newer version is out.") };
   });
   const hotkeyConflict = $derived(
     !!tray?.running && !!tray.status && !tray.status.hotkey_ok && tray.status.hotkey === settings?.hotkey,
@@ -253,7 +366,19 @@
   ]);
 </script>
 
-<main>
+<div class="settings">
+<nav class="snav" aria-label={t("Settings sections")}>
+  {#each tabs as x (x.id)}
+    <button type="button" class="srow" class:on={tab === x.id} aria-current={tab === x.id ? "page" : undefined} onclick={() => go(x.id)} onkeydown={navKey}>
+      <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d={x.icon} fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+      <span class="name">{x.label}</span>
+      {#if x.id === "updates" && tray?.running && tray.status?.update_version}<span class="dot" title={t("Version {version} is available", { version: tray.status.update_version })}></span>{/if}
+    </button>
+  {/each}
+</nav>
+<main bind:this={pane}>
+  <div class="page">
+  <h1>{tabs.find((x) => x.id === tab)?.label}</h1>
   {#if snap?.warnings.length}
     <Banner>{t("Some settings in the file were invalid and were reset: {list}", { list: snap.warnings.join("; ") })}</Banner>
   {/if}
@@ -271,6 +396,7 @@
       {#each Array(6) as _, i (i)}<div class="sk-row"></div>{/each}
     </div>
   {:else}
+    {#if tab === "recording"}
     <section aria-labelledby="h-replay">
       <h2 id="h-replay">{t("Instant replay")}</h2>
       <Row label={t("Replay length")} hint={t("How much of the past the hotkey saves.")}>
@@ -322,10 +448,19 @@
           onchange={(v) => change({ fps: v })}
         />
       </Row>
+      <Row label={t("Video codec")} hint={t("H.264 plays everywhere. HEVC and AV1 make smaller files but need extra codecs to play on many PCs.")}>
+        <Segmented
+          label={t("Video codec")}
+          value={settings.codec === "h264" ? "auto" : settings.codec}
+          options={codecs}
+          onchange={(v) => change({ codec: v })}
+        />
+      </Row>
     </section>
+    {/if}
 
-    <section aria-labelledby="h-audio">
-      <h2 id="h-audio">{t("Audio")}</h2>
+    {#if tab === "audio"}
+    <section aria-label={t("Audio")}>
       <Row label={t("Game and system audio")} hint={t("Everything you hear through your speakers or headset.")} id="t-sys">
         <Toggle id="t-sys" label={t("Game and system audio")} checked={settings.system_audio} onchange={(v) => change({ system_audio: v })} />
       </Row>
@@ -333,7 +468,7 @@
         <Toggle id="t-mic" label={t("Microphone")} checked={settings.microphone} onchange={(v) => change({ microphone: v })} />
       </Row>
       {#if settings.microphone}
-        <Row label={t("Microphone device")} hint={micHint} id="s-mic">
+        <Row label={t("Microphone device")} hint={micHint} hintLines={2} id="s-mic">
           <Select
             id="s-mic"
             label={t("Microphone device")}
@@ -358,7 +493,8 @@
             }}
           />
         </Row>
-        <Row label={t("Level")} hint={levelHint}>
+        <!-- The hint follows your voice: room for two lines, so the page doesn't jump. -->
+        <Row label={t("Level")} hint={levelHint} hintLines={2}>
           <LevelMeter peakDb={level.peak} rmsDb={level.rms} hold={level.hold} />
         </Row>
         <Row
@@ -383,9 +519,11 @@
         </Row>
       {/if}
     </section>
+    {/if}
 
+    {#if tab === "sharing"}
     <section aria-labelledby="h-share">
-      <h2 id="h-share">{t("Sharing")}</h2>
+      <h2 id="h-share">Discord</h2>
       <Row
         label={t("Discord upload limit")}
         hint={t("Share to Discord keeps files under this size. 19 MB is safe on a free account; Nitro allows more, which means better quality.")}
@@ -452,9 +590,10 @@
         </Row>
       {/if}
     </section>
+    {/if}
 
-    <section aria-labelledby="h-look">
-      <h2 id="h-look">{t("Appearance")}</h2>
+    {#if tab === "appearance"}
+    <section aria-label={t("Appearance")}>
       <Row label={t("Theme")} hint={t("Accent colour for buttons, selection and highlights. Recording and warning colours don't change.")} stacked>
         <div class="themes" role="radiogroup" aria-label={t("Theme")}>
           {#each THEMES as th (th.id)}
@@ -465,6 +604,15 @@
             </label>
           {/each}
         </div>
+      </Row>
+    </section>
+    {/if}
+
+    {#if tab === "general"}
+    <section aria-labelledby="h-start">
+      <h2 id="h-start">{t("Startup")}</h2>
+      <Row label={t("Start with Windows")} hint={t("Start JondisClip in the tray when you sign in.")} id="t-boot">
+        <Toggle id="t-boot" label={t("Start with Windows")} checked={settings.start_with_windows} onchange={(v) => change({ start_with_windows: v })} />
       </Row>
     </section>
 
@@ -484,39 +632,54 @@
       </Row>
     </section>
 
-    <section aria-labelledby="h-general">
-      <h2 id="h-general">{t("General")}</h2>
-      <Row label={t("Start with Windows")} hint={t("Start JondisClip in the tray when you sign in.")} id="t-boot">
-        <Toggle id="t-boot" label={t("Start with Windows")} checked={settings.start_with_windows} onchange={(v) => change({ start_with_windows: v })} />
-      </Row>
+    {/if}
+
+    {#if tab === "updates"}
+    <section aria-label={t("Updates")}>
+      <div class="dcard ucard {up.kind}">
+        <span class="dicon" aria-hidden="true">
+          {#if up.kind === "checking" || up.kind === "downloading" || up.kind === "installing"}<span class="spin"></span>
+          {:else if up.kind === "current"}<svg viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7" /></svg>
+          {:else if up.kind === "available"}<svg viewBox="0 0 16 16"><path d="M8 3v7M5 7.5l3 3 3-3M4 13h8" /></svg>
+          {:else if up.kind === "failed"}<svg viewBox="0 0 16 16"><path d="M8 4.5v4.5M8 11.5v.01" /></svg>
+          {:else}<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5" /></svg>{/if}
+        </span>
+        <div class="dtext" role="status" aria-live="polite">
+          <span class="dpath">{up.title}</span>
+          <span class="dmsg">{up.text}</span>
+          {#if up.kind === "downloading" || up.kind === "installing"}
+            <div
+              class="bar"
+              class:unknown={up.kind === "installing" || up.percent == null}
+              role="progressbar"
+              aria-label={up.title}
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow={up.kind === "downloading" ? (up.percent ?? undefined) : undefined}
+            >
+              <span style:width="{up.kind === "installing" ? 100 : (up.percent ?? 30)}%"></span>
+            </div>
+          {/if}
+        </div>
+        {#if up.kind === "available"}
+          <Button variant="primary" onclick={install}>{t("Install update")}</Button>
+        {:else if up.kind === "failed"}
+          <Button onclick={checkNow}>{t("Try again")}</Button>
+        {:else if up.kind !== "downloading" && up.kind !== "installing"}
+          <Button onclick={checkNow} disabled={up.kind === "off" || up.kind === "checking"}>{up.kind === "checking" ? t("Checking…") : t("Check now")}</Button>
+        {/if}
+      </div>
       <Row label={t("Check for updates")} hint={t("Asks GitHub for a newer version when JondisClip starts. Nothing is installed without your click.")} id="t-updates">
         <Toggle id="t-updates" label={t("Check for updates")} checked={settings.check_for_updates} onchange={(v) => change({ check_for_updates: v })} />
       </Row>
-      <Row label={tray?.status?.version ? t("JondisClip {version}", { version: tray.status.version }) : "JondisClip"} hint={updateHint}>
-        <Button onclick={() => api.checkUpdate().catch((e) => showToast(String(e), "error"))} disabled={!tray?.running || tray.status?.update_check === "checking"}>{t("Check now")}</Button>
-      </Row>
-      {#if tray?.running && tray.status?.update_version}
-        <Row label={t("Version {version} is available", { version: tray.status.update_version })} hint={t("You have {current}. Recording continues while it downloads, then JondisClip restarts.", { current: tray.status.version })}>
-          <Button onclick={() => api.installUpdate()} disabled={!!tray.status.update_state}>{tray.status.update_state ? t("Downloading…") : t("Install update")}</Button>
-        </Row>
-      {/if}
     </section>
-
-    <details>
-      <summary>{t("Advanced")}</summary>
-      <Row label={t("Video codec")} hint={t("H.264 plays everywhere. HEVC and AV1 make smaller files but need extra codecs to play on many PCs.")}>
-        <Segmented
-          label={t("Video codec")}
-          value={settings.codec === "h264" ? "auto" : settings.codec}
-          options={codecs}
-          onchange={(v) => change({ codec: v })}
-        />
-      </Row>
-    </details>
+    {/if}
 
     <footer>{t("Changes are saved automatically.")}</footer>
   {/if}
+  </div>
 </main>
+</div>
 
 {#if toast}
   <div class="toast {toast.tone}" role={toast.tone === "error" ? "alert" : "status"}>
@@ -528,13 +691,175 @@
 {/if}
 
 <style>
+  .settings {
+    display: flex;
+    height: 100%;
+    min-height: 0;
+  }
+  /* Same look as the library's folder menu. */
+  .snav {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    width: 208px;
+    flex: none;
+    padding: var(--s3) var(--s2);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+  }
+  .srow {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    width: 100%;
+    height: 32px;
+    padding: 0 var(--s2);
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: var(--fs-sm);
+    text-align: left;
+    cursor: pointer;
+    flex: none;
+  }
+  .srow:hover {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+  .srow.on {
+    background: var(--surface-raised);
+    color: var(--text);
+    font-weight: var(--fw-strong);
+  }
+  .glyph {
+    width: 16px;
+    height: 16px;
+    flex: none;
+  }
+  .name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--accent);
+  }
   main {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+  }
+  .page {
     max-width: 720px;
     margin: 0 auto;
     padding: var(--s5) var(--s5) var(--s7);
     display: flex;
     flex-direction: column;
     gap: var(--s5);
+  }
+  h1 {
+    margin: 0;
+    font-family: var(--font-display);
+    font-size: var(--fs-xl);
+    font-weight: var(--fw-strong);
+  }
+  /* Narrow windows: the menu becomes a strip above the page. */
+  @media (max-width: 760px) {
+    .settings {
+      flex-direction: column;
+    }
+    .snav {
+      flex-direction: row;
+      gap: var(--s1);
+      width: auto;
+      padding: var(--s2) var(--s3);
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+      overflow: auto hidden;
+    }
+    .srow {
+      width: auto;
+      padding: 0 var(--s3);
+    }
+    .name {
+      flex: none;
+      overflow: visible;
+    }
+  }
+  .ucard {
+    padding: var(--s3);
+    margin-bottom: var(--s2);
+  }
+  .ucard .dicon {
+    width: 32px;
+    height: 32px;
+    background: var(--surface-raised);
+    color: var(--text-muted);
+  }
+  .ucard .dicon svg {
+    width: 16px;
+    height: 16px;
+  }
+  .ucard.current .dicon {
+    background: var(--success-soft);
+    color: var(--success);
+  }
+  .ucard.available,
+  .ucard.downloading,
+  .ucard.installing {
+    border-color: var(--accent);
+  }
+  .ucard.available .dicon,
+  .ucard.checking .dicon,
+  .ucard.downloading .dicon,
+  .ucard.installing .dicon {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .ucard.failed .dicon {
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+  .ucard .dpath {
+    white-space: normal;
+  }
+  .bar {
+    height: 4px;
+    margin-top: var(--s2);
+    border-radius: var(--radius-pill);
+    background: var(--surface-raised);
+    overflow: hidden;
+  }
+  .bar span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--accent);
+    transition: width var(--t-med) linear;
+  }
+  .bar.unknown span {
+    animation: slide 1.2s var(--ease) infinite;
+  }
+  @keyframes slide {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(340%);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar.unknown span,
+    .spin {
+      animation-duration: 4s;
+    }
   }
   h2 {
     margin: 0 0 var(--s1);
@@ -697,25 +1022,6 @@
   .below-right {
     display: flex;
     justify-content: flex-end;
-  }
-  details {
-    border-top: 1px solid var(--border);
-    padding-top: var(--s3);
-  }
-  summary {
-    cursor: pointer;
-    color: var(--text-muted);
-    font-size: var(--fs-sm);
-    font-weight: var(--fw-strong);
-    padding: var(--s1) 0;
-    width: max-content;
-    border-radius: var(--radius-sm);
-  }
-  summary:hover {
-    color: var(--text);
-  }
-  details :global(.row:first-of-type) {
-    border-top: none;
   }
   footer {
     color: var(--text-faint);

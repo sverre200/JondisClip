@@ -738,10 +738,21 @@ pub static TABLE: &[(&str, &str, &str)] = &[
         r#"Oppdatering tilgjengeleg: JondisClip {version}"#,
     ),
     (
-        r#"Right-click the tray icon and choose Install update."#,
-        r#"Høyreklikk ikonet i systemstatusfeltet og velg Installer oppdatering."#,
-        r#"Høgreklikk på ikonet i systemstatusfeltet og vel Installer oppdatering."#,
+        r#"Install it here, from the tray menu or in Settings. Recording continues while it downloads."#,
+        r#"Installer den her, fra menyen i systemstatusfeltet eller i Innstillinger. Opptaket fortsetter mens den lastes ned."#,
+        r#"Installer ho her, frå menyen i systemstatusfeltet eller i Innstillingar. Opptaket held fram medan ho vert lasta ned."#,
     ),
+    (
+        r#"Install update"#,
+        r#"Installer oppdatering"#,
+        r#"Installer oppdatering"#,
+    ),
+    (
+        r#"Open library"#,
+        r#"Åpne biblioteket"#,
+        r#"Opne biblioteket"#,
+    ),
+    (r#"Show in folder"#, r#"Vis i mappe"#, r#"Vis i mappe"#),
     (
         r#"Install update {version}"#,
         r#"Installer oppdatering {version}"#,

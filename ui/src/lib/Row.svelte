@@ -6,6 +6,7 @@
     hint,
     id,
     stacked = false,
+    hintLines = 0,
     children,
     below,
   }: {
@@ -15,6 +16,8 @@
     id?: string;
     /** put the control under the text (wide controls) */
     stacked?: boolean;
+    /** keep room for this many lines of hint, for hints whose text changes while you watch */
+    hintLines?: number;
     children: Snippet;
     below?: Snippet;
   } = $props();
@@ -23,7 +26,7 @@
 <div class="row" class:stacked>
   <div class="text">
     {#if id}<label class="label" for={id}>{label}</label>{:else}<div class="label">{label}</div>{/if}
-    {#if hint}<div class="hint">{hint}</div>{/if}
+    {#if hint}<div class="hint" style:min-height={hintLines ? `${hintLines}lh` : undefined}>{hint}</div>{/if}
   </div>
   <div class="control">{@render children()}</div>
   {#if below}<div class="below">{@render below()}</div>{/if}
