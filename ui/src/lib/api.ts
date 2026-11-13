@@ -208,6 +208,8 @@ export interface TrayStatus {
   update_state: string | null;
   /** percent downloaded (0 to 99) while downloading, when the size is known */
   update_progress: number | null;
+  /** runs from a build folder: it checks for updates but never installs one */
+  dev_build: boolean;
   /** the last "Check now": "checking", "current" or "failed" */
   update_check: string | null;
 }
@@ -509,6 +511,8 @@ const mockState: Snapshot = {
       update_version: new URLSearchParams(globalThis.location?.search ?? "").has("update") ? "0.1.4" : null,
       update_state: null,
       update_progress: null,
+      // ?dev in the URL: a developer build, which can't install updates.
+      dev_build: new URLSearchParams(globalThis.location?.search ?? "").has("dev"),
       update_check: null,
     },
   },

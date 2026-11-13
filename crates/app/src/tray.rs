@@ -827,6 +827,12 @@ impl App {
             .and_then(|e| e.parent().map(Path::to_path_buf))
     }
 
+    /// A copy run from Cargo's build folder (or one we can't locate): it
+    /// never replaces itself with a release.
+    fn is_dev_build() -> bool {
+        Self::install_dir().is_none_or(|d| update::is_dev_install(&d))
+    }
+
     /// Runs `work` on its own thread and wakes the tray with its result.
     fn update_worker(&self, name: &str, work: impl FnOnce() -> UpdateEvent + Send + 'static) {
         let events = self.update_events.clone();
@@ -867,7 +873,7 @@ impl App {
             return;
         }
         self.last_update_check = Some(Instant::now());
-        if Self::install_dir().is_none_or(|d| update::is_dev_install(&d)) {
+        if Self::is_dev_build() {
             return;
         }
         self.start_update_check();
@@ -903,20 +909,31 @@ impl App {
             match (event, self.update.clone()) {
                 (UpdateEvent::Checked(Ok(Some(release))), UpdateState::Checking) => {
                     info!("update available: {}", release.version);
+                    let dev = Self::is_dev_build();
                     self.notify(
                         &Toast {
                             title: &tr!(
                                 "Update available: JondisClip {version}",
                                 version = release.version
                             ),
-                            text: &tr!(
-                                "Install it here, from the tray menu or in Settings. Recording continues while it downloads."
-                            ),
+                            text: &if dev {
+                                tr!(
+                                    "This copy is a developer build, so it doesn't update itself. Rebuild it to get the new version."
+                                )
+                            } else {
+                                tr!(
+                                    "Install it here, from the tray menu or in Settings. Recording continues while it downloads."
+                                )
+                            },
                             launch: "settings",
-                            actions: vec![toast::Action {
-                                label: tr!("Install update"),
-                                arg: "update".into(),
-                            }],
+                            actions: if dev {
+                                Vec::new()
+                            } else {
+                                vec![toast::Action {
+                                    label: tr!("Install update"),
+                                    arg: "update".into(),
+                                }]
+                            },
                             tag: Some("update"),
                         },
                         false,
@@ -955,7 +972,7 @@ impl App {
         let UpdateState::Available(release) = self.update.clone() else {
             return;
         };
-        if Self::install_dir().is_none_or(|d| update::is_dev_install(&d)) {
+        if Self::is_dev_build() {
             warning!("not installing an update over a developer build");
             return;
         }
@@ -1331,6 +1348,17 @@ impl App {
                 &menu_text(&header),
             );
             match &self.update {
+                UpdateState::Available(r) if Self::is_dev_build() => {
+                    let _ = AppendMenuW(
+                        menu,
+                        MF_STRING | MF_DISABLED | MF_GRAYED,
+                        0,
+                        &menu_text(&tr!(
+                            "Version {version} is out (developer build: rebuild to update)",
+                            version = r.version
+                        )),
+                    );
+                }
                 UpdateState::Available(r) => {
                     let _ = AppendMenuW(
                         menu,
@@ -1515,6 +1543,7 @@ impl App {
                 UpdateState::Downloading(r) => update::download_progress(r, &paths::update_dir()),
                 _ => None,
             },
+            dev_build: Self::is_dev_build(),
             update_check: match &self.update {
                 UpdateState::Checking => Some("checking".into()),
                 UpdateState::Idle => self.update_check_result.map(Into::into),

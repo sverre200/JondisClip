@@ -33,6 +33,9 @@ pub struct TrayStatus {
     /// Percent downloaded (0 to 99) while `update_state` is "downloading",
     /// when the size is known.
     pub update_progress: Option<u8>,
+    /// This copy runs from a Cargo build folder: it can check for updates
+    /// but never installs one (ADR-0020), so the window offers no button.
+    pub dev_build: bool,
     /// The last check asked for with "Check now": "checking", "current"
     /// (no newer version) or "failed" (GitHub unreachable).
     pub update_check: Option<String>,

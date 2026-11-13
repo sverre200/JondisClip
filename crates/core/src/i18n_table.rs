@@ -748,6 +748,16 @@ pub static TABLE: &[(&str, &str, &str)] = &[
         r#"Installer oppdatering"#,
     ),
     (
+        r#"This copy is a developer build, so it doesn't update itself. Rebuild it to get the new version."#,
+        r#"Denne kopien er et utviklerbygg og oppdaterer ikke seg selv. Bygg den på nytt for å få den nye versjonen."#,
+        r#"Denne kopien er eit utviklarbygg og oppdaterer ikkje seg sjølv. Bygg han på nytt for å få den nye versjonen."#,
+    ),
+    (
+        r#"Version {version} is out (developer build: rebuild to update)"#,
+        r#"Versjon {version} er ute (utviklerbygg: bygg på nytt for å oppdatere)"#,
+        r#"Versjon {version} er ute (utviklarbygg: bygg på nytt for å oppdatere)"#,
+    ),
+    (
         r#"Open library"#,
         r#"Åpne biblioteket"#,
         r#"Opne biblioteket"#,

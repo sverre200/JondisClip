@@ -181,7 +181,7 @@
         <button type="button" class:on={page === "settings"} aria-current={page === "settings" ? "page" : undefined} onclick={() => (page = "settings")}>{t("Settings")}</button>
       </nav>
       <div class="right">
-        {#if tray?.running && tray.status?.update_version}
+        {#if tray?.running && tray.status?.update_version && !tray.status.dev_build}
           <!-- Always in view on both pages: the tray menu and Settings have the same offer. -->
           <Button
             variant="primary"

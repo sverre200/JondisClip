@@ -266,7 +266,7 @@
     return () => clearInterval(timer);
   });
 
-  type UpdateKind = "off" | "checking" | "available" | "downloading" | "installing" | "current" | "failed" | "idle";
+  type UpdateKind = "off" | "checking" | "available" | "dev" | "downloading" | "installing" | "current" | "failed" | "idle";
   const up: { kind: UpdateKind; title: string; text: string; percent?: number | null } = $derived.by(() => {
     const s = tray?.status;
     if (!tray?.running || !s) return { kind: "off", title: "JondisClip", text: t("Start JondisClip to check for updates.") };
@@ -283,6 +283,12 @@
       };
     }
     if (checkAt || s.update_check === "checking") return { kind: "checking", title: t("Checking for updates…"), text: t("Asking GitHub for the newest version.") };
+    if (s.update_version && s.dev_build)
+      return {
+        kind: "dev",
+        title: t("Version {version} is available", { version: s.update_version }),
+        text: t("You have {current}. This copy runs from the project's build folder, so it doesn't update itself. Rebuild it, or use a copy from the released zip.", { current: s.version }),
+      };
     if (s.update_version)
       return {
         kind: "available",
@@ -372,7 +378,7 @@
     <button type="button" class="srow" class:on={tab === x.id} aria-current={tab === x.id ? "page" : undefined} onclick={() => go(x.id)} onkeydown={navKey}>
       <svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d={x.icon} fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
       <span class="name">{x.label}</span>
-      {#if x.id === "updates" && tray?.running && tray.status?.update_version}<span class="dot" title={t("Version {version} is available", { version: tray.status.update_version })}></span>{/if}
+      {#if x.id === "updates" && tray?.running && tray.status?.update_version && !tray.status.dev_build}<span class="dot" title={t("Version {version} is available", { version: tray.status.update_version })}></span>{/if}
     </button>
   {/each}
 </nav>
@@ -640,7 +646,7 @@
         <span class="dicon" aria-hidden="true">
           {#if up.kind === "checking" || up.kind === "downloading" || up.kind === "installing"}<span class="spin"></span>
           {:else if up.kind === "current"}<svg viewBox="0 0 16 16"><path d="M3.5 8.5l3 3 6-7" /></svg>
-          {:else if up.kind === "available"}<svg viewBox="0 0 16 16"><path d="M8 3v7M5 7.5l3 3 3-3M4 13h8" /></svg>
+          {:else if up.kind === "available" || up.kind === "dev"}<svg viewBox="0 0 16 16"><path d="M8 3v7M5 7.5l3 3 3-3M4 13h8" /></svg>
           {:else if up.kind === "failed"}<svg viewBox="0 0 16 16"><path d="M8 4.5v4.5M8 11.5v.01" /></svg>
           {:else}<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.5" /></svg>{/if}
         </span>

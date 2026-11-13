@@ -388,5 +388,6 @@ export const nn: Record<string, string> = {
   "{version} · checked at {time}": "{version} · sjekka kl. {time}",
   "Settings sections": "Delar av innstillingane",
   "Startup": "Oppstart",
-  "Rename {name}": "Gi {name} nytt namn"
+  "Rename {name}": "Gi {name} nytt namn",
+  "You have {current}. This copy runs from the project's build folder, so it doesn't update itself. Rebuild it, or use a copy from the released zip.": "Du har {current}. Denne kopien køyrer frå byggjemappa til prosjektet og oppdaterer difor ikkje seg sjølv. Bygg han på nytt, eller bruk ein kopi frå den utgjevne zip-fila."
 };

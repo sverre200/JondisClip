@@ -12,6 +12,7 @@ The owner shares JondisClip with friends as a portable zip. Their PCs have hardw
   - It's one anonymous GET. Nothing about the PC, the user or the clips is sent. GitHub sees the IP address, as with any download.
   - The **Check for updates** setting (`check_for_updates`, on by default) turns it off.
   - Developer builds (run from Cargo's `target` folder) never check.
+    - "Check now" still works on one, and it never installs. Since 2026-11-13 it says so instead of offering a button that did nothing: `status.json` carries `dev_build`, the Updates card explains that the copy runs from the build folder, the top-bar button and the toast's Install button are left out, and the tray menu shows the version as a disabled line.
   - A failed check (offline) is logged and stays silent.
 - **Offer.** A newer version shows a quiet notification, an **Install update <version>** item in the tray menu, and an **Install update** button in Settings → General. The tray publishes `version`, `update_version` and `update_state` in `status.json`; the window's button posts `WM_APP + 6` to the tray, which does all the work.
 - **Install, only on a click.**
